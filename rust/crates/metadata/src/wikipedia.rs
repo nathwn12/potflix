@@ -756,13 +756,30 @@ impl crate::resolver::Source for WikipediaSource {
             let code = if code.is_empty() { "unknown" } else { code };
             return Err(wiki_transient(format!("wikipedia api error {code}")));
         }
+        // The search hit: the first non-empty title, unless the query carries
+        // a known year and a hit's parenthesized year matches it -- then the
+        // year-matching hit wins, so a remake/adaptation page (`Dune (1984
+        // film)` ranking above `Dune (2021 film)`) is not the normal path for
+        // a year-known query. A year-less query keeps the first hit.
         let mut page = String::new();
+        let mut year_page = String::new();
         for hit in &search.query.search {
             let title = hit.title.trim();
-            if !title.is_empty() {
-                page = title.to_string();
-                break;
+            if title.is_empty() {
+                continue;
             }
+            if page.is_empty() {
+                page = title.to_string();
+            }
+            if year_page.is_empty()
+                && q.year > 0
+                && wiki_paren_year(title) == Some(q.year)
+            {
+                year_page = title.to_string();
+            }
+        }
+        if !year_page.is_empty() {
+            page = year_page;
         }
         if page.is_empty() {
             return Ok(None);

@@ -212,6 +212,39 @@ fn resolver_with_wiki(dir: &str, base: String) -> Resolver {
     })
 }
 
+/// Among several search hits, a known query year prefers the hit whose
+/// parenthesized year matches it (`Dune (1984 film)` ranking above
+/// `Dune (2021 film)` must not win a 2021 query); a year-less query keeps
+/// the first hit.
+#[test]
+fn wikipedia_prefers_year_matching_hit() {
+    const SEARCH: &str = r#"{"query":{"search":[{"title":"Dune (1984 film)"},{"title":"Dune (2021 film)"}]}}"#;
+    const DETAIL_2021: &str = r#"{"query":{"pages":{"12345":{"pageid":12345,"title":"Dune (2021 film)","extract":"Dune is a 2021 American epic science fiction film directed by Denis Villeneuve.","thumbnail":{"source":"https://upload.wikimedia.org/wikipedia/en/thumb/8/8e/Dune_poster.jpg","width":600,"height":900}}}}}"#;
+    const DETAIL_1984: &str = r#"{"query":{"pages":{"67890":{"pageid":67890,"title":"Dune (1984 film)","extract":"Dune is a 1984 American science fiction film directed by David Lynch.","thumbnail":{"source":"https://upload.wikimedia.org/wikipedia/en/thumb/8/8e/Dune_1984_poster.jpg","width":600,"height":900}}}}}"#;
+
+    let fake = WikiFake::with(SEARCH, DETAIL_2021);
+    let (_server, source) = fake.source();
+    let media = source
+        .find(&Cancel::background(), &movie_query("Dune", 2021))
+        .expect("Find")
+        .expect("expected media, got nil");
+    assert_eq!(media.title, "Dune");
+    assert_eq!(media.year, 2021, "the 2021 hit must win a 2021 query");
+    assert!(
+        fake.detail_query().contains("2021"),
+        "the detail call must address the 2021 page, query = {:?}",
+        fake.detail_query()
+    );
+
+    let fake = WikiFake::with(SEARCH, DETAIL_1984);
+    let (_server, source) = fake.source();
+    let media = source
+        .find(&Cancel::background(), &movie_query("Dune", 0))
+        .expect("Find")
+        .expect("expected media, got nil");
+    assert_eq!(media.year, 1984, "a year-less query keeps the first hit");
+}
+
 /// `TestWikipediaDefinitiveMiss`: every "no such page" shape is a definitive
 /// miss, never the transient sentinel.
 #[test]

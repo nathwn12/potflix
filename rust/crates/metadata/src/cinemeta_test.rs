@@ -315,8 +315,9 @@ fn cinemeta_year_prefers_beerus_over_2015_series() {
 
 /// A romaji query the token scorer cannot verify against the English display
 /// name: the title winner is a look-alike special, and the catalog's own top
-/// row (`Attack on Titan` for `Shingeki no Kyojin`) answers only because its
-/// episode table carries the wanted S2E1 -- a genuinely different show cannot.
+/// row (`Attack on Titan` for `Shingeki no Kyojin`) answers only because the
+/// query year corroborates it AND its episode table carries the wanted S2E1
+/// -- a genuinely different show cannot.
 #[test]
 fn cinemeta_series_catalog_top_row_answers_romaji_query() {
     let server = FakeServer::start(|req: &Request| {
@@ -342,6 +343,7 @@ fn cinemeta_series_catalog_top_row_answers_romaji_query() {
     let q = Query {
         kind: Kind::SERIES,
         title: "Shingeki no Kyojin".to_string(),
+        year: 2013,
         season: 2,
         episode: 1,
         ..Query::default()
@@ -370,6 +372,48 @@ fn cinemeta_series_catalog_top_row_answers_romaji_query() {
             && res.episode == "Beast Titan",
         "resolution = {res:?}"
     );
+}
+
+/// The other side of the year-corroborated top row: the same romaji setup
+/// with a year the top row does not carry answers nothing -- the fallback
+/// never fires on an unknown or differing year.
+#[test]
+fn cinemeta_series_top_row_needs_year_corroboration() {
+    for (label, year) in [("unknown year", 0), ("differing year", 2015)] {
+        let server = FakeServer::start(|req: &Request| {
+            if req.path.starts_with("/catalog/series/") {
+                return Response::json(
+                    r#"{"metas":[
+                        {"id":"tt2560140","name":"Attack on Titan","releaseInfo":"2013-2023"},
+                        {"id":"tt6811662","name":"Shingeki no Kyojin: Picture Drama","releaseInfo":"2013-2014"}
+                    ]}"#,
+                );
+            }
+            match req.path.as_str() {
+                "/meta/series/tt6811662.json" => Response::json(
+                    r#"{"meta":{"name":"Shingeki no Kyojin: Picture Drama","year":"2013","genre":["Animation"],"description":"Specials.","poster":"https://example.com/pd.jpg","videos":[{"name":"Day 1","season":1,"number":1,"overview":"x"}]}}"#,
+                ),
+                "/meta/series/tt2560140.json" => Response::json(
+                    r#"{"meta":{"name":"Attack on Titan","year":"2013","genre":["Animation"],"description":"The series.","poster":"https://example.com/aot.jpg","videos":[{"name":"To You, 2,000 Years in the Future","season":1,"number":1,"overview":"S1"},{"name":"Beast Titan","season":2,"number":1,"overview":"S2"}]}}"#,
+                ),
+                _ => Response::error(404, "not found"),
+            }
+        });
+        let source = CinemetaSource::new(server.url(), http_client());
+        let q = Query {
+            kind: Kind::SERIES,
+            title: "Shingeki no Kyojin".to_string(),
+            year,
+            season: 2,
+            episode: 1,
+            ..Query::default()
+        };
+        let found = source.find(&Cancel::background(), &q).expect("Find");
+        assert!(
+            found.is_none(),
+            "{label}: the top row must not answer without year corroboration, got {found:?}"
+        );
+    }
 }
 
 /// The other side of the top-row rule: a genuinely different show loses.

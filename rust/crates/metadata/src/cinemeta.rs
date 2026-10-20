@@ -305,19 +305,26 @@ impl CinemetaSource {
     }
 
     /// Candidate order: the title-ranked row first (when one clears the
-    /// floor), then the catalog's own top row. The top row is where a romaji
-    /// or junk-laden query lands on the work's other-named entry (token
-    /// scoring cannot see `Shingeki no Kyojin` in `Attack on Titan`); it must
-    /// prove itself by its own episode table, so a genuinely different show
-    /// still loses. A query with no episode number never takes the top-row
-    /// path.
+    /// floor), then the catalog's own top row -- but only when the query
+    /// carries a known year the top row corroborates. The top row is where a
+    /// romaji or junk-laden query lands on the work's other-named entry
+    /// (token scoring cannot see `Shingeki no Kyojin` in `Attack on Titan`);
+    /// the engine's rank plus the corroborating year are two independent keys,
+    /// so a genuinely different show still loses, and a query with an unknown
+    /// or differing year never takes the top-row path. A query with no
+    /// episode number never takes the top-row path either.
     fn find_series(&self, cancel: &Cancel, q: &Query) -> Result<Option<Media>, Error> {
         let entries = self.catalog(cancel, q, "series")?;
         let mut order: Vec<usize> = Vec::new();
         if let Some(i) = Self::pick_index(q, &entries) {
             order.push(i);
         }
-        if q.episode > 0 && order.first() != Some(&0) {
+        if q.episode > 0
+            && order.first() != Some(&0)
+            && q.year > 0
+            && let Some(top) = entries.first()
+            && release_year(&top.release_info) == q.year
+        {
             order.push(0);
         }
         for i in order {

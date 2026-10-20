@@ -296,7 +296,7 @@ fn has_field(pairs: &[(BrickField, BrickValue)], field: BrickField) -> bool {
 #[test]
 fn extract_tvmaze_episode_title_and_synopsis() {
     let q = series_query();
-    let pairs = extract_field_bricks(&tvmaze_media(), &q);
+    let pairs = extract_field_bricks(&tvmaze_media(), &q, Kind::SERIES);
     assert_eq!(
         value_text(&pairs, BrickField::EpisodeTitle).as_deref(),
         Some("Pilot")
@@ -348,7 +348,7 @@ fn extract_anilist_cover_title_and_no_synopsis() {
     absolute.absolute = true;
     absolute.season = 0;
     absolute.episode = 1;
-    let pairs = extract_field_bricks(&anilist_media(), &absolute);
+    let pairs = extract_field_bricks(&anilist_media(), &absolute, Kind::SERIES);
     assert_eq!(
         value_text(&pairs, BrickField::Artwork).as_deref(),
         Some("https://example.com/bb-anilist.jpg")
@@ -364,7 +364,7 @@ fn extract_anilist_cover_title_and_no_synopsis() {
     // The same media under a season query the table does not carry yields no
     // episode facts at all.
     let q = series_query();
-    let pairs = extract_field_bricks(&anilist_media(), &q);
+    let pairs = extract_field_bricks(&anilist_media(), &q, Kind::SERIES);
     assert!(!has_field(&pairs, BrickField::EpisodeTitle));
     assert!(!has_field(&pairs, BrickField::EpisodeSynopsis));
 }
@@ -374,7 +374,7 @@ fn extract_anilist_cover_title_and_no_synopsis() {
 #[test]
 fn extract_cinemeta_movie_synopsis_genres_length_year() {
     let q = movie_query();
-    let pairs = extract_field_bricks(&cinemeta_movie(), &q);
+    let pairs = extract_field_bricks(&cinemeta_movie(), &q, Kind::MOVIE);
     assert_eq!(
         value_text(&pairs, BrickField::MovieSynopsis).as_deref(),
         Some("Desert power.")
@@ -419,7 +419,7 @@ fn extract_wikipedia_movie_synopsis_only() {
         fetched_at: crate::timefmt::now_rfc3339(),
         ..Media::default()
     };
-    let pairs = extract_field_bricks(&media, &q);
+    let pairs = extract_field_bricks(&media, &q, Kind::MOVIE);
     assert_eq!(
         value_text(&pairs, BrickField::MovieSynopsis).as_deref(),
         Some("Desert power, encyclopedically.")
@@ -457,7 +457,7 @@ fn extract_justwatch_movie_fields() {
         fetched_at: crate::timefmt::now_rfc3339(),
         ..Media::default()
     };
-    let pairs = extract_field_bricks(&media, &q);
+    let pairs = extract_field_bricks(&media, &q, Kind::MOVIE);
     assert_eq!(
         value_text(&pairs, BrickField::MovieSynopsis).as_deref(),
         Some("Desert power, streaming.")
@@ -513,7 +513,7 @@ fn extract_tenrai_kitsu_episodate_fields() {
     let mut tenrai = base.clone();
     tenrai.source = "tenrai".to_string();
     tenrai.source_id = "1".to_string();
-    let pairs = extract_field_bricks(&tenrai, &q);
+    let pairs = extract_field_bricks(&tenrai, &q, Kind::SERIES);
     assert_eq!(
         value_text(&pairs, BrickField::EpisodeTitle).as_deref(),
         Some("Asteroid Blues")
@@ -536,7 +536,7 @@ fn extract_tenrai_kitsu_episodate_fields() {
     kitsu.source = "kitsu".to_string();
     kitsu.source_id = "1".to_string();
     kitsu.genres = String::new();
-    let pairs = extract_field_bricks(&kitsu, &q);
+    let pairs = extract_field_bricks(&kitsu, &q, Kind::SERIES);
     assert_eq!(
         value_text(&pairs, BrickField::EpisodeTitle).as_deref(),
         Some("Asteroid Blues")
@@ -559,7 +559,7 @@ fn extract_tenrai_kitsu_episodate_fields() {
         synopsis: String::new(),
         ..episode
     }];
-    let pairs = extract_field_bricks(&episodate, &q);
+    let pairs = extract_field_bricks(&episodate, &q, Kind::SERIES);
     assert_eq!(
         value_text(&pairs, BrickField::EpisodeTitle).as_deref(),
         Some("Asteroid Blues")
@@ -608,12 +608,12 @@ fn extract_absolute_vs_season_episode_key() {
     absolute.absolute = true;
     absolute.season = 0;
     absolute.episode = 51;
-    let pairs = extract_field_bricks(&media, &absolute);
+    let pairs = extract_field_bricks(&media, &absolute, Kind::SERIES);
     assert_eq!(
         value_text(&pairs, BrickField::EpisodeTitle).as_deref(),
         Some("Absolute Fifty-One")
     );
-    let pairs = extract_field_bricks(&media, &series_query());
+    let pairs = extract_field_bricks(&media, &series_query(), Kind::SERIES);
     assert_eq!(
         value_text(&pairs, BrickField::EpisodeTitle).as_deref(),
         Some("Pilot")
@@ -622,7 +622,7 @@ fn extract_absolute_vs_season_episode_key() {
     missing.absolute = true;
     missing.season = 0;
     missing.episode = 7;
-    let pairs = extract_field_bricks(&media, &missing);
+    let pairs = extract_field_bricks(&media, &missing, Kind::SERIES);
     assert!(
         !has_field(&pairs, BrickField::EpisodeTitle),
         "an uncarried absolute number yields no title"
@@ -631,8 +631,11 @@ fn extract_absolute_vs_season_episode_key() {
 
 /// Parity with `resolver::match_episode`: a provider that numbers a later
 /// season by its TOTAL number is still matchable (the season-aware absolute
-/// fallback), while a season-0 special never steals an episode of a season
-/// the table genuinely carries.
+/// fallback). The call below IS the resolver's function, so the fallback is
+/// pinned with a hard-coded expectation the old number-exact lookup failed.
+/// (The season-0 specials guard is resolver-inherited and covered by the
+/// resolver's own tests; a guard case yields `None` under both the old and
+/// the new lookup, so it cannot pin this wiring and is not repeated here.)
 #[test]
 fn extract_episode_matching_parity_with_resolver() {
     // Flattened table: S1 carries 1..2, S2's opener rides as number 3 with
@@ -669,53 +672,11 @@ fn extract_episode_matching_parity_with_resolver() {
     q.title = "Show".to_string();
     q.season = 2;
     q.episode = 1;
-    let pairs = extract_field_bricks(&flattened, &q);
+    let pairs = extract_field_bricks(&flattened, &q, Kind::SERIES);
     assert_eq!(
         value_text(&pairs, BrickField::EpisodeTitle).as_deref(),
         Some("Total Three"),
         "the resolver fallback must be wired into extraction"
-    );
-
-    // Specials guard: the table genuinely carries S3, so its season-0 row
-    // numbered like S3E1 must NOT bind.
-    let with_special = Media {
-        source: "tvmaze".to_string(),
-        source_id: "169".to_string(),
-        kind: Kind::SERIES,
-        title: "Show".to_string(),
-        year: 2008,
-        episodes: vec![
-            Episode {
-                season: 1,
-                number: 1,
-                title: "S1E1".to_string(),
-                ..Episode::default()
-            },
-            Episode {
-                season: 3,
-                number: 5,
-                title: "Real S3E5".to_string(),
-                ..Episode::default()
-            },
-            Episode {
-                season: 0,
-                number: 2,
-                title: "Special Two".to_string(),
-                ..Episode::default()
-            },
-        ],
-        ..Media::default()
-    };
-    let mut q = series_query();
-    q.title = "Show".to_string();
-    q.season = 3;
-    q.episode = 1;
-    // earlier = 1 (S1), total = 2; the season-0 row carries number 2 but the
-    // table has S3 rows, so the guard rejects it.
-    let pairs = extract_field_bricks(&with_special, &q);
-    assert!(
-        !has_field(&pairs, BrickField::EpisodeTitle),
-        "a season-0 special must not steal a carried season's episode"
     );
 }
 
@@ -920,16 +881,19 @@ fn fill_incapable_source_is_never_called_and_stays_absent() {
         report.missed
     );
     assert!(
-        report.unsupported.contains(&BrickField::Artwork),
-        "zero capable sources must report unsupported, unsupported={:?}",
-        report.unsupported
+        report.not_supplied.contains(&BrickField::Artwork),
+        "a matrix-covered but unsupplied field must report not_supplied, report={report:?}"
+    );
+    assert!(
+        report.unsupported.is_empty(),
+        "the matrix covers series artwork: nothing is unsupported, report={report:?}"
     );
     assert!(
         matches!(
             cache.lookup(&report.key, &EpisodeKey::None, BrickField::Artwork),
             BrickLookup::Absent
         ),
-        "zero capable sources must leave the slot Absent"
+        "zero capable supplied sources must leave the slot Absent"
     );
 }
 
@@ -970,9 +934,18 @@ fn fill_default_chain_names_all_map_and_unknown_is_skipped() {
         report.found.is_empty() && report.missed.is_empty() && report.errored.is_empty(),
         "an unknown source must change nothing, report={report:?}"
     );
+    assert_eq!(
+        report.unmapped,
+        vec!["bogus".to_string()],
+        "the foreign name must be reported once, report={report:?}"
+    );
     assert!(
-        !report.unsupported.is_empty(),
-        "with no known source every attempted field is unsupported"
+        !report.not_supplied.is_empty(),
+        "with no known source every attempted field is not_supplied"
+    );
+    assert!(
+        report.unsupported.is_empty(),
+        "the matrix covers every attempted field: nothing is unsupported"
     );
     assert_eq!(cache.brick_count(), 0);
 }
@@ -1018,7 +991,7 @@ fn extract_implausible_years_yield_nothing() {
     for year in [0, 1899, 2101] {
         let mut media = tvmaze_media();
         media.year = year;
-        let pairs = extract_field_bricks(&media, &q);
+        let pairs = extract_field_bricks(&media, &q, Kind::SERIES);
         assert!(
             !has_field(&pairs, BrickField::Year),
             "year {year} must yield no Year brick"
@@ -1027,7 +1000,7 @@ fn extract_implausible_years_yield_nothing() {
     for year in [1900, 2008, 2100] {
         let mut media = tvmaze_media();
         media.year = year;
-        let pairs = extract_field_bricks(&media, &q);
+        let pairs = extract_field_bricks(&media, &q, Kind::SERIES);
         match pairs.iter().find(|(f, _)| *f == BrickField::Year) {
             Some((_, BrickValue::Year { year: got })) => assert_eq!(*got, year),
             other => panic!("year {year} must yield a Year brick, got {other:?}"),
@@ -1108,8 +1081,8 @@ fn fill_miss_requires_a_consulted_capable_source() {
         "no capable source must record no miss"
     );
     assert!(
-        report.unsupported.contains(&BrickField::Artwork),
-        "no capable source must report unsupported"
+        report.not_supplied.contains(&BrickField::Artwork),
+        "a matrix-covered but unsupplied field must report not_supplied, report={report:?}"
     );
     assert!(matches!(
         cache.lookup(&report.key, &EpisodeKey::None, BrickField::Artwork),
@@ -1568,46 +1541,100 @@ fn fill_transient_error_leaves_absent_not_miss() {
     assert_eq!(cache.brick_count(), 0);
 }
 
-/// The provider's `find` is the match authority: the fill engine enforces
-/// only kind, never title or year. An alternate/romaji title the provider
-/// returned is accepted, and a year-differing answer from a provider that
-/// returned it is accepted too (year is a preference per `yearpref`, never a
-/// gate).
+/// The provider's `find` is the match authority for titles: an
+/// alternate/romaji title the provider returned is accepted -- the fill
+/// engine never compares titles. A KNOWN year mismatch is the one exception:
+/// the fill vetoes it as a different-work signal (stricter than the
+/// resolver's soft policy, because a Found brick never expires). Alone, the
+/// vetoed field stays `Absent` (never `Miss`, never a wrong Found); with a
+/// correct provider down the chain, the correct answer wins.
 #[test]
-fn fill_accepts_provider_matched_title_and_year() {
-    for (label, media) in [
-        (
-            "alternate title",
-            Media {
-                title: "Breaking Bad: Pilot Special".to_string(),
-                year: 2008,
-                ..tvmaze_media()
-            },
+fn fill_accepts_aliases_but_vetoes_known_year_mismatch() {
+    // Alternate title, same year: accepted.
+    let scratch = TempDir::new();
+    let mut cache = scratch_cache(&scratch, "brick-cache.json");
+    let q = series_query();
+    let alias = Media {
+        title: "Breaking Bad: Pilot Special".to_string(),
+        year: 2008,
+        ..tvmaze_media()
+    };
+    let sources = vec![FakeSource::with_media("tvmaze", alias).shared()];
+    let refs = fill_sources(&sources);
+    let report =
+        fill_entity(&mut cache, &q, Kind::SERIES, &refs, &Cancel::background()).expect("fill");
+    assert!(
+        report.found.contains(&BrickField::Artwork),
+        "a provider-matched alias must file artwork"
+    );
+    match cache.lookup(&report.key, &EpisodeKey::None, BrickField::Artwork) {
+        BrickLookup::Found(got) => assert_eq!(got.source, BrickSource::Tvmaze),
+        other => panic!("want Found artwork, got {other:?}"),
+    }
+
+    // Differing known year, no other provider: skipped, Absent -- not Miss,
+    // never a wrong Found.
+    let scratch = TempDir::new();
+    let mut cache = scratch_cache(&scratch, "brick-cache.json");
+    let remake = Media {
+        title: "Breaking Bad".to_string(),
+        year: 1999,
+        ..tvmaze_media()
+    };
+    let sources = vec![FakeSource::with_media("tvmaze", remake).shared()];
+    let refs = fill_sources(&sources);
+    let report =
+        fill_entity(&mut cache, &q, Kind::SERIES, &refs, &Cancel::background()).expect("fill");
+    assert!(
+        report.found.is_empty(),
+        "a year-mismatched answer must file nothing, found={:?}",
+        report.found
+    );
+    assert!(
+        !report.missed.contains(&BrickField::Artwork),
+        "a veto teaches nothing: no miss, missed={:?}",
+        report.missed
+    );
+    assert!(
+        matches!(
+            cache.lookup(&report.key, &EpisodeKey::None, BrickField::Artwork),
+            BrickLookup::Absent
         ),
-        (
-            "differing year",
-            Media {
-                title: "Breaking Bad".to_string(),
-                year: 1999,
-                ..tvmaze_media()
-            },
-        ),
-    ] {
-        let scratch = TempDir::new();
-        let mut cache = scratch_cache(&scratch, "brick-cache.json");
-        let q = series_query();
-        let sources = vec![FakeSource::with_media("tvmaze", media).shared()];
-        let refs = fill_sources(&sources);
-        let report =
-            fill_entity(&mut cache, &q, Kind::SERIES, &refs, &Cancel::background()).expect("fill");
-        assert!(
-            report.found.contains(&BrickField::Artwork),
-            "{label}: a provider-matched answer must file artwork"
-        );
-        match cache.lookup(&report.key, &EpisodeKey::None, BrickField::Artwork) {
-            BrickLookup::Found(got) => assert_eq!(got.source, BrickSource::Tvmaze),
-            other => panic!("{label}: want Found artwork, got {other:?}"),
+        "a vetoed-only field stays Absent"
+    );
+    assert_eq!(cache.brick_count(), 0);
+
+    // Differing known year with a correct provider down the chain: the
+    // correct answer wins.
+    let scratch = TempDir::new();
+    let mut cache = scratch_cache(&scratch, "brick-cache.json");
+    let remake = Media {
+        title: "Breaking Bad".to_string(),
+        year: 1999,
+        artwork: "https://example.com/bb-remake.jpg".to_string(),
+        ..tvmaze_media()
+    };
+    let mut correct = tvmaze_media();
+    correct.source = "tenrai".to_string();
+    correct.source_id = "1".to_string();
+    let sources = vec![
+        FakeSource::with_media("tvmaze", remake).shared(),
+        FakeSource::with_media("tenrai", correct).shared(),
+    ];
+    let refs = fill_sources(&sources);
+    let report =
+        fill_entity(&mut cache, &q, Kind::SERIES, &refs, &Cancel::background()).expect("fill");
+    match cache.lookup(&report.key, &EpisodeKey::None, BrickField::Artwork) {
+        BrickLookup::Found(got) => {
+            assert_eq!(got.source, BrickSource::Tenrai);
+            assert_eq!(
+                got.value,
+                BrickValue::Text {
+                    text: "https://example.com/bb-poster.jpg".to_string(),
+                }
+            );
         }
+        other => panic!("the correct provider must win after the veto, got {other:?}"),
     }
 }
 
@@ -1690,6 +1717,185 @@ fn fill_rejects_unresolved_kind() {
         "unexpected error: {err}"
     );
     assert_eq!(cache.brick_count(), 0, "a rejected fill stores nothing");
+}
+
+/// An answer whose provider ID contradicts the bucket's stored identity is
+/// skipped as another entity's record: the stored brick survives, and the
+/// vetoed field stays `Absent` (a veto teaches nothing, so no `Miss`).
+#[test]
+fn fill_skips_id_conflicting_answers_and_keeps_stored_bricks() {
+    let scratch = TempDir::new();
+    let mut cache = scratch_cache(&scratch, "brick-cache.json");
+    let q = series_query();
+    // Seed the bucket: every field Found, tvmaze=169 absorbed into the
+    // stored identity. Then clear Year so exactly one slot is open.
+    let seed = vec![FakeSource::with_media("tvmaze", tvmaze_media()).shared()];
+    let refs = fill_sources(&seed);
+    fill_entity(&mut cache, &q, Kind::SERIES, &refs, &Cancel::background()).expect("seed fill");
+    assert!(
+        cache
+            .clear_field(&EntityKey::new("series|breaking bad|2008"), &EpisodeKey::None, BrickField::Year)
+            .expect("clear year")
+    );
+    let stored = cache
+        .stored_entity(&EntityKey::new("series|breaking bad|2008"))
+        .expect("bucket holds an identity");
+    assert_eq!(stored.tvmaze, Some(169));
+
+    // Same title, year and kind -- but another show's tvmaze id.
+    let mut impostor = tvmaze_media();
+    impostor.source_id = "999".to_string();
+    let sources = vec![FakeSource::with_media("tvmaze", impostor).shared()];
+    let refs = fill_sources(&sources);
+    let report =
+        fill_entity(&mut cache, &q, Kind::SERIES, &refs, &Cancel::background()).expect("fill");
+    assert!(
+        report.found.is_empty() && report.missed.is_empty() && report.errored.is_empty(),
+        "a conflicted answer must change nothing, report={report:?}"
+    );
+    assert!(
+        matches!(
+            cache.lookup(
+                &report.key,
+                &EpisodeKey::None,
+                BrickField::Year
+            ),
+            BrickLookup::Absent
+        ),
+        "the vetoed Year must stay Absent, never Miss, never Found"
+    );
+    match cache.lookup(&report.key, &EpisodeKey::None, BrickField::Artwork) {
+        BrickLookup::Found(got) => {
+            assert_eq!(got.source, BrickSource::Tvmaze);
+            assert_eq!(
+                got.value,
+                BrickValue::Text {
+                    text: "https://example.com/bb-poster.jpg".to_string(),
+                }
+            );
+        }
+        other => panic!("the stored artwork must survive the conflict, got {other:?}"),
+    }
+}
+
+/// The resolved kind reaches `provider.find`: a `q.kind == UNKNOWN` query
+/// filled as `MOVIE` shows providers `MOVIE`, so a series-first provider
+/// never answers with a series record the engine would only reject.
+#[test]
+fn fill_passes_resolved_kind_to_providers() {
+    use std::sync::Mutex;
+
+    struct KindRecordingSource {
+        name: String,
+        seen: std::sync::Arc<Mutex<Vec<Kind>>>,
+        media: Option<Media>,
+    }
+
+    impl Source for KindRecordingSource {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn find(&self, _cancel: &Cancel, q: &Query) -> Result<Option<Media>, crate::Error> {
+            self.seen.lock().unwrap().push(q.kind);
+            Ok(self.media.clone())
+        }
+    }
+
+    let scratch = TempDir::new();
+    let mut cache = scratch_cache(&scratch, "brick-cache.json");
+    let mut q = movie_query();
+    q.kind = Kind::UNKNOWN;
+    let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let rec = KindRecordingSource {
+        name: "cinemeta".to_string(),
+        seen: std::sync::Arc::clone(&seen),
+        media: Some(cinemeta_movie()),
+    };
+    let rec: std::sync::Arc<dyn Source> = std::sync::Arc::new(rec);
+    let refs = vec![rec.as_ref()];
+    let report =
+        fill_entity(&mut cache, &q, Kind::MOVIE, &refs, &Cancel::background()).expect("fill");
+    let seen = seen.lock().unwrap();
+    assert!(
+        !seen.is_empty(),
+        "the provider must have been called"
+    );
+    assert!(
+        seen.iter().all(|kind| *kind == Kind::MOVIE),
+        "every find call must see the resolved MOVIE kind, saw={seen:?}"
+    );
+    assert!(
+        report.found.contains(&BrickField::MovieSynopsis),
+        "the movie fill must file, found={:?}",
+        report.found
+    );
+}
+
+/// Extraction chooses the synopsis slot from the resolved kind, never from
+/// the answer or the query: resolved `SERIES` with `q.kind == MOVIE` yields
+/// `ShowSynopsis`, not `MovieSynopsis`.
+#[test]
+fn extract_uses_resolved_kind_for_synopsis_slot() {
+    let mut q = series_query();
+    q.kind = Kind::MOVIE;
+    let pairs = extract_field_bricks(&tvmaze_media(), &q, Kind::SERIES);
+    assert!(
+        has_field(&pairs, BrickField::ShowSynopsis),
+        "resolved SERIES must yield a show synopsis"
+    );
+    assert!(
+        !has_field(&pairs, BrickField::MovieSynopsis),
+        "resolved SERIES must never yield a movie synopsis"
+    );
+    let pairs = extract_field_bricks(&cinemeta_movie(), &movie_query(), Kind::MOVIE);
+    assert!(has_field(&pairs, BrickField::MovieSynopsis));
+    assert!(!has_field(&pairs, BrickField::ShowSynopsis));
+}
+
+/// The three-way diagnostic split: `not_supplied` (matrix covers, chain
+/// lacks), `unmapped` (foreign supplied names), `unsupported` (nothing in
+/// the matrix could answer). A movie query supplied only `bogus` + `tvmaze`
+/// (mapped but movie-incapable) reports every applicable field
+/// `not_supplied`, the foreign name once, and nothing `unsupported`.
+#[test]
+fn fill_reports_not_supplied_unmapped_and_unsupported() {
+    let scratch = TempDir::new();
+    let mut cache = scratch_cache(&scratch, "brick-cache.json");
+    let q = movie_query();
+    let sources = vec![
+        FakeSource::new("bogus").shared(),
+        FakeSource::new("tvmaze").shared(),
+    ];
+    let refs = fill_sources(&sources);
+    let report =
+        fill_entity(&mut cache, &q, Kind::MOVIE, &refs, &Cancel::background()).expect("fill");
+    for field in [
+        BrickField::Artwork,
+        BrickField::MovieSynopsis,
+        BrickField::Genres,
+        BrickField::Length,
+        BrickField::Year,
+    ] {
+        assert!(
+            report.not_supplied.contains(&field),
+            "movie {field:?} is matrix-covered but unsupplied, report={report:?}"
+        );
+    }
+    assert_eq!(
+        report.unmapped,
+        vec!["bogus".to_string()],
+        "report={report:?}"
+    );
+    assert!(
+        report.unsupported.is_empty(),
+        "the matrix covers every applicable movie field, report={report:?}"
+    );
+    assert!(
+        report.found.is_empty() && report.missed.is_empty() && report.errored.is_empty(),
+        "report={report:?}"
+    );
+    assert_eq!(cache.brick_count(), 0);
 }
 
 /// An answer whose table lacks the requested episode files entity facts but
@@ -1916,30 +2122,33 @@ fn fill_insert_many_is_all_or_nothing() {
     );
 }
 
-/// An all-refused batch saves nothing: a Miss over a Found slot carrying no
-/// new IDs is `Ok(0)` even while saving is impossible (unlike `insert`, which
-/// can `Err` having changed nothing, `insert_many` never fails when there is
-/// nothing to persist).
+/// An all-refused batch saves nothing and absorbs nothing: a Miss over a
+/// Found slot carrying NEW external IDs is `Ok(0)` even while saving is
+/// impossible (unlike `insert`, which can `Err` having changed nothing,
+/// `insert_many` never fails when there is nothing to persist) -- and the
+/// refused IDs never land in the stored identity.
 #[test]
 fn fill_insert_many_all_refused_needs_no_save() {
     let scratch = TempDir::new();
     let path = PathBuf::from(scratch.child("brick-cache.json"));
-    let entity = EntityKey {
+    let bare = EntityKey::new("series|breaking bad|2008");
+    let informed = EntityKey {
         id: "series|breaking bad|2008".to_string(),
         tvmaze: Some(169),
+        imdb: Some("tt0903747".to_string()),
         ..EntityKey::default()
     };
     let mut cache = BrickCache::empty_at(path.clone());
     cache
         .insert(
-            &entity,
+            &bare,
             Brick::found(
                 BrickField::Artwork,
                 BrickValue::Text {
                     text: "https://example.com/poster.jpg".to_string(),
                 },
                 BrickSource::Tvmaze,
-                entity.clone(),
+                bare.clone(),
                 EpisodeKey::None,
                 "tvmaze show 169 poster",
             ),
@@ -1953,7 +2162,7 @@ fn fill_insert_many_all_refused_needs_no_save() {
     let refused = vec![Brick::miss(
         BrickField::Artwork,
         BrickSource::Tvmaze,
-        entity.clone(),
+        informed.clone(),
         EpisodeKey::None,
         "tvmaze show 169 still has no other poster",
     )];
@@ -1963,7 +2172,7 @@ fn fill_insert_many_all_refused_needs_no_save() {
             .expect("an all-refused batch is Ok even while saving is impossible"),
         0
     );
-    match cache.lookup(&entity, &EpisodeKey::None, BrickField::Artwork) {
+    match cache.lookup(&bare, &EpisodeKey::None, BrickField::Artwork) {
         BrickLookup::Found(got) => assert_eq!(
             got.value,
             BrickValue::Text {
@@ -1984,9 +2193,23 @@ fn fill_insert_many_all_refused_needs_no_save() {
         "temp files left behind: {leftovers:?}"
     );
 
-    // Repair: the file is byte-identical, memory agrees, reload agrees.
+    // Repair: the file is byte-identical, the refused IDs never landed --
+    // persisting the memory and reloading still shows the bare identity.
     std::fs::remove_dir(&path).expect("remove blocking dir");
     std::fs::write(&path, &before).expect("restore seeded file");
+    cache.save().expect("save after repair");
+    let raw: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read file")).expect("decode file");
+    let stored = &raw["entities"][0]["entity"];
+    assert_eq!(stored["id"], "series|breaking bad|2008");
+    assert!(
+        stored.get("tvmaze").is_none(),
+        "refused IDs leaked tvmaze: {stored}"
+    );
+    assert!(
+        stored.get("imdb").is_none(),
+        "refused IDs leaked imdb: {stored}"
+    );
     let reloaded = crate::brick::load_from(&path).expect("load_from");
     assert_eq!(reloaded.brick_count(), 1);
 }

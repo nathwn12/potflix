@@ -1,5 +1,6 @@
-//! `metadata::brick` -- T7-1 persistent per-field brick model, provenance,
-//! identity, and cache.
+//! `metadata::brick` -- persistent per-field brick model, provenance,
+//! identity, and cache (frozen SPEC: `design/T7-BRICK-CACHE.md`, as amended
+//! through T7-2-D).
 //!
 //! A *brick* is one cached fact about one field of one entity (a show, a
 //! season, a movie, or one episode): the artwork URL, an episode title, a
@@ -65,6 +66,7 @@
 //!   [`BrickCache::insert`]/[`BrickCache::insert_many`] (key-checked,
 //!   miss-never-evicts-found, manual beats provider),
 //!   [`BrickCache::lookup`]/[`lookup_at`] (`Found`/`MissWaiting`/`RetryDue`/`Absent`),
+//!   the read-only [`BrickCache::stored_entity`] identity accessor,
 //!   the per-field [`capacity`]/[`priority`] order plus [`extract_field_bricks`], the
 //!   [`fill_entity`] pass and its [`FillReport`],
 //!   the force-clear [`BrickCache::clear_entity`]/[`clear_episode`]/[`clear_field`],
@@ -89,7 +91,8 @@
 //! did not supply are skipped, never fetched; incapable supplied sources are
 //! skipped before any call and never count toward the miss rule.
 //!
-//! Policy order (pre-filter; `priority` drops the incapable entries):
+//! Policy order (every entry is capable for its slot; the capability check
+//! in the [`fill_entity`] walk stays as defense in depth):
 //!
 //! * artwork series: AniList, TVmaze, Tenrai, Kitsu, Cinemeta, Episodate,
 //!   Bangumi, LiveChart.me, ANN.
@@ -752,6 +755,18 @@ impl BrickCache {
         self.entities.values().map(|entry| entry.bricks.len()).sum()
     }
 
+    /// The stored identity for one entity bucket, if the cache holds it:
+    /// the canonical id plus every external ID learned so far. Read-only;
+    /// [`fill_entity`] compares it against a provider answer for the ID
+    /// conflict veto without touching storage.
+    ///
+    /// [`fill_entity`]: crate::brick::fill_entity
+    pub fn stored_entity(&self, entity: &EntityKey) -> Option<EntityKey> {
+        self.entities
+            .get(&entity.key())
+            .map(|entry| entry.entity.clone())
+    }
+
     /// Writes the cache to its path, atomically: marshal, stage a
     /// uniquely-named temp file beside the target, rename over it. A failed
     /// write or rename removes the temp file and leaves the previous file
@@ -878,13 +893,12 @@ impl BrickCache {
     /// checks as [`insert`]: an empty entity id, a scope mismatch, a shape
     /// mismatch, or an empty Found value fails the WHOLE batch with nothing
     /// applied; a Miss over a Found slot, or a provider Found over a Manual
-    /// Found, is refused per-brick exactly as in [`insert`] (external IDs
-    /// still absorbed when they teach something new, folded into the one
-    /// save). Returns how many bricks stored a slot. A batch that changed
-    /// nothing -- every brick refused and no new IDs learned -- saves nothing
-    /// and returns `Ok(0)`, even when saving is impossible. A failed save
-    /// rolls every in-memory change back, so memory always matches the last
-    /// successful save; an empty batch stores nothing and saves nothing
+    /// Found, is refused per-brick exactly as in [`insert`] -- except the
+    /// refused brick teaches nothing here (no ID absorption): a batch of only
+    /// refusals changes nothing, saves nothing, and returns `Ok(0)` even when
+    /// saving is impossible. Returns how many bricks stored a slot. A failed
+    /// save rolls every in-memory change back, so memory always matches the
+    /// last successful save; an empty batch stores nothing and saves nothing
     /// (`Ok(0)`).
     ///
     /// [`insert`]: BrickCache::insert
@@ -903,7 +917,6 @@ impl BrickCache {
         }
         let backup = self.entities.clone();
         let mut stored = 0usize;
-        let mut changed = false;
         for brick in bricks {
             let bucket = brick.entity.key();
             let slot = (brick.episode, brick.field);
@@ -925,14 +938,9 @@ impl BrickCache {
                     && brick.status == BrickStatus::Found
                     && brick.source != BrickSource::Manual;
                 if miss_over_found || provider_over_manual {
-                    if let Some(entry) = self.entities.get_mut(&bucket) {
-                        let mut next = entry.entity.clone();
-                        next.absorb(&brick.entity);
-                        if next != entry.entity {
-                            entry.entity = next;
-                            changed = true;
-                        }
-                    }
+                    // Refused: the value stands and the brick teaches nothing
+                    // (no ID absorption -- an all-refused batch is a pure
+                    // no-op that never touches the file).
                     continue;
                 }
             }
@@ -954,9 +962,8 @@ impl BrickCache {
                 entry.bricks.push(brick);
             }
             stored += 1;
-            changed = true;
         }
-        if !changed {
+        if stored == 0 {
             return Ok(0);
         }
         match self.save() {
@@ -1302,11 +1309,12 @@ fn is_plausible_year(year: i32) -> bool {
 ///   function, not a copy). An episode the table does not carry yields
 ///   nothing. AniList episode rows carry titles only (their synopsis is
 ///   empty), so they naturally yield no synopsis.
-/// * show vs movie synopsis: chosen by kind exactly as the resolver serves
-///   it (a movie answer or a movie query takes `MovieSynopsis`); a series
-///   synopsis never lands in `movie_synopsis` or vice versa -- and
-///   [`fill_entity`] additionally skips any answer whose `kind` contradicts
-///   the resolved kind, so a wrong-kind synopsis never reaches this choice.
+/// * show vs movie synopsis: chosen by the RESOLVED `kind`, never by the
+///   answer or the query (`SERIES` takes `ShowSynopsis`, `MOVIE` takes
+///   `MovieSynopsis`); a series synopsis never lands in `movie_synopsis` or
+///   vice versa -- and [`fill_entity`] additionally skips any answer whose
+///   `kind` contradicts the resolved kind, so a wrong-kind synopsis never
+///   reaches this choice.
 /// * genres: `media.genres` split on the `join_genres` middle-dot
 ///   separator, blank names dropped; empty when the provider carries none.
 /// * length: `media.length` when non-empty.
@@ -1315,7 +1323,11 @@ fn is_plausible_year(year: i32) -> bool {
 ///
 /// Provenance is attached at insert time by [`fill_entity`], where the winning
 /// source is known.
-pub fn extract_field_bricks(media: &Media, q: &Query) -> Vec<(BrickField, BrickValue)> {
+pub fn extract_field_bricks(
+    media: &Media,
+    q: &Query,
+    kind: Kind,
+) -> Vec<(BrickField, BrickValue)> {
     let mut out = Vec::new();
     let artwork = media.artwork.trim();
     if !artwork.is_empty() {
@@ -1348,7 +1360,7 @@ pub fn extract_field_bricks(media: &Media, q: &Query) -> Vec<(BrickField, BrickV
     }
     let synopsis = media.synopsis.trim();
     if !synopsis.is_empty() {
-        let field = if media.kind == Kind::MOVIE || q.kind == Kind::MOVIE {
+        let field = if kind == Kind::MOVIE {
             BrickField::MovieSynopsis
         } else {
             BrickField::ShowSynopsis
@@ -1502,6 +1514,62 @@ fn is_capable(source: BrickSource, kind: Kind, field: BrickField) -> bool {
     capacity(source, kind).contains(&field)
 }
 
+/// Every provider-side source: the eleven live providers plus the reserved
+/// `Tmdb` and the hand `Manual` slots (both answer nothing for every kind).
+/// [`FillReport`] diagnoses against this set: a field no entry can answer is
+/// `unsupported`; a field some entry can answer but no supplied source covers
+/// is `not_supplied`.
+///
+/// [`FillReport`]: crate::brick::FillReport
+const ALL_SOURCES: &[BrickSource] = &[
+    BrickSource::Anilist,
+    BrickSource::Tvmaze,
+    BrickSource::Tenrai,
+    BrickSource::Kitsu,
+    BrickSource::Cinemeta,
+    BrickSource::Wikipedia,
+    BrickSource::JustWatch,
+    BrickSource::Episodate,
+    BrickSource::Bangumi,
+    BrickSource::Livechart,
+    BrickSource::Ann,
+    BrickSource::Tmdb,
+    BrickSource::Manual,
+];
+
+/// Whether any provider-side source can answer `field` for `kind`.
+fn matrix_capable(kind: Kind, field: BrickField) -> bool {
+    ALL_SOURCES
+        .iter()
+        .any(|source| is_capable(*source, kind, field))
+}
+
+/// Whether a provider answer belongs to a different entity than the bucket
+/// already holds: the stored identity names an ID for a slot this provider
+/// maps to (`tvmaze`, `anilist`, `imdb` -- exactly the [`with_media_id`]
+/// mapping, reused here rather than re-parsed) and the answer's ID
+/// contradicts it. Slot-less providers never conflict, and an empty bucket
+/// never conflicts. A conflicted answer is about another entity, so it
+/// teaches nothing about the field: skipped without counting toward the miss
+/// rule, and the stored brick survives.
+///
+/// [`with_media_id`]: crate::brick::with_media_id
+fn id_conflicts(stored: Option<&EntityKey>, target: &EntityKey, media: &Media) -> bool {
+    let Some(stored) = stored else {
+        return false;
+    };
+    let candidate = with_media_id(target, media);
+    (stored.tvmaze.is_some()
+        && candidate.tvmaze.is_some()
+        && stored.tvmaze != candidate.tvmaze)
+        || (stored.anilist.is_some()
+            && candidate.anilist.is_some()
+            && stored.anilist != candidate.anilist)
+        || (stored.imdb.is_some()
+            && candidate.imdb.is_some()
+            && stored.imdb != candidate.imdb)
+}
+
 /// Artwork policy for series/anime queries.
 static POLICY_ARTWORK_SERIES: &[BrickSource] = &[
     BrickSource::Anilist,
@@ -1653,10 +1721,18 @@ pub struct FillReport {
     /// errored and a lower-priority one later won the field, the field is
     /// both `found` and `errored`, so the outage stays visible.
     pub errored: Vec<(BrickField, String)>,
-    /// Fields with zero capable supplied sources: nothing was attempted,
-    /// nothing stored, no retry clock. T7-3 uses this to diagnose a
-    /// misconfigured chain rather than retrying blindly.
+    /// Fields with zero capable supplied sources AND zero capable providers in
+    /// the matrix: nothing exists that could answer the slot.
     pub unsupported: Vec<BrickField>,
+    /// Fields with at least one capable provider in the matrix but none
+    /// supplied: the chain is misconfigured, not the build.
+    pub not_supplied: Vec<BrickField>,
+    /// Supplied source names no [`BrickSource`] maps (foreign names, the
+    /// reserved `"tmdb"`, the hand `"manual"`): never consulted, never
+    /// counted. One entry per name, in supplied order.
+    ///
+    /// [`BrickSource`]: crate::brick::BrickSource
+    pub unmapped: Vec<String>,
 }
 
 /// The fields one fill pass attempts for a RESOLVED kind: entity-level facts
@@ -1722,10 +1798,13 @@ fn provenance_for(
 /// `kind` is the caller's RESOLVED kind (`SERIES` or `MOVIE`; `UNKNOWN` is
 /// rejected with an error -- the caller resolves it before calling). The
 /// entity-key prefix, the applicable fields, and every capability check derive
-/// from it, never from `q.kind` (which may still be `UNKNOWN`). The episode
-/// key is derived inside from `q` ([`episode_key_for_query`], forced to
-/// `None` for movies): callers never supply it, so no caller can file an
-/// `S00` slot or place an episode under another season's address.
+/// from it, never from `q.kind` (which may still be `UNKNOWN`). Providers see
+/// it too: the fill calls `find` with `Query { kind, ..q }`, so a
+/// series-first provider never answers a resolved movie fill with a series
+/// record (which the engine would only reject and miss). The episode key is
+/// derived inside from `q` ([`episode_key_for_query`], forced to `None` for
+/// movies): callers never supply it, so no caller can file an `S00` slot or
+/// place an episode under another season's address.
 ///
 /// * A slot holding `Found` or a fresh miss (`MissWaiting`) is skipped: no
 ///   fetch, no write.
@@ -1738,17 +1817,24 @@ fn provenance_for(
 ///   become a 24 h Miss. One answer per provider is fetched per pass (a local
 ///   map): a provider backing several fields is still called at most once.
 /// * `Ok(Some(media))`: the provider's own `find` is the match authority for
-///   title and year -- the fill engine second-guesses neither (year is a
-///   preference per `yearpref`, never a gate; romaji, localised and alternate
-///   titles are the provider matcher's business). The engine enforces only
-///   kind: an answer whose `media.kind` contradicts the resolved kind is a
-///   definitive skip to the next provider, so a same-title answer of the
-///   opposite kind can never file artwork, genres, length, year, or a
-///   wrong-kind synopsis into the bucket. Otherwise only the requested field
-///   is extracted ([`extract_field_bricks`]); a media without the field is a
-///   definitive skip. A win inserts `Found` keyed to the TARGET identity
-///   (with the provider's IDs absorbed via [`with_media_id`]), never the
-///   provider's.
+///   titles -- the fill engine second-guesses neither romaji, localised nor
+///   alternate titles. Three narrow vetoes protect the permanent Found brick:
+///   a `media.kind` contradicting the resolved kind is skipped (a same-title
+///   opposite-kind answer can never file artwork, genres, length, year, or a
+///   wrong-kind synopsis); a KNOWN year mismatch (`q.year > 0 &&
+///   media.year > 0`, differing) is skipped as a different-work signal; an
+///   answer whose provider ID contradicts the bucket's stored identity
+///   ([`id_conflicts`]) is skipped as another entity's record. The year veto
+///   is deliberately stricter than the resolver's soft "year never gates"
+///   policy: the resolver serves a transient card, while a Found brick never
+///   expires -- a wrong fact cached is worse than a fact deferred, and a
+///   vetoed provider falls through rather than caching it. Vetoed answers
+///   teach nothing about the field, so they never count toward the miss rule
+///   (a vetoed-only field stays `Absent`, never `Miss`). Otherwise only the
+///   requested field is extracted ([`extract_field_bricks`], synopsis slot
+///   chosen by the resolved kind); a media without the field is a definitive
+///   skip. A win inserts `Found` keyed to the TARGET identity (with the
+///   provider's IDs absorbed via [`with_media_id`]), never the provider's.
 /// * `Ok(None)` or a media without the field simply continues down the list.
 /// * `Err` records the error and continues -- and inserts NO miss for that
 ///   field: a transient failure must never become a 24 h miss. An error is
@@ -1758,8 +1844,11 @@ fn provenance_for(
 ///   one consulted CAPABLE source answered definitively (`consulted_capable
 ///   >= 1` with every answer definitive); any error with no win leaves the
 ///   slot `Absent` so the next pass retries it.
-/// * A field with zero capable supplied sources is reported `unsupported`:
-///   nothing attempted, nothing stored, no retry clock.
+/// * A field no matrix source can answer is reported `unsupported`; a field
+///   the matrix covers but no supplied source does is `not_supplied`;
+///   supplied names no source maps are reported once in `unmapped`. Nothing
+///   is attempted, stored, or clocked for any of the three -- T7-3 tells a
+///   build gap from a misconfigured chain instead of retrying blindly.
 ///
 /// All bricks of the pass persist through one [`BrickCache::insert_many`]
 /// call: one save, all-or-nothing. `sources` is the caller's provider set
@@ -1787,17 +1876,30 @@ pub fn fill_entity(
     } else {
         episode_key_for_query(q)
     };
+    // The query the providers see: the caller's resolved kind over the
+    // query's own addressing, so a series-first provider never answers a
+    // resolved movie fill with a series record.
+    let qk = Query { kind, ..q.clone() };
     let mut report = FillReport {
         key: target.clone(),
         ..FillReport::default()
     };
     let mut fetched: HashMap<String, Result<Option<Media>, String>> = HashMap::new();
     let mut bricks: Vec<Brick> = Vec::new();
+    // The bucket's stored identity, read once: the ID-conflict veto compares
+    // every answer against it. Nothing is stored mid-pass (one batch at the
+    // end), so it cannot go stale under us.
+    let stored_ids = cache.stored_entity(&target);
     // The supplied chain mapped once through `for_provider`: unknown names
-    // are skipped here, never consulted, never counted.
+    // are reported in `unmapped`, never consulted, never counted.
     let mut supplied: Vec<(BrickSource, &dyn Source)> = Vec::new();
+    let mut unmapped: Vec<String> = Vec::new();
     for source in sources.iter() {
         let Some(mapped) = BrickSource::for_provider(source.name()) else {
+            let name = source.name().to_string();
+            if !unmapped.contains(&name) {
+                unmapped.push(name);
+            }
             continue;
         };
         if supplied.iter().any(|(have, _)| *have == mapped) {
@@ -1805,6 +1907,7 @@ pub fn fill_entity(
         }
         supplied.push((mapped, *source));
     }
+    report.unmapped = unmapped;
     for field in applicable_fields(kind, episode_key) {
         let episode = brick_episode_for(field, episode_key);
         match cache.lookup(&target, &episode, field) {
@@ -1817,7 +1920,11 @@ pub fn fill_entity(
             .filter(|(source, _)| is_capable(*source, kind, field))
             .collect();
         if capable.is_empty() {
-            report.unsupported.push(field);
+            if matrix_capable(kind, field) {
+                report.not_supplied.push(field);
+            } else {
+                report.unsupported.push(field);
+            }
             continue;
         }
         // Policy order first, then any supplied capable source the policy
@@ -1839,15 +1946,11 @@ pub fn fill_entity(
         let mut errors: Vec<String> = Vec::new();
         let mut won: Option<Brick> = None;
         for (want, provider) in &order {
-            if miss_source.is_none() {
-                miss_source = Some(*want);
-            }
-            consulted_capable += 1;
             let name = provider.name().to_string();
             let answer =
                 fetched
                     .entry(name.clone())
-                    .or_insert_with(|| match provider.find(cancel, q) {
+                    .or_insert_with(|| match provider.find(cancel, &qk) {
                         Ok(media) => Ok(media),
                         Err(err) => Err(err.to_string()),
                     });
@@ -1856,17 +1959,44 @@ pub fn fill_entity(
                     errors.push(format!("{name}: {message}"));
                     continue;
                 }
-                Ok(None) => continue,
+                Ok(None) => {
+                    if miss_source.is_none() {
+                        miss_source = Some(*want);
+                    }
+                    consulted_capable += 1;
+                    continue;
+                }
                 Ok(Some(media)) => media,
             };
             if media.kind != kind {
+                if miss_source.is_none() {
+                    miss_source = Some(*want);
+                }
+                consulted_capable += 1;
                 continue;
             }
-            let value = extract_field_bricks(media, q)
+            // Known year mismatch: a different-work signal, not a fact about
+            // this field. Falls through without counting, so a vetoed-only
+            // field stays `Absent`, never `Miss`.
+            if q.year > 0 && media.year > 0 && media.year != q.year {
+                continue;
+            }
+            // ID conflict: the answer belongs to another entity. Falls
+            // through without counting; the stored brick survives.
+            if id_conflicts(stored_ids.as_ref(), &target, media) {
+                continue;
+            }
+            let value = extract_field_bricks(media, &qk, kind)
                 .into_iter()
                 .find(|(found_field, _)| *found_field == field)
                 .map(|(_, value)| value);
-            let Some(value) = value else { continue };
+            let Some(value) = value else {
+                if miss_source.is_none() {
+                    miss_source = Some(*want);
+                }
+                consulted_capable += 1;
+                continue;
+            };
             won = Some(Brick::found(
                 field,
                 value,
