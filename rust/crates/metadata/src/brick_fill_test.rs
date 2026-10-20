@@ -1229,49 +1229,66 @@ fn fill_never_files_an_s00_slot() {
     assert!(report.found.contains(&BrickField::ShowSynopsis));
 }
 
-/// The episode key derives from the resolved-kind query: a resolved MOVIE
-/// fill with `q.kind == UNKNOWN` (and season/episode addressing on the
-/// query) still files under `EpisodeKey::None` -- no episode slots are
-/// attempted and no season-scoped brick is filed.
+/// The episode key derives from the resolved-kind query (`qk`), not the
+/// original `q`: a resolved SERIES fill with `q.kind == MOVIE` (and
+/// season/episode addressing on the query) files the episode title under
+/// `Episode{3,1}`, not under `None`. Revert-check: deriving from the original
+/// `q` yields `EpisodeKey::None` for a MOVIE-kind query, so the episode
+/// fields are never attempted and no `EpisodeTitle` brick is stored anywhere
+/// -- the exact-key assertion below fails either way (absent under `{3,1}`
+/// on revert, or filed under the wrong key if `applicable_fields` ever
+/// stopped excluding them).
 #[test]
 fn fill_derives_episode_key_from_resolved_kind() {
     let scratch = TempDir::new();
     let mut cache = scratch_cache(&scratch, "brick-cache.json");
-    let mut q = movie_query();
-    q.kind = Kind::UNKNOWN;
-    q.season = 2;
-    q.episode = 3;
-    let sources = vec![FakeSource::with_media("cinemeta", cinemeta_movie()).shared()];
+    let mut q = series_query();
+    q.kind = Kind::MOVIE;
+    q.season = 3;
+    q.episode = 1;
+    q.absolute = false;
+    let mut media = tvmaze_media();
+    media.episodes.push(Episode {
+        season: 3,
+        number: 1,
+        title: "No Más".to_string(),
+        synopsis: "Walt faces the consequences.".to_string(),
+        ..Episode::default()
+    });
+    let sources = vec![FakeSource::with_media("tvmaze", media).shared()];
     let refs = fill_sources(&sources);
     let report =
-        fill_entity(&mut cache, &q, Kind::MOVIE, &refs, &Cancel::background()).expect("fill");
-    assert_eq!(report.key.id, "movie|dune|2021");
-    for field in [BrickField::EpisodeTitle, BrickField::EpisodeSynopsis] {
-        assert!(
-            !report.found.contains(&field)
-                && !report.missed.contains(&field)
-                && !report.errored.iter().any(|(f, _)| *f == field)
-                && !report.not_supplied.contains(&field)
-                && !report.unsupported.contains(&field)
-                && !report.vetoed.contains(&field),
-            "a movie fill must not attempt {field:?}"
-        );
-        assert!(
-            matches!(
-                cache.lookup(
-                    &report.key,
-                    &EpisodeKey::Episode {
-                        season: 2,
-                        number: 3
-                    },
-                    field
-                ),
-                BrickLookup::Absent
-            ),
-            "no season-scoped slot may be filed by a movie fill for {field:?}"
-        );
+        fill_entity(&mut cache, &q, Kind::SERIES, &refs, &Cancel::background()).expect("fill");
+    assert_eq!(report.key.id, "series|breaking bad|2008");
+    assert!(
+        report.found.contains(&BrickField::EpisodeTitle),
+        "the S03E01 title must file, found={:?}",
+        report.found
+    );
+    match cache.lookup(
+        &report.key,
+        &EpisodeKey::Episode {
+            season: 3,
+            number: 1,
+        },
+        BrickField::EpisodeTitle,
+    ) {
+        BrickLookup::Found(got) => assert_eq!(
+            got.value,
+            BrickValue::Text {
+                text: "No Más".to_string(),
+            },
+            "the title must be stored under the exact S03E01 key"
+        ),
+        other => panic!("want Found S03E01 title under its exact key, got {other:?}"),
     }
-    assert!(report.found.contains(&BrickField::MovieSynopsis));
+    assert!(
+        matches!(
+            cache.lookup(&report.key, &EpisodeKey::None, BrickField::EpisodeTitle),
+            BrickLookup::Absent
+        ),
+        "no episode fact may leak into an entity-level slot"
+    );
 }
 
 fn fill_sources(sources: &[std::sync::Arc<dyn Source>]) -> Vec<&dyn Source> {
@@ -2410,15 +2427,25 @@ fn fill_insert_many_refused_with_new_ids_saves_once() {
 }
 
 /// A mixed batch never silently stops learning IDs: a refused Miss carrying
-/// new IDs plus a new Found brick persists both in one save.
+/// an ID the accepted brick does NOT carry, plus a new Found brick, persists
+/// both in one save. The IDs are disjoint on purpose: reverting refused-brick
+/// absorption still passes the accepted brick's own IDs through the store
+/// path, so only the refused brick's unique ID proves the refused path
+/// learned anything.
 #[test]
 fn fill_insert_many_mixed_batch_learns_ids() {
     let scratch = TempDir::new();
     let path = PathBuf::from(scratch.child("brick-cache.json"));
     let bare = EntityKey::new("series|breaking bad|2008");
-    let informed = EntityKey {
+    // Only the refused brick carries tvmaze; only the accepted brick carries
+    // imdb. Either absorption path alone learns exactly one of them.
+    let refused_ids = EntityKey {
         id: "series|breaking bad|2008".to_string(),
         tvmaze: Some(169),
+        ..EntityKey::default()
+    };
+    let accepted_ids = EntityKey {
+        id: "series|breaking bad|2008".to_string(),
         imdb: Some("tt0903747".to_string()),
         ..EntityKey::default()
     };
@@ -2445,7 +2472,7 @@ fn fill_insert_many_mixed_batch_learns_ids() {
                 Brick::miss(
                     BrickField::Artwork,
                     BrickSource::Tvmaze,
-                    informed.clone(),
+                    refused_ids.clone(),
                     EpisodeKey::None,
                     "tvmaze show 169 still has no other poster",
                 ),
@@ -2455,7 +2482,7 @@ fn fill_insert_many_mixed_batch_learns_ids() {
                         text: "A teacher cooks.".to_string(),
                     },
                     BrickSource::Tvmaze,
-                    informed.clone(),
+                    accepted_ids.clone(),
                     EpisodeKey::None,
                     "tvmaze show 169 synopsis",
                 ),
@@ -2478,8 +2505,14 @@ fn fill_insert_many_mixed_batch_learns_ids() {
     let raw: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).expect("read file")).expect("decode file");
     let stored = &raw["entities"][0]["entity"];
-    assert_eq!(stored["tvmaze"], 169, "mixed batch must learn IDs: {stored}");
-    assert_eq!(stored["imdb"], "tt0903747", "mixed batch must learn IDs: {stored}");
+    assert_eq!(
+        stored["tvmaze"], 169,
+        "the refused brick's unique ID must be learned: {stored}"
+    );
+    assert_eq!(
+        stored["imdb"], "tt0903747",
+        "the accepted brick's unique ID must be learned: {stored}"
+    );
     let reloaded = crate::brick::load_from(&path).expect("load_from");
     assert_eq!(reloaded.brick_count(), 2);
 }
