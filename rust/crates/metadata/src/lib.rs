@@ -32,6 +32,7 @@ pub mod anilist;
 pub mod ann;
 pub mod artwork;
 pub mod bangumi;
+pub mod brick;
 pub mod cache;
 pub mod cinemeta;
 pub mod episodate;
@@ -59,6 +60,8 @@ mod artwork_backfill_test;
 mod artwork_test;
 #[cfg(test)]
 mod bangumi_test;
+#[cfg(test)]
+mod brick_test;
 #[cfg(test)]
 mod cache_test;
 #[cfg(test)]
@@ -93,6 +96,10 @@ use std::fmt;
 use metadata_http::cancel::CancelError;
 
 pub use metadata_core::types::{Button, Episode, Kind, Media, Query, Resolution};
+pub use brick::{
+    BRICK_FILE_NAME, BRICK_SCHEMA, Brick, BrickCache, BrickField, BrickLookup, BrickSource,
+    BrickStatus, BrickValue, EntityKey, EpisodeKey, MISS_RETRY_AFTER,
+};
 pub use overrides::{Override, Scope, Store, load};
 pub use resolver::{Options, Resolver, Source, default_sources};
 pub use search::{Candidate, pin_from_candidate, refresh, search};
