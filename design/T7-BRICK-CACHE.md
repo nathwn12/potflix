@@ -1,9 +1,9 @@
-# T7 Brick Cache — SPEC (T7-2-D)
+# T7 Brick Cache — SPEC (T7-2-E)
 
 Status: living SPEC with a frozen core. The T7-2-B freeze still governs the
 shape (fields, show-level keys, capability matrix, policy order, four-state
-lookup, atomic persistence); T7-2-C and T7-2-D amend it narrowly, and each
-amendment is marked inline below. Nothing outside this file governs.
+lookup, atomic persistence); T7-2-C through T7-2-E amend it narrowly, and
+each amendment is marked inline below. Nothing outside this file governs.
 
 ## 1. Objective
 
@@ -168,18 +168,23 @@ Per applicable field:
 - `Ok(Some(media))`: the provider's own `find` is the match authority for
   titles — the engine never compares titles, so romaji, localised and
   alternate titles are accepted. Three narrow vetoes protect the permanent
-  Found brick: a `media.kind` contradicting the resolved kind is skipped; a
-  KNOWN year mismatch (`q.year > 0 && media.year > 0`, differing) is skipped
-  as a different-work signal (T7-2-D amendment); an answer whose provider ID
-  contradicts the bucket's stored identity (`tvmaze`/`anilist`/`imdb` via the
-  `with_media_id` mapping) is skipped as another entity's record (T7-2-D
-  amendment). The year veto is deliberately stricter than the resolver's soft
-  "year never gates" policy: the resolver serves a transient card, while a
-  Found brick never expires — a wrong fact cached is worse than a fact
-  deferred, and a vetoed provider falls through rather than caching it.
-  Vetoed answers teach nothing about the field, so they never count toward
-  the miss rule (a vetoed-only field stays `Absent`, never `Miss`). Providers
-  see the resolved kind (`Query { kind, ..q }`, T7-2-D amendment), so a
+  Found brick: a `media.kind` contradicting the resolved kind is skipped and
+  COUNTS as a definitive answer toward the miss rule (a wrong-kind answer is
+  evidence, not a veto); a KNOWN year mismatch (`q.year > 0 && media.year >
+  0`, differing) on a floor-less source is skipped as a different-work
+  signal; an answer whose provider ID contradicts the bucket's stored
+  identity is skipped as another entity's record (T7-2-D amendment). The year
+  veto is scoped to floor-less sources (T7-2-E amendment: today only
+  Wikipedia, whose search takes hit #1 with no similarity floor): a
+  premiere-year answer for a later-season query from a floored provider is
+  legitimate and never vetoed. It stays deliberately stricter than the
+  resolver's soft "year never gates" policy for those sources: the resolver
+  serves a transient card, while a Found brick never expires — a wrong fact
+  cached is worse than a fact deferred, and a vetoed provider falls through
+  rather than caching it. Year/ID vetoes teach nothing about the field: the
+  field is recorded in `vetoed` and the Miss is suppressed for the pass (the
+  slot stays `Absent` and retries, even when other providers answered
+  definitively) (T7-2-E amendment). Providers see the resolved kind (`Query { kind, ..q }`, T7-2-D amendment), so a
   series-first provider never answers a resolved movie fill with a series
   record. Otherwise only the requested field is extracted (synopsis slot
   chosen by the resolved kind). A media without the field is a definitive
@@ -242,10 +247,12 @@ envelope `{"version":1,"entities":[...]}`. `BRICK_SCHEMA = 1`;
 - T7-3 (merge): builds on `EntityKey` + `EpisodeKey` identity,
   `Brick::found`/`Brick::miss`, `insert`/`insert_many`, `lookup`/`lookup_at`,
   `capacity`/`priority` + `extract_field_bricks`, `fill_entity(kind, ...)` +
-  `FillReport` (`found`/`missed`/`errored` + `unsupported`/`not_supplied`/
-  `unmapped`), `clear_*`, atomic `save` + load-or-empty. The merge resolves SERIES-or-MOVIE before calling
-  and reads `unsupported` to diagnose the chain. No further brick API is
-  planned.
+  `FillReport` (`found`/`missed`/`errored`/`vetoed` + `unsupported`/
+  `not_supplied`/`unmapped`), `clear_*`, atomic `save` + load-or-empty. The
+  merge resolves SERIES-or-MOVIE before calling and reads `not_supplied` to
+  diagnose the chain (T7-2-E amendment: `unsupported` means no matrix source
+  could ever answer; `not_supplied` means the chain lacks one). No further
+  brick API is planned.
 - T7-4 (force / Fix-match): drives `clear_entity`/`clear_episode`/
   `clear_field` from the UI, then refills. Show-level entity keys make force
   invalidation show-scoped by construction. Titles stay manual-only until
@@ -264,10 +271,13 @@ envelope `{"version":1,"entities":[...]}`. `BRICK_SCHEMA = 1`;
   the Length-series policy names it.
 - Wikipedia prefers the search hit whose parenthesized year matches a known
   query year (first hit otherwise), so a remake page is rarely the answer a
-  year-known fill must veto (T7-2-D provider fix, no API change).
-- Cinemeta series fires the catalog-top-row fallback only with a known query
-  year the top row corroborates; unknown/differing years never take it
-  (T7-2-D provider fix; the romaji path keeps working for year-known
+  year-known fill must veto; when it still is, the fill's floor-less year
+  veto (T7-2-E) catches it (no API change).
+- Cinemeta series fires the catalog-top-row fallback when the query year
+  falls inside the top row's release range (open-ended handled), or for a
+  year-less query whose episode table carries the queried episode (T7-2-E
+  provider fix: premiere-year equality was too strict for later-season
+  queries; the romaji path keeps working for year-known and episode-proven
   queries).
 - Genres/Length/Year extraction itself stays kind-blind per-provider (it
   yields whatever the `Media` carries); kind-correctness lives in
@@ -288,18 +298,23 @@ envelope `{"version":1,"entities":[...]}`. `BRICK_SCHEMA = 1`;
   query files no `S00` slot.
 - S01E01 and S02E03 share one entity bucket, hold distinct episode keys,
   and share show-level Found bricks.
-- A provider-matched alias is accepted; a known year mismatch is vetoed
-  (`Absent` alone, correct provider wins down the chain); an ID-conflicting
+- A provider-matched alias is accepted; a known year mismatch on a
+  floor-less source is vetoed (`Absent` alone even beside a definitive miss,
+  correct provider wins down the chain) while a floored provider's
+  premiere-year answer for a later season is accepted; an ID-conflicting
   answer is vetoed and the stored brick survives; an opposite-kind answer
-  files nothing.
-- The three-way split: matrix-uncovered → `unsupported`, matrix-covered but
-  unsupplied → `not_supplied`, foreign supplied names → `unmapped` (once).
+  files nothing (definitive, counts toward `Miss`).
+- The four-way diagnostic: matrix-uncovered → `unsupported`, matrix-covered
+  but unsupplied → `not_supplied`, foreign supplied names → `unmapped`
+  (once; known non-fetchable `"tmdb"`/`"manual"` stay silent), veto-fired
+  fields → `vetoed` (Miss suppressed).
 - Episode extraction IS `resolver::match_episode` (fallback pinned);
   implausible years (outside 1900..=2100) yield no Year brick; the synopsis
   slot follows the resolved kind.
-- An all-refused batch (even carrying new IDs) saves nothing (`Ok(0)`) and
-  absorbs nothing; a valid-first malformed-second batch applies nothing; a
-  failed batch rolls back every bucket it touched.
+- An all-refused batch with nothing new to learn saves nothing (`Ok(0)`,
+  even with saving impossible); a refused brick still teaches new IDs (the
+  `insert` rule, one save for the batch); a valid-first malformed-second
+  batch applies nothing; a failed batch rolls back every bucket it touched.
 - A Miss waits until its stored `retry_after` (one literal day after its
   stored `fetched_at`) and is due at it; a Found brick never expires and a
   later Miss never evicts it; Manual Found beats provider Found.

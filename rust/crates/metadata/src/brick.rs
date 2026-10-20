@@ -1,6 +1,6 @@
 //! `metadata::brick` -- persistent per-field brick model, provenance,
-//! identity, and cache (frozen SPEC: `design/T7-BRICK-CACHE.md`, as amended
-//! through T7-2-D).
+//! identity, and cache. Living SPEC with a frozen core:
+//! `design/T7-BRICK-CACHE.md` (amended through T7-2-E).
 //!
 //! A *brick* is one cached fact about one field of one entity (a show, a
 //! season, a movie, or one episode): the artwork URL, an episode title, a
@@ -893,13 +893,15 @@ impl BrickCache {
     /// checks as [`insert`]: an empty entity id, a scope mismatch, a shape
     /// mismatch, or an empty Found value fails the WHOLE batch with nothing
     /// applied; a Miss over a Found slot, or a provider Found over a Manual
-    /// Found, is refused per-brick exactly as in [`insert`] -- except the
-    /// refused brick teaches nothing here (no ID absorption): a batch of only
-    /// refusals changes nothing, saves nothing, and returns `Ok(0)` even when
-    /// saving is impossible. Returns how many bricks stored a slot. A failed
-    /// save rolls every in-memory change back, so memory always matches the
-    /// last successful save; an empty batch stores nothing and saves nothing
-    /// (`Ok(0)`).
+    /// Found, is refused per-brick exactly as in [`insert`], but a refused
+    /// brick still teaches the bucket the external IDs it carries (same rule
+    /// as [`insert`]'s ID absorption), folded into the one save -- a mixed
+    /// batch never silently stops learning IDs. Returns how many bricks
+    /// stored a slot. A batch that changed nothing (every brick refused and
+    /// no new IDs learned) saves nothing and returns `Ok(0)`, even when
+    /// saving is impossible. A failed save rolls every in-memory change back,
+    /// so memory always matches the last successful save; an empty batch
+    /// stores nothing and saves nothing (`Ok(0)`).
     ///
     /// [`insert`]: BrickCache::insert
     /// [`fill_entity`]: crate::brick::fill_entity
@@ -917,6 +919,7 @@ impl BrickCache {
         }
         let backup = self.entities.clone();
         let mut stored = 0usize;
+        let mut changed = false;
         for brick in bricks {
             let bucket = brick.entity.key();
             let slot = (brick.episode, brick.field);
@@ -938,9 +941,17 @@ impl BrickCache {
                     && brick.status == BrickStatus::Found
                     && brick.source != BrickSource::Manual;
                 if miss_over_found || provider_over_manual {
-                    // Refused: the value stands and the brick teaches nothing
-                    // (no ID absorption -- an all-refused batch is a pure
-                    // no-op that never touches the file).
+                    // Refused: the value stands, but new external IDs are
+                    // still learned (the `insert` rule), folded into the one
+                    // save below.
+                    if let Some(entry) = self.entities.get_mut(&bucket) {
+                        let mut next = entry.entity.clone();
+                        next.absorb(&brick.entity);
+                        if next != entry.entity {
+                            entry.entity = next;
+                            changed = true;
+                        }
+                    }
                     continue;
                 }
             }
@@ -962,8 +973,9 @@ impl BrickCache {
                 entry.bricks.push(brick);
             }
             stored += 1;
+            changed = true;
         }
-        if stored == 0 {
+        if !changed {
             return Ok(0);
         }
         match self.save() {
@@ -1514,6 +1526,24 @@ fn is_capable(source: BrickSource, kind: Kind, field: BrickField) -> bool {
     capacity(source, kind).contains(&field)
 }
 
+/// Whether `source` runs its own match floor before answering: a title
+/// similarity floor (and usually a year preference) that rejects unrelated
+/// works, so a same-title answer from it is the provider's own match rather
+/// than a guess. True for every current provider except `Wikipedia`, whose
+/// search takes hit #1 for `"<title> film"` with no similarity floor and no
+/// year check -- a remake/adaptation page is the normal path there. The
+/// fill's known-year veto applies only to floor-less sources: a premiere-year
+/// answer for a later-season query (TVmaze/AniList reporting 2013 for a 2018
+/// season) is legitimate and must never be vetoed.
+///
+/// Do not lean on the ID-conflict veto as the wrong-work floor instead: it is
+/// a same-slot consistency check and is vacuous on a bare bucket. The
+/// provider-level floors (here, and the year preference inside each
+/// provider's own `find`) are the first-pass defense.
+fn has_match_floor(source: BrickSource) -> bool {
+    !matches!(source, BrickSource::Wikipedia)
+}
+
 /// Every provider-side source: the eleven live providers plus the reserved
 /// `Tmdb` and the hand `Manual` slots (both answer nothing for every kind).
 /// [`FillReport`] diagnoses against this set: a field no entry can answer is
@@ -1704,8 +1734,9 @@ pub fn priority(kind: Kind, field: BrickField) -> &'static [BrickSource] {
 /// `FillReport`: one [`fill_entity`] pass over one entity: the target
 /// identity, the fields that gained a Found brick, the fields that proved
 /// definitively absent (a bounded Miss brick now guards them), the fields
-/// left `Absent` because at least one provider failed transiently, and the
-/// fields no capable supplied source covers at all.
+/// left `Absent` because at least one provider failed transiently, the fields
+/// a veto kept out, and the three-way diagnostic for fields nothing was even
+/// attempted for.
 ///
 /// [`fill_entity`]: crate::brick::fill_entity
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1721,15 +1752,22 @@ pub struct FillReport {
     /// errored and a lower-priority one later won the field, the field is
     /// both `found` and `errored`, so the outage stays visible.
     pub errored: Vec<(BrickField, String)>,
+    /// Fields where at least one provider answer was vetoed (known year
+    /// mismatch on a floor-less source, or an ID conflict). A veto suppresses
+    /// the Miss for the field this pass: the slot stays `Absent` and retries.
+    /// Like `errored`, a win does NOT clear this.
+    pub vetoed: Vec<BrickField>,
     /// Fields with zero capable supplied sources AND zero capable providers in
     /// the matrix: nothing exists that could answer the slot.
     pub unsupported: Vec<BrickField>,
     /// Fields with at least one capable provider in the matrix but none
     /// supplied: the chain is misconfigured, not the build.
     pub not_supplied: Vec<BrickField>,
-    /// Supplied source names no [`BrickSource`] maps (foreign names, the
-    /// reserved `"tmdb"`, the hand `"manual"`): never consulted, never
-    /// counted. One entry per name, in supplied order.
+    /// Supplied source names no [`BrickSource`] maps (foreign names): never
+    /// consulted, never counted. Known non-fetchable names (`"tmdb"`, which
+    /// has no client, and `"manual"`, which no provider reports) are
+    /// configuration, not misconfiguration, and are excluded. One entry per
+    /// name, in supplied order.
     ///
     /// [`BrickSource`]: crate::brick::BrickSource
     pub unmapped: Vec<String>,
@@ -1821,16 +1859,21 @@ fn provenance_for(
 ///   alternate titles. Three narrow vetoes protect the permanent Found brick:
 ///   a `media.kind` contradicting the resolved kind is skipped (a same-title
 ///   opposite-kind answer can never file artwork, genres, length, year, or a
-///   wrong-kind synopsis); a KNOWN year mismatch (`q.year > 0 &&
-///   media.year > 0`, differing) is skipped as a different-work signal; an
-///   answer whose provider ID contradicts the bucket's stored identity
-///   ([`id_conflicts`]) is skipped as another entity's record. The year veto
-///   is deliberately stricter than the resolver's soft "year never gates"
-///   policy: the resolver serves a transient card, while a Found brick never
-///   expires -- a wrong fact cached is worse than a fact deferred, and a
-///   vetoed provider falls through rather than caching it. Vetoed answers
-///   teach nothing about the field, so they never count toward the miss rule
-///   (a vetoed-only field stays `Absent`, never `Miss`). Otherwise only the
+///   wrong-kind synopsis) and COUNTS as a definitive answer toward the miss
+///   rule; a KNOWN year mismatch (`q.year > 0 && media.year > 0`, differing)
+///   on a floor-less source ([`has_match_floor`]) is skipped as a
+///   different-work signal; an answer whose provider ID contradicts the
+///   bucket's stored identity ([`id_conflicts`]) is skipped as another
+///   entity's record. The year veto is deliberately stricter than the
+///   resolver's soft "year never gates" policy -- but scoped to floor-less
+///   sources, so a premiere-year answer for a later-season query from a
+///   floored provider is never vetoed: the resolver serves a transient card,
+///   while a Found brick never expires, so a wrong fact cached is worse than
+///   a fact deferred, and a vetoed provider falls through rather than caching
+///   it. Year/ID vetoes teach nothing about the field: the field is recorded
+///   in `vetoed` and the Miss is suppressed for the pass (the slot stays
+///   `Absent` and retries, even when other providers answered definitively).
+///   Otherwise only the requested field is extracted ([`extract_field_bricks`],
 ///   requested field is extracted ([`extract_field_bricks`], synopsis slot
 ///   chosen by the resolved kind); a media without the field is a definitive
 ///   skip. A win inserts `Found` keyed to the TARGET identity (with the
@@ -1871,15 +1914,13 @@ pub fn fill_entity(
         ));
     }
     let target = entity_key_for_query(q, kind);
-    let episode_key = if kind == Kind::MOVIE {
-        EpisodeKey::None
-    } else {
-        episode_key_for_query(q)
-    };
     // The query the providers see: the caller's resolved kind over the
     // query's own addressing, so a series-first provider never answers a
     // resolved movie fill with a series record.
     let qk = Query { kind, ..q.clone() };
+    // The episode key derives from the resolved-kind query, so a resolved
+    // MOVIE with `q.kind == UNKNOWN` still gets `EpisodeKey::None`.
+    let episode_key = episode_key_for_query(&qk);
     let mut report = FillReport {
         key: target.clone(),
         ..FillReport::default()
@@ -1891,14 +1932,16 @@ pub fn fill_entity(
     // end), so it cannot go stale under us.
     let stored_ids = cache.stored_entity(&target);
     // The supplied chain mapped once through `for_provider`: unknown names
-    // are reported in `unmapped`, never consulted, never counted.
+    // are reported in `unmapped`, never consulted, never counted. Known
+    // non-fetchable names (`"tmdb"`, no client; `"manual"`, no provider)
+    // are configuration, not misconfiguration, and stay silent.
     let mut supplied: Vec<(BrickSource, &dyn Source)> = Vec::new();
     let mut unmapped: Vec<String> = Vec::new();
     for source in sources.iter() {
         let Some(mapped) = BrickSource::for_provider(source.name()) else {
-            let name = source.name().to_string();
-            if !unmapped.contains(&name) {
-                unmapped.push(name);
+            let name = source.name();
+            if !matches!(name, "tmdb" | "manual") && !unmapped.iter().any(|seen| seen == name) {
+                unmapped.push(name.to_string());
             }
             continue;
         };
@@ -1945,6 +1988,11 @@ pub fn fill_entity(
         let mut miss_source = None::<BrickSource>;
         let mut errors: Vec<String> = Vec::new();
         let mut won: Option<Brick> = None;
+        // A year/ID veto fired for this field: the vetoed answers teach
+        // nothing, so the Miss is suppressed and the slot stays `Absent`.
+        // A kind mismatch is NOT a veto -- it is a definitive wrong-kind
+        // answer and still counts (see below).
+        let mut veto_fired = false;
         for (want, provider) in &order {
             let name = provider.name().to_string();
             let answer =
@@ -1975,15 +2023,19 @@ pub fn fill_entity(
                 consulted_capable += 1;
                 continue;
             }
-            // Known year mismatch: a different-work signal, not a fact about
-            // this field. Falls through without counting, so a vetoed-only
-            // field stays `Absent`, never `Miss`.
-            if q.year > 0 && media.year > 0 && media.year != q.year {
+            // Known year mismatch on a floor-less source: a different-work
+            // signal, not a fact about this field. Scoped by
+            // [`has_match_floor`]: premiere-year answers for later-season
+            // queries from floored providers are legitimate and never
+            // vetoed. Falls through without counting.
+            if !has_match_floor(*want) && q.year > 0 && media.year > 0 && media.year != q.year {
+                veto_fired = true;
                 continue;
             }
             // ID conflict: the answer belongs to another entity. Falls
             // through without counting; the stored brick survives.
             if id_conflicts(stored_ids.as_ref(), &target, media) {
+                veto_fired = true;
                 continue;
             }
             let value = extract_field_bricks(media, &qk, kind)
@@ -2013,10 +2065,22 @@ pub fn fill_entity(
                 if !errors.is_empty() {
                     report.errored.push((field, errors.join("; ")));
                 }
+                if veto_fired {
+                    report.vetoed.push(field);
+                }
                 bricks.push(brick);
             }
             None if !errors.is_empty() => {
                 report.errored.push((field, errors.join("; ")));
+                if veto_fired {
+                    report.vetoed.push(field);
+                }
+            }
+            // A veto fired: the vetoed answers teach nothing, so no Miss --
+            // the slot stays `Absent` and retries next pass, even when other
+            // providers answered definitively.
+            None if veto_fired => {
+                report.vetoed.push(field);
             }
             None if consulted_capable > 0 => {
                 report.missed.push(field);

@@ -374,20 +374,22 @@ fn cinemeta_series_catalog_top_row_answers_romaji_query() {
     );
 }
 
-/// The other side of the year-corroborated top row: the same romaji setup
-/// with a year the top row does not carry answers nothing -- the fallback
-/// never fires on an unknown or differing year.
+/// The top-row range rule: 2018 on a 2013-2023 show takes the fallback and
+/// answers; 2015 on a lone-2013 row takes nothing and misses; a year-less
+/// query takes the fallback too, but only because the row's own episode
+/// table carries the queried episode.
 #[test]
-fn cinemeta_series_top_row_needs_year_corroboration() {
-    for (label, year) in [("unknown year", 0), ("differing year", 2015)] {
-        let server = FakeServer::start(|req: &Request| {
+fn cinemeta_series_top_row_range_rule() {
+    let fixture = |top_release: &str| {
+        let catalog = format!(
+            r#"{{"metas":[
+                {{"id":"tt2560140","name":"Attack on Titan","releaseInfo":"{top_release}"}},
+                {{"id":"tt6811662","name":"Shingeki no Kyojin: Picture Drama","releaseInfo":"2013-2014"}}
+            ]}}"#
+        );
+        FakeServer::start(move |req: &Request| {
             if req.path.starts_with("/catalog/series/") {
-                return Response::json(
-                    r#"{"metas":[
-                        {"id":"tt2560140","name":"Attack on Titan","releaseInfo":"2013-2023"},
-                        {"id":"tt6811662","name":"Shingeki no Kyojin: Picture Drama","releaseInfo":"2013-2014"}
-                    ]}"#,
-                );
+                return Response::json(&catalog);
             }
             match req.path.as_str() {
                 "/meta/series/tt6811662.json" => Response::json(
@@ -398,22 +400,42 @@ fn cinemeta_series_top_row_needs_year_corroboration() {
                 ),
                 _ => Response::error(404, "not found"),
             }
-        });
-        let source = CinemetaSource::new(server.url(), http_client());
-        let q = Query {
-            kind: Kind::SERIES,
-            title: "Shingeki no Kyojin".to_string(),
-            year,
-            season: 2,
-            episode: 1,
-            ..Query::default()
-        };
-        let found = source.find(&Cancel::background(), &q).expect("Find");
-        assert!(
-            found.is_none(),
-            "{label}: the top row must not answer without year corroboration, got {found:?}"
-        );
-    }
+        })
+    };
+    let query = |year: i32| Query {
+        kind: Kind::SERIES,
+        title: "Shingeki no Kyojin".to_string(),
+        year,
+        season: 2,
+        episode: 1,
+        ..Query::default()
+    };
+    // 2018 inside 2013-2023: the fallback fires and the table proves S02E1.
+    let server = fixture("2013-2023");
+    let source = CinemetaSource::new(server.url(), http_client());
+    let media = source
+        .find(&Cancel::background(), &query(2018))
+        .expect("Find")
+        .expect("2018 on a 2013-2023 show must answer, got nil");
+    assert_eq!(media.source_id, "tt2560140", "media = {media:?}");
+    // 2015 on a lone-2013 row: no fallback, and the look-alike's table
+    // lacks S02E01, so a definitive miss.
+    let server = fixture("2013");
+    let source = CinemetaSource::new(server.url(), http_client());
+    let found = source.find(&Cancel::background(), &query(2015)).expect("Find");
+    assert!(
+        found.is_none(),
+        "2015 on a 2013 show must miss, got {found:?}"
+    );
+    // Year-less with the episode in the table: the fallback fires and the
+    // episode gate holds it.
+    let server = fixture("2013-2023");
+    let source = CinemetaSource::new(server.url(), http_client());
+    let media = source
+        .find(&Cancel::background(), &query(0))
+        .expect("Find")
+        .expect("a year-less query with the episode must answer, got nil");
+    assert_eq!(media.source_id, "tt2560140", "media = {media:?}");
 }
 
 /// The other side of the top-row rule: a genuinely different show loses.

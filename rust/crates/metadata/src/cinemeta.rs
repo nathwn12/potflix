@@ -135,6 +135,46 @@ fn release_year(s: &str) -> i32 {
     }
 }
 
+/// `releaseRangeContains`: whether a catalog `releaseInfo` range covers
+/// `year`: `"2013-2023"` covers 2013..=2023, a lone `"2013"` covers only
+/// 2013, an open end (`"2013-"`, `"2013-?"`) covers 2013 and later. False for
+/// `year <= 0` and for a range with no parseable start.
+fn release_range_contains(release_info: &str, year: i32) -> bool {
+    if year <= 0 {
+        return false;
+    }
+    let info = release_info.trim();
+    let (start_text, end_text) = match info.split_once('-') {
+        Some((start, end)) => (start.trim(), Some(end.trim())),
+        None => (info, None),
+    };
+    let start_digits: String = start_text
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if start_digits.len() < 4 {
+        return false;
+    }
+    let start: i32 = start_digits[..4].parse().unwrap_or(0);
+    if start == 0 || year < start {
+        return false;
+    }
+    match end_text {
+        Some(end) => {
+            let end_digits: String =
+                end.chars().take_while(|c| c.is_ascii_digit()).collect();
+            // Open end: no upper bound.
+            if end_digits.len() < 4 {
+                return true;
+            }
+            let end_year: i32 = end_digits[..4].parse().unwrap_or(0);
+            end_year == 0 || year <= end_year
+        }
+        // A lone year is a range of one.
+        None => year == start,
+    }
+}
+
 /// `runtimeMinutes` parses Cinemeta's `"148 min"` (with an `"Xh Ym"` fallback);
 /// 0 when unparseable.
 fn runtime_minutes(s: &str) -> i32 {
@@ -305,14 +345,16 @@ impl CinemetaSource {
     }
 
     /// Candidate order: the title-ranked row first (when one clears the
-    /// floor), then the catalog's own top row -- but only when the query
-    /// carries a known year the top row corroborates. The top row is where a
-    /// romaji or junk-laden query lands on the work's other-named entry
-    /// (token scoring cannot see `Shingeki no Kyojin` in `Attack on Titan`);
-    /// the engine's rank plus the corroborating year are two independent keys,
-    /// so a genuinely different show still loses, and a query with an unknown
-    /// or differing year never takes the top-row path. A query with no
-    /// episode number never takes the top-row path either.
+    /// floor), then the catalog's own top row -- but only when the query year
+    /// falls inside the top row's release range (open-ended handled), or when
+    /// the query carries no year at all. The top row is where a romaji or
+    /// junk-laden query lands on the work's other-named entry (token scoring
+    /// cannot see `Shingeki no Kyojin` in `Attack on Titan`); premiere-year
+    /// equality is NOT required, so a later-season query (2018 on a 2013
+    /// show) still takes the fallback. A year-less query takes it too, but
+    /// the row must then prove itself by its own episode table (the
+    /// `match_episode` check below), so a genuinely different show still
+    /// loses. A query with no episode number never takes the top-row path.
     fn find_series(&self, cancel: &Cancel, q: &Query) -> Result<Option<Media>, Error> {
         let entries = self.catalog(cancel, q, "series")?;
         let mut order: Vec<usize> = Vec::new();
@@ -321,11 +363,12 @@ impl CinemetaSource {
         }
         if q.episode > 0
             && order.first() != Some(&0)
-            && q.year > 0
             && let Some(top) = entries.first()
-            && release_year(&top.release_info) == q.year
         {
-            order.push(0);
+            let ranged = q.year > 0 && release_range_contains(&top.release_info, q.year);
+            if ranged || q.year == 0 {
+                order.push(0);
+            }
         }
         for i in order {
             let pinned = &entries[i];
