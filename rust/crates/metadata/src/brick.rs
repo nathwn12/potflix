@@ -23,16 +23,20 @@
 //! # Key
 //!
 //! One entity identity ([`EntityKey`]) plus one episode identity
-//! ([`EpisodeKey`]). The entity key is a caller-supplied identity string (T7-2
-//! will derive it from the resolved query) plus the external IDs available
-//! for it (TMDb, TVDB, IMDb, AniList, TVmaze); the map bucket is the
-//! lowercased, whitespace-collapsed id, and [`BrickCache::insert`] rejects a
-//! brick whose entity id does not match the cache key it is stored under, so
-//! a wiring bug in the future merge can never file one show's artwork under
-//! another show. The episode key is `none` for entity-level fields
-//! (artwork, synopses, genres, length, year, title) and `episode`/`absolute`
-//! for per-episode fields (episode title, episode synopsis); [`insert`]
-//! rejects a brick whose episode scope does not fit its field.
+//! ([`EpisodeKey`]). The entity key is show-level (T7-2-B): `series|<title>|
+//! <year>` for series (no season -- S01 and S02 of one show share one bucket)
+//! and `movie|<title>|<year>` for movies, derived by [`entity_key_for_query`]
+//! from the resolved query, plus the external IDs available for it (TMDb,
+//! TVDB, IMDb, AniList, TVmaze); the map bucket is the lowercased,
+//! whitespace-collapsed id, and [`BrickCache::insert`] rejects a brick whose
+//! entity id does not match the cache key it is stored under, so a wiring bug
+//! in the future merge can never file one show's artwork under another show.
+//! The episode key is `none` for entity-level fields (artwork, synopses,
+//! genres, length, year, title) and `episode`/`absolute` for per-episode
+//! fields (episode title, episode synopsis); [`insert`] rejects a brick whose
+//! episode scope does not fit its field. The resolver's media cache
+//! (`cache::cache_key`, per show-season) is untouched: brick identity is
+//! deliberately coarser so T7-4 force invalidation is show-scoped.
 //!
 //! [`insert`]: BrickCache::insert
 //!
@@ -61,7 +65,7 @@
 //!   [`BrickCache::insert`]/[`BrickCache::insert_many`] (key-checked,
 //!   miss-never-evicts-found, manual beats provider),
 //!   [`BrickCache::lookup`]/[`lookup_at`] (`Found`/`MissWaiting`/`RetryDue`/`Absent`),
-//!   the per-field [`priority`] order plus [`extract_field_bricks`], the
+//!   the per-field [`capacity`]/[`priority`] order plus [`extract_field_bricks`], the
 //!   [`fill_entity`] pass and its [`FillReport`],
 //!   the force-clear [`BrickCache::clear_entity`]/[`clear_episode`]/[`clear_field`],
 //!   and atomic [`BrickCache::save`] plus load-or-empty [`load`]/[`load_from`].
@@ -73,46 +77,64 @@
 //! [`clear_episode`]: BrickCache::clear_episode
 //! [`clear_field`]: BrickCache::clear_field
 //!
-//! # Field priority (T7-2)
+//! # Field capability and priority (T7-2-B)
 //!
-//! [`priority`] ranks brick sources per kind and field, most capable first.
-//! The tables below are the contract; [`fill_entity`] walks them in order
-//! against the supplied sources:
+//! Capability is truth, priority is policy. [`capacity`] names the fields one
+//! source can answer for one kind (the frozen matrix; a wrong-kind source
+//! answers nothing); [`priority`] returns the policy order for one kind and
+//! field already filtered through [`capacity`], so no priority entry ever
+//! fails capability. [`fill_entity`] walks that order against the supplied
+//! sources matched by [`BrickSource::provider_name`], then appends any
+//! supplied capable source the policy list does not name (in supplied order,
+//! last), so a new provider is never silently ignored. Providers the caller
+//! did not supply are skipped, never fetched; incapable supplied sources are
+//! skipped before any call and never count toward the miss rule.
 //!
-//! * artwork (series/anime): AniList, TVmaze, Tenrai, Kitsu, Cinemeta,
-//!   JustWatch, Episodate, Bangumi, LiveChart.me, ANN.
-//! * artwork (movie): Cinemeta, JustWatch, Wikipedia, AniList (a no-op for
-//!   movies: its `find` answers `Ok(None)` for `Kind::MOVIE`, so it only
-//!   marks the end of the list and never fills).
+//! Policy order (pre-filter; `priority` drops the incapable entries):
+//!
+//! * artwork series: AniList, TVmaze, Tenrai, Kitsu, Cinemeta, Episodate,
+//!   Bangumi, LiveChart.me, ANN.
+//! * artwork movie: Cinemeta, JustWatch, Wikipedia.
 //! * episode title: TVmaze, Tenrai, Kitsu, Cinemeta, Episodate, AniList.
-//! * episode synopsis: TVmaze, Tenrai, Kitsu, Cinemeta, AniList, Episodate.
+//! * episode synopsis: TVmaze, Tenrai, Kitsu, Cinemeta.
 //! * show synopsis: TVmaze, AniList, Tenrai, Kitsu, Cinemeta, Episodate,
 //!   Bangumi, LiveChart.me, ANN.
 //! * movie synopsis: Wikipedia, Cinemeta, JustWatch.
-//! * genres: TVmaze, AniList, Tenrai, Cinemeta (the only providers that
-//!   carry display genres; Kitsu and JustWatch deliberately carry none).
-//! * length: TVmaze, AniList, Tenrai, Kitsu, Cinemeta, JustWatch, ANN (the
-//!   providers that carry a runtime; Episodate, Bangumi and LiveChart.me
-//!   carry none).
-//! * year: Cinemeta, TVmaze, AniList, Tenrai, Kitsu, Wikipedia, JustWatch,
-//!   Episodate, Bangumi, LiveChart.me, ANN (every live provider carries a
-//!   year).
+//! * genres series: TVmaze, AniList, Tenrai, Cinemeta.
+//! * genres movie: Cinemeta, JustWatch.
+//! * length series (policy): TVmaze, AniList, Tenrai, Kitsu, Cinemeta, ANN --
+//!   Cinemeta carries no series runtime, so the filtered `priority` drops it
+//!   and serves TVmaze, AniList, Tenrai, Kitsu, ANN.
+//! * length movie: Cinemeta, JustWatch.
+//! * year series: Cinemeta, TVmaze, AniList, Tenrai, Kitsu, Episodate,
+//!   Bangumi, LiveChart.me, ANN.
+//! * year movie: Cinemeta, Wikipedia, JustWatch.
 //! * title: no provider (titles are manual-only until the T7-4 Fix flow;
 //!   [`extract_field_bricks`] never emits one).
+//! * episode fields and show synopsis for movies answer `[]`; movie synopsis
+//!   for series answers `[]`: the wrong-kind synopsis/episode slot is never
+//!   attempted (see `applicable_fields`) and no priority entry may name a
+//!   source incapable of the slot.
 //!
 //! # Deviations the tables had to make
 //!
 //! * TMDb: the SPEC's TMDb slots are unavailable -- there is no TMDb client
-//!   in this repo, so no priority list names it. [`BrickSource::Tmdb`] stays
-//!   reserved as the provenance slot a future client will fill, and
-//!   [`BrickSource::for_provider`] answers `None` for `"tmdb"`.
-//! * Wikipedia for series: Wikipedia's and JustWatch's `find` return
-//!   `Ok(None)` for `Kind::SERIES` (provider gating, unchanged by T7-2), so
-//!   series lists never name Wikipedia even where the SPEC sketched it: the
-//!   show-synopsis list ends at ANN. If a future Wikipedia client answers
-//!   series, the list -- not the gating -- is what changes.
-//! * AniList in the movie artwork list is a documented no-op (see above);
-//!   it keeps the movie order total without inventing a network client.
+//!   in this repo, so no priority list names it and [`capacity`] answers `[]`
+//!   for it. [`BrickSource::Tmdb`] stays reserved as the provenance slot a
+//!   future client will fill, and [`BrickSource::for_provider`] answers `None`
+//!   for `"tmdb"`.
+//! * Wikipedia/JustWatch for series (and every series provider for movies):
+//!   kind gating, not omission. Wikipedia's and JustWatch's `find` return
+//!   `Ok(None)` for `Kind::SERIES` and the series providers' `find` returns
+//!   `Ok(None)` for `Kind::MOVIE` (provider gating, unchanged by T7-2-B), so
+//!   [`capacity`] answers `[]` for those pairs and [`fill_entity`] never
+//!   calls them: an incapable gated `Ok(None)` must never become a 24 h Miss.
+//!   If a future client answers the other kind, the capacity table -- not the
+//!   gating -- is what changes.
+//! * Cinemeta series length: the series `Media` carries `length: ""` (see
+//!   `cinemeta::series_media`), so [`capacity`] names no series Length for
+//!   Cinemeta even though the Length-series policy still lists it: [`priority`]
+//!   filters it out.
 //!
 //! # Atomic saves
 //!
@@ -336,7 +358,8 @@ pub enum EpisodeKey {
 /// a brick is storable before any provider has answered.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct EntityKey {
-    /// Canonical identity, e.g. `"series|breaking bad|2008|1"`.
+    /// Canonical identity, e.g. `"series|breaking bad|2008"` (show-level: no
+    /// season) or `"movie|dune|2021"`.
     #[serde(default)]
     pub id: String,
     /// TMDb show/movie id, when known.
@@ -1163,16 +1186,25 @@ fn create_temp(dir: &Path) -> std::io::Result<(PathBuf, File)> {
 
 // --- T7-2: identity, extraction, priority, and the fill engine ---------------
 
-/// `entityKeyForQuery`: the target identity for a query -- the same shape as
-/// [`cache::cache_key`] (`series|<title>|<year>|<season>` or
-/// `movie|<title>|<year>`), with no external IDs yet. Providers corroborate
-/// IDs later through [`with_media_id`]; the key itself never carries one, so
-/// two queries that differ only by what a provider already knows still
-/// address one entity.
+/// `entityKeyForQuery`: the show-level target identity for a query --
+/// `series|<title>|<year>` for series (no season: every season of one show
+/// shares one entity bucket) and `movie|<title>|<year>` for movies, with no
+/// external IDs yet. Providers corroborate IDs later through
+/// [`with_media_id`]; the key itself never carries one, so two queries that
+/// differ only by what a provider already knows still address one entity. An
+/// `UNKNOWN` kind buckets like series (only movies take the movie shape).
+/// This is deliberately coarser than [`cache::cache_key`] (per show-season):
+/// the resolver's media cache stays untouched, while brick show-level facts
+/// are reused across episodes and T7-4 force invalidation is show-scoped.
 ///
 /// [`cache::cache_key`]: crate::cache::cache_key
 pub fn entity_key_for_query(q: &Query) -> EntityKey {
-    EntityKey::new(crate::cache::cache_key(q))
+    let title = crate::cache::cache_key_title(&q.title);
+    if q.kind == Kind::MOVIE {
+        EntityKey::new(format!("movie|{title}|{}", q.year))
+    } else {
+        EntityKey::new(format!("series|{title}|{}", q.year))
+    }
 }
 
 /// Maps a provider answer's `source`/`source_id` into the right [`EntityKey`]
@@ -1282,15 +1314,13 @@ fn is_plausible_year(year: i32) -> bool {
 /// * year: `media.year` when plausible.
 /// * title: never (titles are manual-only until the T7-4 Fix flow).
 ///
-/// `source` records nothing here: provenance is attached at insert time by
-/// [`fill_entity`], where the winning source is known.
+/// Provenance is attached at insert time by [`fill_entity`], where the winning
+/// source is known.
 pub fn extract_field_bricks(
-    source: BrickSource,
     media: &Media,
     q: &Query,
     episode_key: EpisodeKey,
 ) -> Vec<(BrickField, BrickValue)> {
-    let _ = source;
     let mut out = Vec::new();
     let artwork = media.artwork.trim();
     if !artwork.is_empty() {
@@ -1359,33 +1389,147 @@ pub fn extract_field_bricks(
     out
 }
 
-/// Artwork order for series/anime queries.
-static ARTWORK_SERIES: &[BrickSource] = &[
+/// Capability matrix (T7-2-B, frozen): the fields one source can answer for
+/// one kind. A wrong-kind source answers nothing (its `find` gates with
+/// `Ok(None)` before any fetch); `Tmdb` is reserved (no client exists) and
+/// `Manual` is never fetched, so both answer nothing for every kind. An
+/// `UNKNOWN` kind buckets like series (only movies take the movie rows).
+///
+/// * tvmaze (series): Artwork, EpisodeTitle, EpisodeSynopsis, ShowSynopsis,
+///   Genres, Length, Year.
+/// * anilist (series): Artwork, EpisodeTitle, ShowSynopsis, Genres, Length,
+///   Year (no EpisodeSynopsis: its rows carry titles only).
+/// * tenrai (series): all seven series fields.
+/// * kitsu (series): Artwork, EpisodeTitle, EpisodeSynopsis, ShowSynopsis,
+///   Length, Year (no Genres).
+/// * cinemeta (series): Artwork, EpisodeTitle, EpisodeSynopsis, ShowSynopsis,
+///   Genres, Year (no series Length: the series `Media` carries `""`).
+/// * cinemeta (movie): Artwork, MovieSynopsis, Genres, Length, Year.
+/// * wikipedia (movie): Artwork, MovieSynopsis, Year.
+/// * justwatch (movie): Artwork, MovieSynopsis, Genres, Length, Year.
+/// * episodate (series): Artwork, EpisodeTitle, ShowSynopsis, Year.
+/// * bangumi (series): Artwork, ShowSynopsis, Year.
+/// * livechart (series): Artwork, ShowSynopsis, Year.
+/// * ann (series): Artwork, ShowSynopsis, Length, Year.
+pub fn capacity(source: BrickSource, kind: Kind) -> &'static [BrickField] {
+    let movie = kind == Kind::MOVIE;
+    match (source, movie) {
+        (BrickSource::Tvmaze, false) => &[
+            BrickField::Artwork,
+            BrickField::EpisodeTitle,
+            BrickField::EpisodeSynopsis,
+            BrickField::ShowSynopsis,
+            BrickField::Genres,
+            BrickField::Length,
+            BrickField::Year,
+        ],
+        (BrickSource::Anilist, false) => &[
+            BrickField::Artwork,
+            BrickField::EpisodeTitle,
+            BrickField::ShowSynopsis,
+            BrickField::Genres,
+            BrickField::Length,
+            BrickField::Year,
+        ],
+        (BrickSource::Tenrai, false) => &[
+            BrickField::Artwork,
+            BrickField::EpisodeTitle,
+            BrickField::EpisodeSynopsis,
+            BrickField::ShowSynopsis,
+            BrickField::Genres,
+            BrickField::Length,
+            BrickField::Year,
+        ],
+        (BrickSource::Kitsu, false) => &[
+            BrickField::Artwork,
+            BrickField::EpisodeTitle,
+            BrickField::EpisodeSynopsis,
+            BrickField::ShowSynopsis,
+            BrickField::Length,
+            BrickField::Year,
+        ],
+        (BrickSource::Cinemeta, false) => &[
+            BrickField::Artwork,
+            BrickField::EpisodeTitle,
+            BrickField::EpisodeSynopsis,
+            BrickField::ShowSynopsis,
+            BrickField::Genres,
+            BrickField::Year,
+        ],
+        (BrickSource::Cinemeta, true) => &[
+            BrickField::Artwork,
+            BrickField::MovieSynopsis,
+            BrickField::Genres,
+            BrickField::Length,
+            BrickField::Year,
+        ],
+        (BrickSource::Wikipedia, true) => &[
+            BrickField::Artwork,
+            BrickField::MovieSynopsis,
+            BrickField::Year,
+        ],
+        (BrickSource::JustWatch, true) => &[
+            BrickField::Artwork,
+            BrickField::MovieSynopsis,
+            BrickField::Genres,
+            BrickField::Length,
+            BrickField::Year,
+        ],
+        (BrickSource::Episodate, false) => &[
+            BrickField::Artwork,
+            BrickField::EpisodeTitle,
+            BrickField::ShowSynopsis,
+            BrickField::Year,
+        ],
+        (BrickSource::Bangumi, false) => &[
+            BrickField::Artwork,
+            BrickField::ShowSynopsis,
+            BrickField::Year,
+        ],
+        (BrickSource::Livechart, false) => &[
+            BrickField::Artwork,
+            BrickField::ShowSynopsis,
+            BrickField::Year,
+        ],
+        (BrickSource::Ann, false) => &[
+            BrickField::Artwork,
+            BrickField::ShowSynopsis,
+            BrickField::Length,
+            BrickField::Year,
+        ],
+        _ => &[],
+    }
+}
+
+/// Whether `source` can answer `field` for `kind`: the one gate
+/// [`fill_entity`] applies before any call.
+fn is_capable(source: BrickSource, kind: Kind, field: BrickField) -> bool {
+    capacity(source, kind).contains(&field)
+}
+
+/// Artwork policy for series/anime queries.
+static POLICY_ARTWORK_SERIES: &[BrickSource] = &[
     BrickSource::Anilist,
     BrickSource::Tvmaze,
     BrickSource::Tenrai,
     BrickSource::Kitsu,
     BrickSource::Cinemeta,
-    BrickSource::JustWatch,
     BrickSource::Episodate,
     BrickSource::Bangumi,
     BrickSource::Livechart,
     BrickSource::Ann,
 ];
 
-/// Artwork order for movie queries (`Anilist` is a documented no-op: its
-/// `find` answers `Ok(None)` for movies, so it only marks the end of the
-/// list and never fills).
-static ARTWORK_MOVIE: &[BrickSource] = &[
+/// Artwork policy for movie queries.
+static POLICY_ARTWORK_MOVIE: &[BrickSource] = &[
     BrickSource::Cinemeta,
     BrickSource::JustWatch,
     BrickSource::Wikipedia,
-    BrickSource::Anilist,
 ];
 
-/// Episode-title order: tables with real per-episode titles first, AniList
+/// Episode-title policy: tables with real per-episode titles first, AniList
 /// (mislabeled absolute tables) last.
-static EPISODE_TITLE: &[BrickSource] = &[
+static POLICY_EPISODE_TITLE: &[BrickSource] = &[
     BrickSource::Tvmaze,
     BrickSource::Tenrai,
     BrickSource::Kitsu,
@@ -1394,22 +1538,16 @@ static EPISODE_TITLE: &[BrickSource] = &[
     BrickSource::Anilist,
 ];
 
-/// Episode-synopsis order: AniList episode rows carry no synopsis, so it
-/// sits behind Cinemeta; Episodate rows carry no synopsis at all, so it is
-/// last.
-static EPISODE_SYNOPSIS: &[BrickSource] = &[
+/// Episode-synopsis policy: only the four tables that carry one.
+static POLICY_EPISODE_SYNOPSIS: &[BrickSource] = &[
     BrickSource::Tvmaze,
     BrickSource::Tenrai,
     BrickSource::Kitsu,
     BrickSource::Cinemeta,
-    BrickSource::Anilist,
-    BrickSource::Episodate,
 ];
 
-/// Show-synopsis order: every series-capable provider with a synopsis.
-/// Wikipedia is absent by gating (its `find` answers `Ok(None)` for series),
-/// not by omission.
-static SHOW_SYNOPSIS: &[BrickSource] = &[
+/// Show-synopsis policy: every series-capable provider with a synopsis.
+static POLICY_SHOW_SYNOPSIS: &[BrickSource] = &[
     BrickSource::Tvmaze,
     BrickSource::Anilist,
     BrickSource::Tenrai,
@@ -1421,64 +1559,95 @@ static SHOW_SYNOPSIS: &[BrickSource] = &[
     BrickSource::Ann,
 ];
 
-/// Movie-synopsis order: the movie chain in resolver order.
-static MOVIE_SYNOPSIS: &[BrickSource] = &[
+/// Movie-synopsis policy: the movie chain in resolver order.
+static POLICY_MOVIE_SYNOPSIS: &[BrickSource] = &[
     BrickSource::Wikipedia,
     BrickSource::Cinemeta,
     BrickSource::JustWatch,
 ];
 
-/// Genre order: the only providers that carry display genres.
-static GENRES: &[BrickSource] = &[
+/// Genre policy, series leg.
+static POLICY_GENRES_SERIES: &[BrickSource] = &[
     BrickSource::Tvmaze,
     BrickSource::Anilist,
     BrickSource::Tenrai,
     BrickSource::Cinemeta,
 ];
 
-/// Length order: the providers that carry a runtime.
-static LENGTH: &[BrickSource] = &[
+/// Genre policy, movie leg.
+static POLICY_GENRES_MOVIE: &[BrickSource] = &[BrickSource::Cinemeta, BrickSource::JustWatch];
+
+/// Length policy, series leg (pre-filter): Cinemeta names a slot its series
+/// `Media` cannot fill (`length: ""`), so the filtered [`priority`] drops it.
+/// Kept as the policy record; [`priority`] serves [`LENGTH_SERIES`].
+#[allow(dead_code)]
+static POLICY_LENGTH_SERIES: &[BrickSource] = &[
     BrickSource::Tvmaze,
     BrickSource::Anilist,
     BrickSource::Tenrai,
     BrickSource::Kitsu,
     BrickSource::Cinemeta,
-    BrickSource::JustWatch,
     BrickSource::Ann,
 ];
 
-/// Year order: every live provider carries a year.
-static YEAR: &[BrickSource] = &[
+/// Length policy, movie leg.
+static POLICY_LENGTH_MOVIE: &[BrickSource] = &[BrickSource::Cinemeta, BrickSource::JustWatch];
+
+/// Year policy, series leg.
+static POLICY_YEAR_SERIES: &[BrickSource] = &[
     BrickSource::Cinemeta,
     BrickSource::Tvmaze,
     BrickSource::Anilist,
     BrickSource::Tenrai,
     BrickSource::Kitsu,
-    BrickSource::Wikipedia,
-    BrickSource::JustWatch,
     BrickSource::Episodate,
     BrickSource::Bangumi,
     BrickSource::Livechart,
     BrickSource::Ann,
 ];
 
-/// `priority`: the provider order for one kind and field, most capable
-/// first (see the module docs for the tables and the TMDb/Wikipedia-series
-/// deviations). [`fill_entity`] walks this against the supplied sources;
-/// providers the caller did not supply are skipped, never fetched. Title
-/// answers an empty list: titles are manual-only until the T7-4 Fix flow.
+/// Year policy, movie leg.
+static POLICY_YEAR_MOVIE: &[BrickSource] = &[
+    BrickSource::Cinemeta,
+    BrickSource::Wikipedia,
+    BrickSource::JustWatch,
+];
+
+/// Filtered Length-series order: the policy minus Cinemeta, which carries no
+/// series runtime (see [`capacity`]).
+static LENGTH_SERIES: &[BrickSource] = &[
+    BrickSource::Tvmaze,
+    BrickSource::Anilist,
+    BrickSource::Tenrai,
+    BrickSource::Kitsu,
+    BrickSource::Ann,
+];
+
+/// `priority`: the policy order for one kind and field, most capable first,
+/// already filtered through [`capacity`] -- no entry names a source incapable
+/// of the slot (see the module docs for the tables and deviations).
+/// [`fill_entity`] walks this against the supplied sources, then appends any
+/// supplied capable source the policy does not name (last); providers the
+/// caller did not supply are skipped, never fetched. Title answers an empty
+/// list: titles are manual-only until the T7-4 Fix flow. Wrong-kind synopsis
+/// and episode slots answer `[]`: a movie never walks episode/show slots and
+/// a series never walks the movie slot.
 pub fn priority(kind: Kind, field: BrickField) -> &'static [BrickSource] {
-    match field {
-        BrickField::Artwork if kind == Kind::MOVIE => ARTWORK_MOVIE,
-        BrickField::Artwork => ARTWORK_SERIES,
-        BrickField::EpisodeTitle => EPISODE_TITLE,
-        BrickField::EpisodeSynopsis => EPISODE_SYNOPSIS,
-        BrickField::ShowSynopsis => SHOW_SYNOPSIS,
-        BrickField::MovieSynopsis => MOVIE_SYNOPSIS,
-        BrickField::Genres => GENRES,
-        BrickField::Length => LENGTH,
-        BrickField::Year => YEAR,
-        BrickField::Title => &[],
+    let movie = kind == Kind::MOVIE;
+    match (field, movie) {
+        (BrickField::Artwork, true) => POLICY_ARTWORK_MOVIE,
+        (BrickField::Artwork, false) => POLICY_ARTWORK_SERIES,
+        (BrickField::EpisodeTitle, false) => POLICY_EPISODE_TITLE,
+        (BrickField::EpisodeSynopsis, false) => POLICY_EPISODE_SYNOPSIS,
+        (BrickField::ShowSynopsis, false) => POLICY_SHOW_SYNOPSIS,
+        (BrickField::MovieSynopsis, true) => POLICY_MOVIE_SYNOPSIS,
+        (BrickField::Genres, true) => POLICY_GENRES_MOVIE,
+        (BrickField::Genres, false) => POLICY_GENRES_SERIES,
+        (BrickField::Length, true) => POLICY_LENGTH_MOVIE,
+        (BrickField::Length, false) => LENGTH_SERIES,
+        (BrickField::Year, true) => POLICY_YEAR_MOVIE,
+        (BrickField::Year, false) => POLICY_YEAR_SERIES,
+        _ => &[],
     }
 }
 
@@ -1598,9 +1767,13 @@ fn provenance_for(
 /// * A slot holding `Found` or a fresh miss (`MissWaiting`) is skipped: no
 ///   fetch, no write.
 /// * A `RetryDue`/`Absent` slot walks the field's [`priority`] list against
-///   the supplied sources matched by [`BrickSource::provider_name`]. One
-///   answer per provider is fetched per pass (a local map): a provider
-///   backing several fields is still called at most once.
+///   the supplied sources matched by [`BrickSource::provider_name`], then any
+///   supplied capable source the policy does not name (in supplied order,
+///   last). Incapable sources ([`capacity`]) are skipped BEFORE any call and
+///   never count: a gated `Ok(None)` from a source that cannot answer the
+///   slot must never become a 24 h Miss. One answer per provider is fetched
+///   per pass (a local map): a provider backing several fields is still
+///   called at most once.
 /// * `Ok(Some(media))`: only the requested field is extracted
 ///   ([`extract_field_bricks`]); a media without the field, or one the
 ///   cross-entity guard ([`answer_matches_target`], normalised title plus
@@ -1612,10 +1785,15 @@ fn provenance_for(
 /// * `Err` records the error and continues -- and inserts NO miss for that
 ///   field: a transient failure must never become a 24 h miss. After the
 ///   last provider, a field no provider filled is a bounded
-///   [`Brick::miss`] ONLY when every consulted provider answered
-///   definitively; any error leaves the slot `Absent` so the next pass
-///   retries it. A field no supplied source covers at all is likewise left
-///   `Absent` (nothing was learned).
+///   [`Brick::miss`] ONLY when at least one consulted CAPABLE source answered
+///   definitively (`consulted_capable >= 1` with every answer definitive);
+///   any error leaves the slot `Absent` so the next pass retries it. A field
+///   with zero capable sources supplied/available is likewise left `Absent`
+///   (nothing was learned, no 24 h penalty, retry next pass).
+///
+/// All bricks of the pass persist through one [`BrickCache::insert_many`]
+/// call: one save, all-or-nothing. `sources` is the caller's provider set
+/// (usually the resolver's ordered chain); `cancel` bounds every `find`.
 ///
 /// All bricks of the pass persist through one [`BrickCache::insert_many`]
 /// call: one save, all-or-nothing. `sources` is the caller's provider set
@@ -1645,11 +1823,29 @@ pub fn fill_entity(
             BrickLookup::Found(_) | BrickLookup::MissWaiting(_) => continue,
             BrickLookup::RetryDue | BrickLookup::Absent => {}
         }
-        let mut consulted = 0usize;
+        let mut consulted_capable = 0usize;
         let mut miss_source = None::<BrickSource>;
         let mut errors: Vec<String> = Vec::new();
         let mut won: Option<Brick> = None;
-        for want in priority(q.kind, field) {
+        // Policy order first, then any supplied capable source the policy
+        // does not name (in supplied order, last): a new provider is never
+        // silently ignored. Incapable entries never reach the wire.
+        let mut order: Vec<BrickSource> = priority(q.kind, field).to_vec();
+        for source in sources.iter() {
+            let Some(mapped) = BrickSource::for_provider(source.name()) else {
+                continue;
+            };
+            if !is_capable(mapped, q.kind, field) {
+                continue;
+            }
+            if !order.contains(&mapped) {
+                order.push(mapped);
+            }
+        }
+        for want in &order {
+            if !is_capable(*want, q.kind, field) {
+                continue;
+            }
             let Some(provider) = sources
                 .iter()
                 .find(|source| source.name() == want.provider_name())
@@ -1659,7 +1855,7 @@ pub fn fill_entity(
             if miss_source.is_none() {
                 miss_source = Some(*want);
             }
-            consulted += 1;
+            consulted_capable += 1;
             let name = provider.name().to_string();
             let answer =
                 fetched
@@ -1679,7 +1875,7 @@ pub fn fill_entity(
             if !answer_matches_target(q, media) {
                 continue;
             }
-            let value = extract_field_bricks(*want, media, q, episode_key)
+            let value = extract_field_bricks(media, q, episode_key)
                 .into_iter()
                 .find(|(found_field, _)| *found_field == field)
                 .map(|(_, value)| value);
@@ -1702,15 +1898,15 @@ pub fn fill_entity(
             None if !errors.is_empty() => {
                 report.errored.push((field, errors.join("; ")));
             }
-            None if consulted > 0 => {
+            None if consulted_capable > 0 => {
                 report.missed.push(field);
                 bricks.push(Brick::miss(
                     field,
-                    miss_source.expect("consulted > 0 implies a miss source"),
+                    miss_source.expect("consulted_capable > 0 implies a miss source"),
                     target.clone(),
                     episode,
                     format!(
-                        "fill: no {field:?} from {consulted} provider(s) for {}",
+                        "fill: no {field:?} from {consulted_capable} provider(s) for {}",
                         target.id
                     ),
                 ));

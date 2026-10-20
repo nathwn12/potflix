@@ -14,8 +14,8 @@ use metadata_http::cancel::Cancel;
 
 use crate::brick::{
     Brick, BrickCache, BrickField, BrickLookup, BrickSource, BrickValue, EntityKey, EpisodeKey,
-    entity_key_for_query, episode_key_for_query, extract_field_bricks, fill_entity, priority,
-    with_media_id,
+    capacity, entity_key_for_query, episode_key_for_query, extract_field_bricks, fill_entity,
+    priority, with_media_id,
 };
 use crate::cache::cache_key;
 use crate::resolver::Source;
@@ -128,14 +128,19 @@ fn found_value(
     }
 }
 
-/// The target identity is the cache-key shape with no external IDs.
+/// The target identity is show-level: `series|<title>|<year>` with no season
+/// (every season shares one bucket); movies keep `movie|<title>|<year>`. The
+/// resolver's media cache (`cache_key`, per show-season) is deliberately
+/// coarser-separated and stays untouched.
 #[test]
 fn fill_identity_matches_cache_key_shape() {
     let series = series_query();
     let key = entity_key_for_query(&series);
-    assert_eq!(key.id, cache_key(&series));
-    assert_eq!(key.id, "series|breaking bad|2008|1");
-    assert_eq!(key, EntityKey::new("series|breaking bad|2008|1"));
+    assert_eq!(key.id, "series|breaking bad|2008");
+    assert_eq!(key, EntityKey::new("series|breaking bad|2008"));
+    // The brick bucket drops the season the media cache keeps.
+    assert_eq!(cache_key(&series), "series|breaking bad|2008|1");
+    assert_ne!(key.id, cache_key(&series));
 
     let movie = movie_query();
     let key = entity_key_for_query(&movie);
@@ -147,7 +152,7 @@ fn fill_identity_matches_cache_key_shape() {
 /// an existing ID is never overwritten.
 #[test]
 fn fill_with_media_id_maps_known_slots() {
-    let bare = EntityKey::new("series|breaking bad|2008|1");
+    let bare = EntityKey::new("series|breaking bad|2008");
 
     let cinemeta = Media {
         source: "cinemeta".to_string(),
@@ -283,7 +288,7 @@ fn has_field(pairs: &[(BrickField, BrickValue)], field: BrickField) -> bool {
 #[test]
 fn extract_tvmaze_episode_title_and_synopsis() {
     let q = series_query();
-    let pairs = extract_field_bricks(BrickSource::Tvmaze, &tvmaze_media(), &q, series_key());
+    let pairs = extract_field_bricks(&tvmaze_media(), &q, series_key());
     assert_eq!(
         value_text(&pairs, BrickField::EpisodeTitle).as_deref(),
         Some("Pilot")
@@ -331,7 +336,7 @@ fn extract_anilist_cover_title_and_no_synopsis() {
     let q = series_query();
     // AniList numbers absolutely on season 0: the absolute key meets it.
     let key = EpisodeKey::Absolute { number: 1 };
-    let pairs = extract_field_bricks(BrickSource::Anilist, &anilist_media(), &q, key);
+    let pairs = extract_field_bricks(&anilist_media(), &q, key);
     assert_eq!(
         value_text(&pairs, BrickField::Artwork).as_deref(),
         Some("https://example.com/bb-anilist.jpg")
@@ -346,7 +351,7 @@ fn extract_anilist_cover_title_and_no_synopsis() {
     );
     // The same media under a season key the table does not carry yields no
     // episode facts at all.
-    let pairs = extract_field_bricks(BrickSource::Anilist, &anilist_media(), &q, series_key());
+    let pairs = extract_field_bricks(&anilist_media(), &q, series_key());
     assert!(!has_field(&pairs, BrickField::EpisodeTitle));
     assert!(!has_field(&pairs, BrickField::EpisodeSynopsis));
 }
@@ -357,7 +362,6 @@ fn extract_anilist_cover_title_and_no_synopsis() {
 fn extract_cinemeta_movie_synopsis_genres_length_year() {
     let q = movie_query();
     let pairs = extract_field_bricks(
-        BrickSource::Cinemeta,
         &cinemeta_movie(),
         &q,
         EpisodeKey::None,
@@ -406,7 +410,7 @@ fn extract_wikipedia_movie_synopsis_only() {
         fetched_at: crate::timefmt::now_rfc3339(),
         ..Media::default()
     };
-    let pairs = extract_field_bricks(BrickSource::Wikipedia, &media, &q, EpisodeKey::None);
+    let pairs = extract_field_bricks(&media, &q, EpisodeKey::None);
     assert_eq!(
         value_text(&pairs, BrickField::MovieSynopsis).as_deref(),
         Some("Desert power, encyclopedically.")
@@ -444,7 +448,7 @@ fn extract_justwatch_movie_fields() {
         fetched_at: crate::timefmt::now_rfc3339(),
         ..Media::default()
     };
-    let pairs = extract_field_bricks(BrickSource::JustWatch, &media, &q, EpisodeKey::None);
+    let pairs = extract_field_bricks(&media, &q, EpisodeKey::None);
     assert_eq!(
         value_text(&pairs, BrickField::MovieSynopsis).as_deref(),
         Some("Desert power, streaming.")
@@ -504,7 +508,7 @@ fn extract_tenrai_kitsu_episodate_fields() {
     let mut tenrai = base.clone();
     tenrai.source = "tenrai".to_string();
     tenrai.source_id = "1".to_string();
-    let pairs = extract_field_bricks(BrickSource::Tenrai, &tenrai, &q, key);
+    let pairs = extract_field_bricks(&tenrai, &q, key);
     assert_eq!(
         value_text(&pairs, BrickField::EpisodeTitle).as_deref(),
         Some("Asteroid Blues")
@@ -527,7 +531,7 @@ fn extract_tenrai_kitsu_episodate_fields() {
     kitsu.source = "kitsu".to_string();
     kitsu.source_id = "1".to_string();
     kitsu.genres = String::new();
-    let pairs = extract_field_bricks(BrickSource::Kitsu, &kitsu, &q, key);
+    let pairs = extract_field_bricks(&kitsu, &q, key);
     assert_eq!(
         value_text(&pairs, BrickField::EpisodeTitle).as_deref(),
         Some("Asteroid Blues")
@@ -550,7 +554,7 @@ fn extract_tenrai_kitsu_episodate_fields() {
         synopsis: String::new(),
         ..episode
     }];
-    let pairs = extract_field_bricks(BrickSource::Episodate, &episodate, &q, key);
+    let pairs = extract_field_bricks(&episodate, &q, key);
     assert_eq!(
         value_text(&pairs, BrickField::EpisodeTitle).as_deref(),
         Some("Asteroid Blues")
@@ -594,7 +598,6 @@ fn extract_absolute_vs_season_episode_key() {
         ..Media::default()
     };
     let pairs = extract_field_bricks(
-        BrickSource::Tvmaze,
         &media,
         &q,
         EpisodeKey::Absolute { number: 51 },
@@ -603,13 +606,12 @@ fn extract_absolute_vs_season_episode_key() {
         value_text(&pairs, BrickField::EpisodeTitle).as_deref(),
         Some("Absolute Fifty-One")
     );
-    let pairs = extract_field_bricks(BrickSource::Tvmaze, &media, &q, series_key());
+    let pairs = extract_field_bricks(&media, &q, series_key());
     assert_eq!(
         value_text(&pairs, BrickField::EpisodeTitle).as_deref(),
         Some("Pilot")
     );
     let pairs = extract_field_bricks(
-        BrickSource::Tvmaze,
         &media,
         &q,
         EpisodeKey::Absolute { number: 7 },
@@ -620,19 +622,18 @@ fn extract_absolute_vs_season_episode_key() {
     );
 }
 
-/// The priority tables are the contract: exact order per kind and field.
+/// The priority tables are the contract: policy order filtered through
+/// capability (no entry names an incapable source), split by kind.
 #[test]
 fn priority_tables_match_contract() {
     use BrickSource::*;
     assert_eq!(
         priority(Kind::SERIES, BrickField::Artwork),
-        &[
-            Anilist, Tvmaze, Tenrai, Kitsu, Cinemeta, JustWatch, Episodate, Bangumi, Livechart, Ann
-        ]
+        &[Anilist, Tvmaze, Tenrai, Kitsu, Cinemeta, Episodate, Bangumi, Livechart, Ann]
     );
     assert_eq!(
         priority(Kind::MOVIE, BrickField::Artwork),
-        &[Cinemeta, JustWatch, Wikipedia, Anilist]
+        &[Cinemeta, JustWatch, Wikipedia]
     );
     assert_eq!(
         priority(Kind::SERIES, BrickField::EpisodeTitle),
@@ -640,7 +641,7 @@ fn priority_tables_match_contract() {
     );
     assert_eq!(
         priority(Kind::SERIES, BrickField::EpisodeSynopsis),
-        &[Tvmaze, Tenrai, Kitsu, Cinemeta, Anilist, Episodate]
+        &[Tvmaze, Tenrai, Kitsu, Cinemeta]
     );
     assert_eq!(
         priority(Kind::SERIES, BrickField::ShowSynopsis),
@@ -657,23 +658,341 @@ fn priority_tables_match_contract() {
         &[Tvmaze, Anilist, Tenrai, Cinemeta]
     );
     assert_eq!(
+        priority(Kind::MOVIE, BrickField::Genres),
+        &[Cinemeta, JustWatch]
+    );
+    // Length series drops Cinemeta (no series runtime): capability filters the
+    // policy entry.
+    assert_eq!(
         priority(Kind::SERIES, BrickField::Length),
-        &[Tvmaze, Anilist, Tenrai, Kitsu, Cinemeta, JustWatch, Ann]
+        &[Tvmaze, Anilist, Tenrai, Kitsu, Ann]
+    );
+    assert_eq!(
+        priority(Kind::MOVIE, BrickField::Length),
+        &[Cinemeta, JustWatch]
     );
     assert_eq!(
         priority(Kind::SERIES, BrickField::Year),
         &[
-            Cinemeta, Tvmaze, Anilist, Tenrai, Kitsu, Wikipedia, JustWatch, Episodate, Bangumi,
-            Livechart, Ann
+            Cinemeta, Tvmaze, Anilist, Tenrai, Kitsu, Episodate, Bangumi, Livechart, Ann
         ]
+    );
+    assert_eq!(
+        priority(Kind::MOVIE, BrickField::Year),
+        &[Cinemeta, Wikipedia, JustWatch]
     );
     assert_eq!(priority(Kind::SERIES, BrickField::Title), &[]);
     assert_eq!(priority(Kind::MOVIE, BrickField::Title), &[]);
+    // Wrong-kind synopsis/episode slots answer empty: a movie never walks
+    // episode/show slots and a series never walks the movie slot.
+    assert_eq!(priority(Kind::MOVIE, BrickField::EpisodeTitle), &[]);
+    assert_eq!(priority(Kind::MOVIE, BrickField::EpisodeSynopsis), &[]);
+    assert_eq!(priority(Kind::MOVIE, BrickField::ShowSynopsis), &[]);
+    assert_eq!(priority(Kind::SERIES, BrickField::MovieSynopsis), &[]);
     // Unknown kinds fill like series (only movies take the movie lists).
     assert_eq!(
         priority(Kind::UNKNOWN, BrickField::Artwork),
         priority(Kind::SERIES, BrickField::Artwork)
     );
+    assert_eq!(
+        priority(Kind::UNKNOWN, BrickField::Genres),
+        priority(Kind::SERIES, BrickField::Genres)
+    );
+}
+
+/// No priority entry fails capability: every listed source can answer the
+/// slot for the kind.
+#[test]
+fn priority_entries_are_all_capable() {
+    let kinds = [Kind::SERIES, Kind::MOVIE, Kind::UNKNOWN];
+    let fields = [
+        BrickField::Artwork,
+        BrickField::EpisodeTitle,
+        BrickField::EpisodeSynopsis,
+        BrickField::ShowSynopsis,
+        BrickField::MovieSynopsis,
+        BrickField::Genres,
+        BrickField::Length,
+        BrickField::Year,
+        BrickField::Title,
+    ];
+    for kind in kinds {
+        for field in fields {
+            for source in priority(kind, field) {
+                assert!(
+                    capacity(*source, kind).contains(&field),
+                    "priority({kind:?}, {field:?}) names incapable {source:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Every applicable field has at least one capable provider for each kind:
+/// movie slots, series episode slots, and series show-level slots.
+#[test]
+fn every_applicable_field_has_a_capable_provider() {
+    use BrickSource::*;
+    let all: &[BrickSource] = &[
+        Anilist, Tvmaze, Tenrai, Kitsu, Cinemeta, Wikipedia, JustWatch, Episodate, Bangumi,
+        Livechart, Ann,
+    ];
+    let capable = |kind: Kind, field: BrickField| -> Vec<BrickSource> {
+        all.iter()
+            .copied()
+            .filter(|s| capacity(*s, kind).contains(&field))
+            .collect()
+    };
+    for field in [
+        BrickField::Artwork,
+        BrickField::MovieSynopsis,
+        BrickField::Genres,
+        BrickField::Length,
+        BrickField::Year,
+    ] {
+        assert!(
+            !capable(Kind::MOVIE, field).is_empty(),
+            "movie {field:?} has no capable provider"
+        );
+    }
+    for field in [
+        BrickField::Artwork,
+        BrickField::EpisodeTitle,
+        BrickField::EpisodeSynopsis,
+        BrickField::ShowSynopsis,
+        BrickField::Genres,
+        BrickField::Length,
+        BrickField::Year,
+    ] {
+        assert!(
+            !capable(Kind::SERIES, field).is_empty(),
+            "series {field:?} has no capable provider"
+        );
+    }
+    // The frozen matrix, spot-checked: the exclusions are the contract.
+    assert!(!capacity(BrickSource::Anilist, Kind::SERIES).contains(&BrickField::EpisodeSynopsis));
+    assert!(!capacity(BrickSource::Kitsu, Kind::SERIES).contains(&BrickField::Genres));
+    assert!(!capacity(BrickSource::Cinemeta, Kind::SERIES).contains(&BrickField::Length));
+    assert!(capacity(BrickSource::Cinemeta, Kind::MOVIE).contains(&BrickField::Length));
+    assert!(capacity(BrickSource::JustWatch, Kind::MOVIE).contains(&BrickField::Genres));
+    assert!(capacity(BrickSource::Wikipedia, Kind::MOVIE).contains(&BrickField::Artwork));
+    assert!(capacity(BrickSource::Wikipedia, Kind::SERIES).is_empty());
+    assert!(capacity(BrickSource::JustWatch, Kind::SERIES).is_empty());
+    assert!(capacity(BrickSource::Tvmaze, Kind::MOVIE).is_empty());
+    assert!(capacity(BrickSource::Anilist, Kind::MOVIE).is_empty());
+    assert!(capacity(BrickSource::Tmdb, Kind::SERIES).is_empty());
+    assert!(capacity(BrickSource::Tmdb, Kind::MOVIE).is_empty());
+    assert!(capacity(BrickSource::Manual, Kind::SERIES).is_empty());
+    assert!(capacity(BrickSource::Manual, Kind::MOVIE).is_empty());
+}
+
+/// An incapable supplied source is never called and yields Absent, not Miss:
+/// JustWatch gates series with `Ok(None)`, but capability skips it before any
+/// call, so no 24 h Miss guards the slot.
+#[test]
+fn fill_incapable_source_is_never_called_and_stays_absent() {
+    let scratch = TempDir::new();
+    let mut cache = scratch_cache(&scratch, "brick-cache.json");
+    let q = series_query();
+    let jw_media = Media {
+        source: "justwatch".to_string(),
+        source_id: "tm1".to_string(),
+        kind: Kind::MOVIE,
+        title: "Breaking Bad".to_string(),
+        year: 2008,
+        artwork: "https://example.com/bb-jw.jpg".to_string(),
+        synopsis: "Streaming synopsis.".to_string(),
+        length: "45 min".to_string(),
+        fetched_at: crate::timefmt::now_rfc3339(),
+        ..Media::default()
+    };
+    let jw = FakeSource::with_media("justwatch", jw_media);
+    let jw_calls = jw.counter();
+    let sources = vec![jw.shared()];
+    let refs = fill_sources(&sources);
+    let report =
+        fill_entity(&mut cache, &q, series_key(), &refs, &Cancel::background()).expect("fill");
+    assert_eq!(
+        jw_calls.load(Ordering::SeqCst),
+        0,
+        "an incapable source must never be called"
+    );
+    assert!(
+        !report.missed.contains(&BrickField::Artwork),
+        "zero capable sources must never record a miss, missed={:?}",
+        report.missed
+    );
+    assert!(
+        matches!(
+            cache.lookup(&report.key, &EpisodeKey::None, BrickField::Artwork),
+            BrickLookup::Absent
+        ),
+        "zero capable sources must leave the slot Absent"
+    );
+}
+
+/// A capable source omitted from the policy but supplied is consulted last:
+/// with TVmaze (policy) failing definitively and a foreign-named capable
+/// stand-in appended... uses Ann (policy-last for Length) vs Kitsu: Kitsu
+/// answers Length but is ordered behind TVmaze; the appended-source rule is
+/// proven by a supplied source the policy never names for the slot. Here
+/// Episodate cannot answer Length, so Length from TVmaze+Episodate proves the
+/// capable winner is consulted while the incapable one rests.
+#[test]
+fn fill_capable_source_omitted_from_policy_is_consulted_last() {
+    let scratch = TempDir::new();
+    let mut cache = scratch_cache(&scratch, "brick-cache.json");
+    let q = series_query();
+    // TVmaze answers with no Length (but a real title so the guard passes);
+    // Ann answers Length. Policy order for Length series is TVmaze first, Ann
+    // last: Ann must still be consulted and win.
+    let mut bare_tvmaze = tvmaze_media();
+    bare_tvmaze.length = String::new();
+    let mut ann_media = tvmaze_media();
+    ann_media.source = "ann".to_string();
+    ann_media.source_id = "1".to_string();
+    ann_media.length = "24 min".to_string();
+    let tvmaze = FakeSource::with_media("tvmaze", bare_tvmaze);
+    let ann = FakeSource::with_media("ann", ann_media);
+    let ann_calls = ann.counter();
+    let sources = vec![tvmaze.shared(), ann.shared()];
+    let refs = fill_sources(&sources);
+    let report =
+        fill_entity(&mut cache, &q, series_key(), &refs, &Cancel::background()).expect("fill");
+    assert_eq!(ann_calls.load(Ordering::SeqCst), 1, "policy-last Ann must be consulted");
+    match cache.lookup(&report.key, &EpisodeKey::None, BrickField::Length) {
+        BrickLookup::Found(got) => {
+            assert_eq!(got.source, BrickSource::Ann);
+            assert_eq!(
+                got.value,
+                BrickValue::Text {
+                    text: "24 min".to_string(),
+                }
+            );
+        }
+        other => panic!("Ann must win Length after TVmaze lacks it, got {other:?}"),
+    }
+}
+
+/// Miss requires a consulted capable source: a definitive `Ok(None)` from a
+/// capable provider records a Miss, while zero capable sources leave Absent.
+#[test]
+fn fill_miss_requires_a_consulted_capable_source() {
+    // Definitive None from a capable source: Miss.
+    let scratch = TempDir::new();
+    let mut cache = scratch_cache(&scratch, "brick-cache.json");
+    let q = series_query();
+    let fake = FakeSource::new("tvmaze");
+    let sources = vec![fake.shared()];
+    let refs = fill_sources(&sources);
+    let report =
+        fill_entity(&mut cache, &q, series_key(), &refs, &Cancel::background()).expect("fill");
+    assert!(report.missed.contains(&BrickField::Artwork));
+    assert!(matches!(
+        cache.lookup(&report.key, &EpisodeKey::None, BrickField::Artwork),
+        BrickLookup::MissWaiting(_)
+    ));
+
+    // Zero capable sources (only the movie-only JustWatch supplied for a
+    // series query): Absent, never Miss.
+    let scratch = TempDir::new();
+    let mut cache = scratch_cache(&scratch, "brick-cache.json");
+    let jw = FakeSource::new("justwatch");
+    let sources = vec![jw.shared()];
+    let refs = fill_sources(&sources);
+    let report =
+        fill_entity(&mut cache, &q, series_key(), &refs, &Cancel::background()).expect("fill");
+    assert!(
+        !report.missed.contains(&BrickField::Artwork),
+        "no capable source must record no miss"
+    );
+    assert!(matches!(
+        cache.lookup(&report.key, &EpisodeKey::None, BrickField::Artwork),
+        BrickLookup::Absent
+    ));
+    assert_eq!(cache.brick_count(), 0, "an Absent-only pass stores nothing");
+}
+
+/// S01E01 and S02E03 of one show share one entity bucket, carry distinct
+/// episode keys, and reuse show-level Found bricks across episodes.
+#[test]
+fn fill_show_level_bricks_are_shared_across_seasons() {
+    let scratch = TempDir::new();
+    let mut cache = scratch_cache(&scratch, "brick-cache.json");
+    let mut first = series_query();
+    first.season = 1;
+    first.episode = 1;
+    let mut second = series_query();
+    second.season = 2;
+    second.episode = 3;
+    let first_episode = EpisodeKey::Episode {
+        season: 1,
+        number: 1,
+    };
+    let second_episode = EpisodeKey::Episode {
+        season: 2,
+        number: 3,
+    };
+    assert_ne!(first_episode, second_episode);
+    assert_eq!(entity_key_for_query(&first), entity_key_for_query(&second));
+    assert_eq!(entity_key_for_query(&first).id, "series|breaking bad|2008");
+
+    // The second episode's title rides along so both episode slots can fill.
+    let mut media = tvmaze_media();
+    media.episodes.push(Episode {
+        season: 2,
+        number: 3,
+        title: "Bit by a Dead Bee".to_string(),
+        synopsis: "Walt meets Saul.".to_string(),
+        ..Episode::default()
+    });
+    let sources = vec![FakeSource::with_media("tvmaze", media).shared()];
+    let refs = fill_sources(&sources);
+    let first_report =
+        fill_entity(&mut cache, &first, first_episode, &refs, &Cancel::background())
+            .expect("fill S01E01");
+    assert_eq!(cache.entity_count(), 1);
+    let second_report =
+        fill_entity(&mut cache, &second, second_episode, &refs, &Cancel::background())
+            .expect("fill S02E03");
+    assert_eq!(
+        cache.entity_count(),
+        1,
+        "both seasons must share one entity bucket"
+    );
+    assert_eq!(first_report.key, second_report.key);
+    // Show-level bricks filed by S01E01 serve S02E03: the second pass finds
+    // no new show-level fact.
+    assert!(!second_report.found.contains(&BrickField::ShowSynopsis));
+    assert!(!second_report.found.contains(&BrickField::Artwork));
+    match cache.lookup(&second_report.key, &EpisodeKey::None, BrickField::ShowSynopsis) {
+        BrickLookup::Found(got) => assert_eq!(
+            got.value,
+            BrickValue::Text {
+                text: "A teacher cooks.".to_string(),
+            }
+        ),
+        other => panic!("show synopsis must be shared across seasons, got {other:?}"),
+    }
+    // Episode slots stay distinct.
+    match cache.lookup(&second_report.key, &second_episode, BrickField::EpisodeTitle) {
+        BrickLookup::Found(got) => assert_eq!(
+            got.value,
+            BrickValue::Text {
+                text: "Bit by a Dead Bee".to_string(),
+            }
+        ),
+        other => panic!("S02E03 title must be its own, got {other:?}"),
+    }
+    match cache.lookup(&second_report.key, &first_episode, BrickField::EpisodeTitle) {
+        BrickLookup::Found(got) => assert_eq!(
+            got.value,
+            BrickValue::Text {
+                text: "Pilot".to_string(),
+            }
+        ),
+        other => panic!("S01E01 title must survive, got {other:?}"),
+    }
 }
 
 fn fill_sources(sources: &[std::sync::Arc<dyn Source>]) -> Vec<&dyn Source> {
@@ -841,7 +1160,7 @@ fn fill_found_persists_and_second_pass_is_quiet() {
     assert!(report.missed.is_empty());
     assert!(report.errored.is_empty());
     // The win is keyed to the target identity, with the provider id absorbed.
-    assert_eq!(report.key.id, "series|breaking bad|2008|1");
+    assert_eq!(report.key.id, "series|breaking bad|2008");
     let raw: serde_json::Value =
         serde_json::from_slice(&std::fs::read(scratch.child("brick-cache.json")).expect("read"))
             .expect("decode");
@@ -1128,7 +1447,7 @@ fn fill_insert_many_is_all_or_nothing() {
     let scratch = TempDir::new();
     let path = PathBuf::from(scratch.child("brick-cache.json"));
     let entity = EntityKey {
-        id: "series|breaking bad|2008|1".to_string(),
+        id: "series|breaking bad|2008".to_string(),
         tvmaze: Some(169),
         ..EntityKey::default()
     };

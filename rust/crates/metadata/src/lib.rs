@@ -100,7 +100,7 @@ use metadata_http::cancel::CancelError;
 pub use metadata_core::types::{Button, Episode, Kind, Media, Query, Resolution};
 pub use brick::{
     BRICK_FILE_NAME, BRICK_SCHEMA, Brick, BrickCache, BrickField, BrickLookup, BrickSource,
-    BrickStatus, BrickValue, EntityKey, EpisodeKey, FillReport, MISS_RETRY_AFTER,
+    BrickStatus, BrickValue, EntityKey, EpisodeKey, FillReport, MISS_RETRY_AFTER, capacity,
     entity_key_for_query, episode_key_for_query, extract_field_bricks, fill_entity, priority,
     with_media_id,
 };

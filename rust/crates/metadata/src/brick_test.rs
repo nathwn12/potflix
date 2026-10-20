@@ -21,7 +21,7 @@ fn scratch_cache(scratch: &TempDir, name: &str) -> BrickCache {
 
 fn show_entity() -> EntityKey {
     EntityKey {
-        id: "series|breaking bad|2008|1".to_string(),
+        id: "series|breaking bad|2008".to_string(),
         tvmaze: Some(169),
         imdb: Some("tt0903747".to_string()),
         ..EntityKey::default()
@@ -29,7 +29,7 @@ fn show_entity() -> EntityKey {
 }
 
 fn other_entity() -> EntityKey {
-    EntityKey::new("series|better call saul|2015|1")
+    EntityKey::new("series|better call saul|2015")
 }
 
 fn episode() -> EpisodeKey {
@@ -143,7 +143,7 @@ fn brick_mismatched_entity_reject() {
     );
     // Case and whitespace differences are the SAME entity, not a mismatch.
     let mut alias = show_entity();
-    alias.id = "  Series|BREAKING Bad|2008|1 ".to_string();
+    alias.id = "  Series|BREAKING Bad|2008 ".to_string();
     cache
         .insert(&alias, miss_artwork(&alias))
         .expect("normalised-id insert");
@@ -623,7 +623,7 @@ fn brick_insert_absorbs_external_ids() {
     let scratch = TempDir::new();
     let path = PathBuf::from(scratch.child("brick-cache.json"));
     // The entity starts bare: no external IDs at all.
-    let bare = EntityKey::new("series|breaking bad|2008|1");
+    let bare = EntityKey::new("series|breaking bad|2008");
     let mut cache = BrickCache::empty_at(path.clone());
     let poster = Brick::found(
         BrickField::Artwork,
@@ -1304,7 +1304,7 @@ fn brick_miss_retry_bound_is_behavior() {
 fn brick_absorb_ids_only_save_failure_rolls_back() {
     let scratch = TempDir::new();
     let path = PathBuf::from(scratch.child("brick-cache.json"));
-    let bare = EntityKey::new("series|breaking bad|2008|1");
+    let bare = EntityKey::new("series|breaking bad|2008");
     let mut cache = BrickCache::empty_at(path.clone());
     cache
         .insert(
@@ -1350,7 +1350,7 @@ fn brick_absorb_ids_only_save_failure_rolls_back() {
     let raw: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).expect("read file")).expect("decode file");
     let stored = &raw["entities"][0]["entity"];
-    assert_eq!(stored["id"], "series|breaking bad|2008|1");
+    assert_eq!(stored["id"], "series|breaking bad|2008");
     assert!(
         stored.get("tvmaze").is_none(),
         "rolled-back absorb leaked tvmaze: {stored}"
