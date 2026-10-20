@@ -82,9 +82,8 @@
 //! Capability is truth, priority is policy. [`capacity`] names the fields one
 //! source can answer for one kind (the frozen matrix; a wrong-kind source
 //! answers nothing); [`priority`] returns the policy order for one kind and
-//! field already filtered through [`capacity`], so no priority entry ever
-//! fails capability. [`fill_entity`] walks that order against the supplied
-//! sources matched by [`BrickSource::provider_name`], then appends any
+//! field, and every entry is capable for the slot. [`fill_entity`] walks that
+//! order against the supplied sources matched by [`BrickSource::provider_name`], then appends any
 //! supplied capable source the policy list does not name (in supplied order,
 //! last), so a new provider is never silently ignored. Providers the caller
 //! did not supply are skipped, never fetched; incapable supplied sources are
@@ -102,9 +101,8 @@
 //! * movie synopsis: Wikipedia, Cinemeta, JustWatch.
 //! * genres series: TVmaze, AniList, Tenrai, Cinemeta.
 //! * genres movie: Cinemeta, JustWatch.
-//! * length series (policy): TVmaze, AniList, Tenrai, Kitsu, Cinemeta, ANN --
-//!   Cinemeta carries no series runtime, so the filtered `priority` drops it
-//!   and serves TVmaze, AniList, Tenrai, Kitsu, ANN.
+//! * length series: TVmaze, AniList, Tenrai, Kitsu, ANN (Cinemeta carries no
+//!   series runtime, so the policy never names it -- see [`capacity`]).
 //! * length movie: Cinemeta, JustWatch.
 //! * year series: Cinemeta, TVmaze, AniList, Tenrai, Kitsu, Episodate,
 //!   Bangumi, LiveChart.me, ANN.
@@ -132,9 +130,8 @@
 //!   If a future client answers the other kind, the capacity table -- not the
 //!   gating -- is what changes.
 //! * Cinemeta series length: the series `Media` carries `length: ""` (see
-//!   `cinemeta::series_media`), so [`capacity`] names no series Length for
-//!   Cinemeta even though the Length-series policy still lists it: [`priority`]
-//!   filters it out.
+//!   `cinemeta::series_media`), so neither [`capacity`] nor the Length-series
+//!   policy names it.
 //!
 //! # Atomic saves
 //!
@@ -154,7 +151,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-use metadata_core::types::{Episode, Kind, Media, Query};
+use metadata_core::types::{Kind, Media, Query};
 use metadata_http::cancel::Cancel;
 use serde::{Deserialize, Serialize};
 
@@ -882,10 +879,13 @@ impl BrickCache {
     /// mismatch, or an empty Found value fails the WHOLE batch with nothing
     /// applied; a Miss over a Found slot, or a provider Found over a Manual
     /// Found, is refused per-brick exactly as in [`insert`] (external IDs
-    /// still absorbed, folded into the one save). Returns how many bricks
-    /// stored a slot. A failed save rolls every in-memory change back, so
-    /// memory always matches the last successful save; an empty batch stores
-    /// nothing and saves nothing (`Ok(0)`).
+    /// still absorbed when they teach something new, folded into the one
+    /// save). Returns how many bricks stored a slot. A batch that changed
+    /// nothing -- every brick refused and no new IDs learned -- saves nothing
+    /// and returns `Ok(0)`, even when saving is impossible. A failed save
+    /// rolls every in-memory change back, so memory always matches the last
+    /// successful save; an empty batch stores nothing and saves nothing
+    /// (`Ok(0)`).
     ///
     /// [`insert`]: BrickCache::insert
     /// [`fill_entity`]: crate::brick::fill_entity
@@ -903,6 +903,7 @@ impl BrickCache {
         }
         let backup = self.entities.clone();
         let mut stored = 0usize;
+        let mut changed = false;
         for brick in bricks {
             let bucket = brick.entity.key();
             let slot = (brick.episode, brick.field);
@@ -925,7 +926,12 @@ impl BrickCache {
                     && brick.source != BrickSource::Manual;
                 if miss_over_found || provider_over_manual {
                     if let Some(entry) = self.entities.get_mut(&bucket) {
-                        entry.entity.absorb(&brick.entity);
+                        let mut next = entry.entity.clone();
+                        next.absorb(&brick.entity);
+                        if next != entry.entity {
+                            entry.entity = next;
+                            changed = true;
+                        }
                     }
                     continue;
                 }
@@ -948,6 +954,10 @@ impl BrickCache {
                 entry.bricks.push(brick);
             }
             stored += 1;
+            changed = true;
+        }
+        if !changed {
+            return Ok(0);
         }
         match self.save() {
             Ok(()) => Ok(stored),
@@ -1189,18 +1199,19 @@ fn create_temp(dir: &Path) -> std::io::Result<(PathBuf, File)> {
 /// `entityKeyForQuery`: the show-level target identity for a query --
 /// `series|<title>|<year>` for series (no season: every season of one show
 /// shares one entity bucket) and `movie|<title>|<year>` for movies, with no
-/// external IDs yet. Providers corroborate IDs later through
+/// external IDs yet. The prefix comes from the caller's RESOLVED `kind`, not
+/// `q.kind` (which may still be `UNKNOWN`): [`fill_entity`] resolves the kind
+/// and passes it in. Providers corroborate IDs later through
 /// [`with_media_id`]; the key itself never carries one, so two queries that
-/// differ only by what a provider already knows still address one entity. An
-/// `UNKNOWN` kind buckets like series (only movies take the movie shape).
+/// differ only by what a provider already knows still address one entity.
 /// This is deliberately coarser than [`cache::cache_key`] (per show-season):
 /// the resolver's media cache stays untouched, while brick show-level facts
 /// are reused across episodes and T7-4 force invalidation is show-scoped.
 ///
 /// [`cache::cache_key`]: crate::cache::cache_key
-pub fn entity_key_for_query(q: &Query) -> EntityKey {
+pub fn entity_key_for_query(q: &Query, kind: Kind) -> EntityKey {
     let title = crate::cache::cache_key_title(&q.title);
-    if q.kind == Kind::MOVIE {
+    if kind == Kind::MOVIE {
         EntityKey::new(format!("movie|{title}|{}", q.year))
     } else {
         EntityKey::new(format!("series|{title}|{}", q.year))
@@ -1266,29 +1277,12 @@ pub fn episode_key_for_query(q: &Query) -> EpisodeKey {
     EpisodeKey::None
 }
 
-/// The exact episode `episode_key` names, or `None`: season/number pairs
-/// match season- and number-exact, absolute numbers match number-exact (the
-/// provider numbers absolutely, as AniList's season-0 table does). Never a
-/// positional index -- a wrong episode title is worse than no title.
-fn find_episode(episodes: &[Episode], episode_key: &EpisodeKey) -> Option<Episode> {
-    match *episode_key {
-        EpisodeKey::None => None,
-        EpisodeKey::Episode { season, number } => episodes
-            .iter()
-            .find(|episode| i64::from(episode.season) == season && episode.number == number)
-            .cloned(),
-        EpisodeKey::Absolute { number } => episodes
-            .iter()
-            .find(|episode| episode.number == number)
-            .cloned(),
-    }
-}
-
-/// Whether `year` names a plausible release year: old enough for the
-/// earliest films, capped where `wikipedia::wiki_year` caps. The zero year
-/// (unknown) and garbage never pass.
+/// Whether `year` names a plausible release year: exactly the
+/// `wikipedia::wiki_year` bound (1900..=2100), so extraction and the provider
+/// agree on what counts as a year. The zero year (unknown) and garbage never
+/// pass.
 fn is_plausible_year(year: i32) -> bool {
-    (1800..=2100).contains(&year)
+    (1900..=2100).contains(&year)
 }
 
 /// Pure per-provider field extraction: the `(field, value)` pairs one
@@ -1301,13 +1295,18 @@ fn is_plausible_year(year: i32) -> bool {
 ///
 /// * artwork: `media.artwork` when non-empty (always the series/movie
 ///   poster; episode stills never override).
-/// * episode title/synopsis: only for the exact episode `episode_key`
-///   names (season/number or absolute, number-exact); an episode the table
-///   does not carry yields nothing. AniList episode rows carry titles only
-///   (their synopsis is empty), so they naturally yield no synopsis.
+/// * episode title/synopsis: only for the episode
+///   [`resolver::match_episode`] names for the query -- season-exact, with
+///   the resolver's own season-aware absolute fallback and season-0 specials
+///   guard, shared by construction (the call below IS the resolver's
+///   function, not a copy). An episode the table does not carry yields
+///   nothing. AniList episode rows carry titles only (their synopsis is
+///   empty), so they naturally yield no synopsis.
 /// * show vs movie synopsis: chosen by kind exactly as the resolver serves
 ///   it (a movie answer or a movie query takes `MovieSynopsis`); a series
-///   synopsis never lands in `movie_synopsis` or vice versa.
+///   synopsis never lands in `movie_synopsis` or vice versa -- and
+///   [`fill_entity`] additionally skips any answer whose `kind` contradicts
+///   the resolved kind, so a wrong-kind synopsis never reaches this choice.
 /// * genres: `media.genres` split on the `join_genres` middle-dot
 ///   separator, blank names dropped; empty when the provider carries none.
 /// * length: `media.length` when non-empty.
@@ -1316,11 +1315,7 @@ fn is_plausible_year(year: i32) -> bool {
 ///
 /// Provenance is attached at insert time by [`fill_entity`], where the winning
 /// source is known.
-pub fn extract_field_bricks(
-    media: &Media,
-    q: &Query,
-    episode_key: EpisodeKey,
-) -> Vec<(BrickField, BrickValue)> {
+pub fn extract_field_bricks(media: &Media, q: &Query) -> Vec<(BrickField, BrickValue)> {
     let mut out = Vec::new();
     let artwork = media.artwork.trim();
     if !artwork.is_empty() {
@@ -1331,7 +1326,7 @@ pub fn extract_field_bricks(
             },
         ));
     }
-    if let Some(episode) = find_episode(&media.episodes, &episode_key) {
+    if let Some(episode) = crate::resolver::match_episode(&media.episodes, q) {
         let title = episode.title.trim();
         if !title.is_empty() {
             out.push((
@@ -1577,16 +1572,13 @@ static POLICY_GENRES_SERIES: &[BrickSource] = &[
 /// Genre policy, movie leg.
 static POLICY_GENRES_MOVIE: &[BrickSource] = &[BrickSource::Cinemeta, BrickSource::JustWatch];
 
-/// Length policy, series leg (pre-filter): Cinemeta names a slot its series
-/// `Media` cannot fill (`length: ""`), so the filtered [`priority`] drops it.
-/// Kept as the policy record; [`priority`] serves [`LENGTH_SERIES`].
-#[allow(dead_code)]
+/// Length policy, series leg: Cinemeta carries no series runtime (see
+/// [`capacity`]), so the policy never names it.
 static POLICY_LENGTH_SERIES: &[BrickSource] = &[
     BrickSource::Tvmaze,
     BrickSource::Anilist,
     BrickSource::Tenrai,
     BrickSource::Kitsu,
-    BrickSource::Cinemeta,
     BrickSource::Ann,
 ];
 
@@ -1613,19 +1605,9 @@ static POLICY_YEAR_MOVIE: &[BrickSource] = &[
     BrickSource::JustWatch,
 ];
 
-/// Filtered Length-series order: the policy minus Cinemeta, which carries no
-/// series runtime (see [`capacity`]).
-static LENGTH_SERIES: &[BrickSource] = &[
-    BrickSource::Tvmaze,
-    BrickSource::Anilist,
-    BrickSource::Tenrai,
-    BrickSource::Kitsu,
-    BrickSource::Ann,
-];
-
-/// `priority`: the policy order for one kind and field, most capable first,
-/// already filtered through [`capacity`] -- no entry names a source incapable
-/// of the slot (see the module docs for the tables and deviations).
+/// `priority`: the policy order for one kind and field, most capable first.
+/// Every entry is capable for the slot (see [`capacity`]); the
+/// [`fill_entity`] walk keeps the capability check as defense in depth.
 /// [`fill_entity`] walks this against the supplied sources, then appends any
 /// supplied capable source the policy does not name (last); providers the
 /// caller did not supply are skipped, never fetched. Title answers an empty
@@ -1644,7 +1626,7 @@ pub fn priority(kind: Kind, field: BrickField) -> &'static [BrickSource] {
         (BrickField::Genres, true) => POLICY_GENRES_MOVIE,
         (BrickField::Genres, false) => POLICY_GENRES_SERIES,
         (BrickField::Length, true) => POLICY_LENGTH_MOVIE,
-        (BrickField::Length, false) => LENGTH_SERIES,
+        (BrickField::Length, false) => POLICY_LENGTH_SERIES,
         (BrickField::Year, true) => POLICY_YEAR_MOVIE,
         (BrickField::Year, false) => POLICY_YEAR_SERIES,
         _ => &[],
@@ -1653,8 +1635,9 @@ pub fn priority(kind: Kind, field: BrickField) -> &'static [BrickSource] {
 
 /// `FillReport`: one [`fill_entity`] pass over one entity: the target
 /// identity, the fields that gained a Found brick, the fields that proved
-/// definitively absent (a bounded Miss brick now guards them), and the
-/// fields left `Absent` because at least one provider failed transiently.
+/// definitively absent (a bounded Miss brick now guards them), the fields
+/// left `Absent` because at least one provider failed transiently, and the
+/// fields no capable supplied source covers at all.
 ///
 /// [`fill_entity`]: crate::brick::fill_entity
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1665,14 +1648,20 @@ pub struct FillReport {
     pub found: Vec<BrickField>,
     /// Fields that proved definitively absent (Miss bricks stored).
     pub missed: Vec<BrickField>,
-    /// Fields left `Absent`: at least one provider errored, so the next
-    /// pass retries them (field, provider errors joined).
+    /// Fields with at least one provider error (field, provider errors
+    /// joined). A win does NOT clear this: when a higher-priority provider
+    /// errored and a lower-priority one later won the field, the field is
+    /// both `found` and `errored`, so the outage stays visible.
     pub errored: Vec<(BrickField, String)>,
+    /// Fields with zero capable supplied sources: nothing was attempted,
+    /// nothing stored, no retry clock. T7-3 uses this to diagnose a
+    /// misconfigured chain rather than retrying blindly.
+    pub unsupported: Vec<BrickField>,
 }
 
-/// The fields one fill pass attempts: entity-level facts always, episode
-/// fields only for non-movie queries that address one episode, the synopsis
-/// slot chosen by kind. Title is never attempted (manual-only).
+/// The fields one fill pass attempts for a RESOLVED kind: entity-level facts
+/// always, episode fields only for series fills that address one episode, the
+/// synopsis slot chosen by kind. Title is never attempted (manual-only).
 fn applicable_fields(kind: Kind, episode_key: EpisodeKey) -> Vec<BrickField> {
     let mut fields = vec![BrickField::Artwork];
     if kind != Kind::MOVIE && !matches!(episode_key, EpisodeKey::None) {
@@ -1703,40 +1692,6 @@ fn brick_episode_for(field: BrickField, episode_key: EpisodeKey) -> EpisodeKey {
     }
 }
 
-/// Folds a title for the cross-entity guard: lowercase, punctuation to
-/// spaces, whitespace collapsed -- the [`cache::cache_key_title`] bucketing
-/// plus punctuation folding, so `Show: Arc` still meets `Show - Arc`.
-///
-/// [`cache::cache_key_title`]: crate::cache::cache_key_title
-fn normalize_title(s: &str) -> String {
-    s.to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Cross-entity guard: whether a provider answer may file bricks under the
-/// query's target. Titles must agree after case/punctuation/whitespace
-/// folding (a wrong title is always a reject, however plausible the rest),
-/// and when BOTH sides name a year they must agree: a same-title answer
-/// carrying a different year than the query asked for is a miss. A missing
-/// year on either side corroborates nothing and rejects nothing -- year
-/// never gates on its own.
-fn answer_matches_target(q: &Query, media: &Media) -> bool {
-    let want = normalize_title(&q.title);
-    let got = normalize_title(&media.title);
-    if want.is_empty() || got.is_empty() || want != got {
-        return false;
-    }
-    if q.year > 0 && media.year > 0 && media.year != q.year {
-        return false;
-    }
-    true
-}
-
 /// The free-text provider-record note on a filled brick: the provider name,
 /// the record title, and the episode address for per-episode fields.
 fn provenance_for(
@@ -1764,36 +1719,47 @@ fn provenance_for(
 /// The cache-filling pass: for every applicable field of the query's target
 /// entity, serve what the cache already holds and fetch only the rest.
 ///
+/// `kind` is the caller's RESOLVED kind (`SERIES` or `MOVIE`; `UNKNOWN` is
+/// rejected with an error -- the caller resolves it before calling). The
+/// entity-key prefix, the applicable fields, and every capability check derive
+/// from it, never from `q.kind` (which may still be `UNKNOWN`). The episode
+/// key is derived inside from `q` ([`episode_key_for_query`], forced to
+/// `None` for movies): callers never supply it, so no caller can file an
+/// `S00` slot or place an episode under another season's address.
+///
 /// * A slot holding `Found` or a fresh miss (`MissWaiting`) is skipped: no
 ///   fetch, no write.
 /// * A `RetryDue`/`Absent` slot walks the field's [`priority`] list against
-///   the supplied sources matched by [`BrickSource::provider_name`], then any
-///   supplied capable source the policy does not name (in supplied order,
-///   last). Incapable sources ([`capacity`]) are skipped BEFORE any call and
-///   never count: a gated `Ok(None)` from a source that cannot answer the
-///   slot must never become a 24 h Miss. One answer per provider is fetched
-///   per pass (a local map): a provider backing several fields is still
-///   called at most once.
-/// * `Ok(Some(media))`: only the requested field is extracted
-///   ([`extract_field_bricks`]); a media without the field, or one the
-///   cross-entity guard ([`answer_matches_target`], normalised title plus
-///   corroborating year) rejects, is a definitive skip to the next
-///   provider. A win inserts `Found` keyed to the TARGET identity (with the
-///   provider's IDs absorbed via [`with_media_id`]), never the provider's.
-/// * `Ok(None)`, a media without the field, or a guard rejection simply
-///   continues down the list.
+///   the supplied sources mapped through [`BrickSource::for_provider`]
+///   (unknown names are skipped, never consulted), then any supplied capable
+///   source the policy does not name (in supplied order, last). Incapable
+///   sources ([`capacity`]) are skipped BEFORE any call and never count: a
+///   gated `Ok(None)` from a source that cannot answer the slot must never
+///   become a 24 h Miss. One answer per provider is fetched per pass (a local
+///   map): a provider backing several fields is still called at most once.
+/// * `Ok(Some(media))`: the provider's own `find` is the match authority for
+///   title and year -- the fill engine second-guesses neither (year is a
+///   preference per `yearpref`, never a gate; romaji, localised and alternate
+///   titles are the provider matcher's business). The engine enforces only
+///   kind: an answer whose `media.kind` contradicts the resolved kind is a
+///   definitive skip to the next provider, so a same-title answer of the
+///   opposite kind can never file artwork, genres, length, year, or a
+///   wrong-kind synopsis into the bucket. Otherwise only the requested field
+///   is extracted ([`extract_field_bricks`]); a media without the field is a
+///   definitive skip. A win inserts `Found` keyed to the TARGET identity
+///   (with the provider's IDs absorbed via [`with_media_id`]), never the
+///   provider's.
+/// * `Ok(None)` or a media without the field simply continues down the list.
 /// * `Err` records the error and continues -- and inserts NO miss for that
-///   field: a transient failure must never become a 24 h miss. After the
-///   last provider, a field no provider filled is a bounded
-///   [`Brick::miss`] ONLY when at least one consulted CAPABLE source answered
-///   definitively (`consulted_capable >= 1` with every answer definitive);
-///   any error leaves the slot `Absent` so the next pass retries it. A field
-///   with zero capable sources supplied/available is likewise left `Absent`
-///   (nothing was learned, no 24 h penalty, retry next pass).
-///
-/// All bricks of the pass persist through one [`BrickCache::insert_many`]
-/// call: one save, all-or-nothing. `sources` is the caller's provider set
-/// (usually the resolver's ordered chain); `cancel` bounds every `find`.
+///   field: a transient failure must never become a 24 h miss. An error is
+///   recorded even when a lower-priority provider later wins the field (the
+///   field lands in both `found` and `errored`). After the last provider, a
+///   field no provider filled is a bounded [`Brick::miss`] ONLY when at least
+///   one consulted CAPABLE source answered definitively (`consulted_capable
+///   >= 1` with every answer definitive); any error with no win leaves the
+///   slot `Absent` so the next pass retries it.
+/// * A field with zero capable supplied sources is reported `unsupported`:
+///   nothing attempted, nothing stored, no retry clock.
 ///
 /// All bricks of the pass persist through one [`BrickCache::insert_many`]
 /// call: one save, all-or-nothing. `sources` is the caller's provider set
@@ -1806,52 +1772,73 @@ fn provenance_for(
 pub fn fill_entity(
     cache: &mut BrickCache,
     q: &Query,
-    episode_key: EpisodeKey,
+    kind: Kind,
     sources: &[&dyn Source],
     cancel: &Cancel,
 ) -> Result<FillReport, Error> {
-    let target = entity_key_for_query(q);
+    if kind != Kind::SERIES && kind != Kind::MOVIE {
+        return Err(Error::other(
+            "metadata: brick fill with an unresolved kind",
+        ));
+    }
+    let target = entity_key_for_query(q, kind);
+    let episode_key = if kind == Kind::MOVIE {
+        EpisodeKey::None
+    } else {
+        episode_key_for_query(q)
+    };
     let mut report = FillReport {
         key: target.clone(),
         ..FillReport::default()
     };
     let mut fetched: HashMap<String, Result<Option<Media>, String>> = HashMap::new();
     let mut bricks: Vec<Brick> = Vec::new();
-    for field in applicable_fields(q.kind, episode_key) {
+    // The supplied chain mapped once through `for_provider`: unknown names
+    // are skipped here, never consulted, never counted.
+    let mut supplied: Vec<(BrickSource, &dyn Source)> = Vec::new();
+    for source in sources.iter() {
+        let Some(mapped) = BrickSource::for_provider(source.name()) else {
+            continue;
+        };
+        if supplied.iter().any(|(have, _)| *have == mapped) {
+            continue;
+        }
+        supplied.push((mapped, *source));
+    }
+    for field in applicable_fields(kind, episode_key) {
         let episode = brick_episode_for(field, episode_key);
         match cache.lookup(&target, &episode, field) {
             BrickLookup::Found(_) | BrickLookup::MissWaiting(_) => continue,
             BrickLookup::RetryDue | BrickLookup::Absent => {}
         }
+        let capable: Vec<(BrickSource, &dyn Source)> = supplied
+            .iter()
+            .copied()
+            .filter(|(source, _)| is_capable(*source, kind, field))
+            .collect();
+        if capable.is_empty() {
+            report.unsupported.push(field);
+            continue;
+        }
+        // Policy order first, then any supplied capable source the policy
+        // does not name (in supplied order, last): a new provider is never
+        // silently ignored. Incapable entries never reach the wire.
+        let mut order: Vec<(BrickSource, &dyn Source)> = Vec::new();
+        for want in priority(kind, field) {
+            if let Some(hit) = capable.iter().find(|(source, _)| source == want) {
+                order.push((hit.0, hit.1));
+            }
+        }
+        for (source, provider) in &capable {
+            if !order.iter().any(|(have, _)| have == source) {
+                order.push((*source, *provider));
+            }
+        }
         let mut consulted_capable = 0usize;
         let mut miss_source = None::<BrickSource>;
         let mut errors: Vec<String> = Vec::new();
         let mut won: Option<Brick> = None;
-        // Policy order first, then any supplied capable source the policy
-        // does not name (in supplied order, last): a new provider is never
-        // silently ignored. Incapable entries never reach the wire.
-        let mut order: Vec<BrickSource> = priority(q.kind, field).to_vec();
-        for source in sources.iter() {
-            let Some(mapped) = BrickSource::for_provider(source.name()) else {
-                continue;
-            };
-            if !is_capable(mapped, q.kind, field) {
-                continue;
-            }
-            if !order.contains(&mapped) {
-                order.push(mapped);
-            }
-        }
-        for want in &order {
-            if !is_capable(*want, q.kind, field) {
-                continue;
-            }
-            let Some(provider) = sources
-                .iter()
-                .find(|source| source.name() == want.provider_name())
-            else {
-                continue;
-            };
+        for (want, provider) in &order {
             if miss_source.is_none() {
                 miss_source = Some(*want);
             }
@@ -1872,10 +1859,10 @@ pub fn fill_entity(
                 Ok(None) => continue,
                 Ok(Some(media)) => media,
             };
-            if !answer_matches_target(q, media) {
+            if media.kind != kind {
                 continue;
             }
-            let value = extract_field_bricks(media, q, episode_key)
+            let value = extract_field_bricks(media, q)
                 .into_iter()
                 .find(|(found_field, _)| *found_field == field)
                 .map(|(_, value)| value);
@@ -1893,6 +1880,9 @@ pub fn fill_entity(
         match won {
             Some(brick) => {
                 report.found.push(field);
+                if !errors.is_empty() {
+                    report.errored.push((field, errors.join("; ")));
+                }
                 bricks.push(brick);
             }
             None if !errors.is_empty() => {
