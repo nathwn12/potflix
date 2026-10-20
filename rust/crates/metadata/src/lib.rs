@@ -61,6 +61,8 @@ mod artwork_test;
 #[cfg(test)]
 mod bangumi_test;
 #[cfg(test)]
+mod brick_fill_test;
+#[cfg(test)]
 mod brick_test;
 #[cfg(test)]
 mod cache_test;
@@ -98,7 +100,9 @@ use metadata_http::cancel::CancelError;
 pub use metadata_core::types::{Button, Episode, Kind, Media, Query, Resolution};
 pub use brick::{
     BRICK_FILE_NAME, BRICK_SCHEMA, Brick, BrickCache, BrickField, BrickLookup, BrickSource,
-    BrickStatus, BrickValue, EntityKey, EpisodeKey, MISS_RETRY_AFTER,
+    BrickStatus, BrickValue, EntityKey, EpisodeKey, FillReport, MISS_RETRY_AFTER,
+    entity_key_for_query, episode_key_for_query, extract_field_bricks, fill_entity, priority,
+    with_media_id,
 };
 pub use overrides::{Override, Scope, Store, load};
 pub use resolver::{Options, Resolver, Source, default_sources};

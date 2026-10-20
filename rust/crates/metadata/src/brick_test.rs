@@ -1220,15 +1220,19 @@ fn brick_miss_retry_bound_is_behavior() {
     // Boundary around the STORED retry clock: one second before it the miss
     // still waits, at it the miss is due. Literals, never `MISS_RETRY_AFTER`,
     // so a wrong constant cannot pass both sides.
-    let stored_after = match cache.lookup(&entity, &EpisodeKey::None, BrickField::Artwork) {
-        BrickLookup::MissWaiting(got) => parse_rfc3339(
-            got.retry_after
-                .as_deref()
-                .expect("a stored miss carries retry_after"),
-        )
-        .expect("stored retry_after parses"),
-        other => panic!("fresh miss must wait, got {other:?}"),
-    };
+    let (stored_fetched, stored_after) =
+        match cache.lookup(&entity, &EpisodeKey::None, BrickField::Artwork) {
+            BrickLookup::MissWaiting(got) => (
+                parse_rfc3339(&got.fetched_at).expect("stored fetched_at parses"),
+                parse_rfc3339(
+                    got.retry_after
+                        .as_deref()
+                        .expect("a stored miss carries retry_after"),
+                )
+                .expect("stored retry_after parses"),
+            ),
+            other => panic!("fresh miss must wait, got {other:?}"),
+        };
     assert!(
         matches!(
             cache.lookup_at(
@@ -1243,26 +1247,27 @@ fn brick_miss_retry_bound_is_behavior() {
     );
     assert!(
         matches!(
-            cache.lookup_at(&entity, &EpisodeKey::None, BrickField::Artwork, stored_after),
+            cache.lookup_at(
+                &entity,
+                &EpisodeKey::None,
+                BrickField::Artwork,
+                stored_after
+            ),
             BrickLookup::RetryDue
         ),
         "at the stored bound the miss must be due"
     );
-    // And the literal day bound agrees with the stored clock: now + 24h - 1s
-    // waits, now + 24h is due (the insert stamped `now`, give or take the
-    // milliseconds between insert and this read -- the stored-clock checks
-    // above are the exact ones).
-    assert!(
-        matches!(
-            cache.lookup_at(
-                &entity,
-                &EpisodeKey::None,
-                BrickField::Artwork,
-                now + Duration::from_secs(86_400 - 1),
-            ),
-            BrickLookup::MissWaiting(_)
-        ),
-        "at now + 24h - 1s the miss must still wait"
+    // And the literal day bound agrees with the stored clock on a SEEDED
+    // clock: the stored `retry_after` is exactly one literal day after the
+    // stored `fetched_at`, and both sides of that boundary probe read stored
+    // values -- no wall-clock drift between the insert's stamp and `now` (a
+    // slow CI) can flake them.
+    assert_eq!(
+        stored_after
+            .duration_since(stored_fetched)
+            .expect("retry_after sits after fetched_at"),
+        Duration::from_secs(86_400),
+        "the stored retry clock must sit exactly one literal day out"
     );
     assert!(
         matches!(
@@ -1270,11 +1275,23 @@ fn brick_miss_retry_bound_is_behavior() {
                 &entity,
                 &EpisodeKey::None,
                 BrickField::Artwork,
-                now + Duration::from_secs(86_400 + 5),
+                stored_fetched + Duration::from_secs(86_400 - 1),
+            ),
+            BrickLookup::MissWaiting(_)
+        ),
+        "one second before the seeded bound the miss must still wait"
+    );
+    assert!(
+        matches!(
+            cache.lookup_at(
+                &entity,
+                &EpisodeKey::None,
+                BrickField::Artwork,
+                stored_fetched + Duration::from_secs(86_400),
             ),
             BrickLookup::RetryDue
         ),
-        "past now + 24h the miss must be due"
+        "at the seeded bound the miss must be due"
     );
 }
 

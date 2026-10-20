@@ -51,25 +51,68 @@
 //!
 //! [`lookup`]: BrickCache::lookup
 //!
-//! # What this is not (T7-2+ owns the merge)
+//! # What this is not (T7-3+ owns the merge)
 //!
-//! This module stores and serves bricks; it performs no network I/O, runs no
-//! provider, and merges nothing. The resolver/provider merge that fills the
-//! cache from TVmaze/AniList/TMDb/Wikipedia/Cinemeta (plus manual corrections)
-//! is T7-2 and later. The final API that merge builds on is: [`EntityKey`]
-//! + [`EpisodeKey`] identity, [`Brick::found`]/[`Brick::miss`] constructors,
-//!   [`BrickCache::insert`] (key-checked, miss-never-evicts-found, manual beats
-//!   provider),
+//! This module stores and serves bricks and fills them from providers
+//! ([`fill_entity`]); it performs no resolver/app/card wiring -- the
+//! resolver/provider merge that serves cards from the cache is T7-3 and
+//! later. The final API the merge builds on is: [`EntityKey`] +
+//! [`EpisodeKey`] identity, [`Brick::found`]/[`Brick::miss`] constructors,
+//!   [`BrickCache::insert`]/[`BrickCache::insert_many`] (key-checked,
+//!   miss-never-evicts-found, manual beats provider),
 //!   [`BrickCache::lookup`]/[`lookup_at`] (`Found`/`MissWaiting`/`RetryDue`/`Absent`),
+//!   the per-field [`priority`] order plus [`extract_field_bricks`], the
+//!   [`fill_entity`] pass and its [`FillReport`],
 //!   the force-clear [`BrickCache::clear_entity`]/[`clear_episode`]/[`clear_field`],
 //!   and atomic [`BrickCache::save`] plus load-or-empty [`load`]/[`load_from`].
-//!   Each `insert`/`clear_*` saves in the same call; there is no batch-write
-//!   API yet (T7-2/T7-4).
+//!   Each `insert`/`clear_*` saves in the same call; [`insert_many`] saves
+//!   once for the whole batch (T7-4 drives the force/new-Match UI).
 //!
 //! [`lookup_at`]: BrickCache::lookup_at
 //!
 //! [`clear_episode`]: BrickCache::clear_episode
 //! [`clear_field`]: BrickCache::clear_field
+//!
+//! # Field priority (T7-2)
+//!
+//! [`priority`] ranks brick sources per kind and field, most capable first.
+//! The tables below are the contract; [`fill_entity`] walks them in order
+//! against the supplied sources:
+//!
+//! * artwork (series/anime): AniList, TVmaze, Tenrai, Kitsu, Cinemeta,
+//!   JustWatch, Episodate, Bangumi, LiveChart.me, ANN.
+//! * artwork (movie): Cinemeta, JustWatch, Wikipedia, AniList (a no-op for
+//!   movies: its `find` answers `Ok(None)` for `Kind::MOVIE`, so it only
+//!   marks the end of the list and never fills).
+//! * episode title: TVmaze, Tenrai, Kitsu, Cinemeta, Episodate, AniList.
+//! * episode synopsis: TVmaze, Tenrai, Kitsu, Cinemeta, AniList, Episodate.
+//! * show synopsis: TVmaze, AniList, Tenrai, Kitsu, Cinemeta, Episodate,
+//!   Bangumi, LiveChart.me, ANN.
+//! * movie synopsis: Wikipedia, Cinemeta, JustWatch.
+//! * genres: TVmaze, AniList, Tenrai, Cinemeta (the only providers that
+//!   carry display genres; Kitsu and JustWatch deliberately carry none).
+//! * length: TVmaze, AniList, Tenrai, Kitsu, Cinemeta, JustWatch, ANN (the
+//!   providers that carry a runtime; Episodate, Bangumi and LiveChart.me
+//!   carry none).
+//! * year: Cinemeta, TVmaze, AniList, Tenrai, Kitsu, Wikipedia, JustWatch,
+//!   Episodate, Bangumi, LiveChart.me, ANN (every live provider carries a
+//!   year).
+//! * title: no provider (titles are manual-only until the T7-4 Fix flow;
+//!   [`extract_field_bricks`] never emits one).
+//!
+//! # Deviations the tables had to make
+//!
+//! * TMDb: the SPEC's TMDb slots are unavailable -- there is no TMDb client
+//!   in this repo, so no priority list names it. [`BrickSource::Tmdb`] stays
+//!   reserved as the provenance slot a future client will fill, and
+//!   [`BrickSource::for_provider`] answers `None` for `"tmdb"`.
+//! * Wikipedia for series: Wikipedia's and JustWatch's `find` return
+//!   `Ok(None)` for `Kind::SERIES` (provider gating, unchanged by T7-2), so
+//!   series lists never name Wikipedia even where the SPEC sketched it: the
+//!   show-synopsis list ends at ANN. If a future Wikipedia client answers
+//!   series, the list -- not the gating -- is what changes.
+//! * AniList in the movie artwork list is a documented no-op (see above);
+//!   it keeps the movie order total without inventing a network client.
 //!
 //! # Atomic saves
 //!
@@ -82,16 +125,19 @@
 //! in-memory change back, so the cache in memory always matches the last
 //! successful save.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
+use metadata_core::types::{Episode, Kind, Media, Query};
+use metadata_http::cancel::Cancel;
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
+use crate::resolver::Source;
 use crate::timefmt::{format_rfc3339, now_rfc3339, parse_rfc3339};
 
 /// The config directory name under the cache root: `%LOCALAPPDATA%\Potflix`.
@@ -139,9 +185,10 @@ pub enum BrickField {
     Title,
 }
 
-/// `BrickSource`: which provider (or hand) a brick came from. TMDb has no
-/// provider yet -- the variant reserves the provenance slot the T7-2 merge
-/// will fill -- and `Manual` marks a user correction, which the merge must
+/// `BrickSource`: which provider (or hand) a brick came from. `Tmdb`
+/// reserves the provenance slot for a TMDb client that does not exist yet
+/// (see the TMDb deviation note in the module docs): no provider names itself
+/// `tmdb` today. `Manual` marks a user correction, which the merge must
 /// never overwrite with a provider answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -152,6 +199,63 @@ pub enum BrickSource {
     Wikipedia,
     Cinemeta,
     Manual,
+    Tenrai,
+    Kitsu,
+    JustWatch,
+    Episodate,
+    Bangumi,
+    Livechart,
+    Ann,
+}
+
+impl BrickSource {
+    /// The provider name as it appears in [`Media::source`] and in
+    /// [`Source::name`]: the identity [`fill_entity`] uses to match a
+    /// priority slot against a supplied source. `Tmdb` maps to `"tmdb"` and
+    /// `Manual` to `"manual"`, neither of which any live [`Source`] reports.
+    ///
+    /// [`Source::name`]: crate::resolver::Source::name
+    /// [`fill_entity`]: crate::brick::fill_entity
+    pub fn provider_name(self) -> &'static str {
+        match self {
+            BrickSource::Anilist => "anilist",
+            BrickSource::Tvmaze => "tvmaze",
+            BrickSource::Tmdb => "tmdb",
+            BrickSource::Wikipedia => "wikipedia",
+            BrickSource::Cinemeta => "cinemeta",
+            BrickSource::Manual => "manual",
+            BrickSource::Tenrai => "tenrai",
+            BrickSource::Kitsu => "kitsu",
+            BrickSource::JustWatch => "justwatch",
+            BrickSource::Episodate => "episodate",
+            BrickSource::Bangumi => "bangumi",
+            BrickSource::Livechart => "livechart",
+            BrickSource::Ann => "ann",
+        }
+    }
+
+    /// The brick source for a provider name: exhaustive over the eleven live
+    /// providers. Unknown names -- including `"tmdb"` (no client exists) and
+    /// `"manual"` (no [`Source`] reports it) -- answer `None`, so a foreign
+    /// injected source never fills a brick slot.
+    ///
+    /// [`Source`]: crate::resolver::Source
+    pub fn for_provider(name: &str) -> Option<BrickSource> {
+        match name {
+            "anilist" => Some(BrickSource::Anilist),
+            "tvmaze" => Some(BrickSource::Tvmaze),
+            "wikipedia" => Some(BrickSource::Wikipedia),
+            "cinemeta" => Some(BrickSource::Cinemeta),
+            "tenrai" => Some(BrickSource::Tenrai),
+            "kitsu" => Some(BrickSource::Kitsu),
+            "justwatch" => Some(BrickSource::JustWatch),
+            "episodate" => Some(BrickSource::Episodate),
+            "bangumi" => Some(BrickSource::Bangumi),
+            "livechart" => Some(BrickSource::Livechart),
+            "ann" => Some(BrickSource::Ann),
+            _ => None,
+        }
+    }
 }
 
 /// `BrickStatus`: whether the fetch answered (`Found`, value fixed) or came
@@ -425,6 +529,40 @@ fn found_value_is_empty(value: &BrickValue) -> bool {
         BrickValue::Genres { genres } => genres.iter().all(|name| name.trim().is_empty()),
     }
 }
+
+/// The per-brick storability checks [`BrickCache::insert`] and
+/// [`BrickCache::insert_many`] share: the episode scope fits the field, and
+/// a Found brick carries the shape its field serves with a non-empty value.
+/// Miss bricks skip the value checks: their placeholder is meaningless by
+/// design.
+///
+/// [`BrickCache::insert`]: BrickCache::insert
+/// [`BrickCache::insert_many`]: BrickCache::insert_many
+fn check_brick_storable(brick: &Brick) -> Result<(), Error> {
+    let episode_scoped = field_is_episode_scoped(brick.field);
+    let has_episode = !matches!(brick.episode, EpisodeKey::None);
+    if episode_scoped != has_episode {
+        return Err(Error::other(format!(
+            "metadata: brick insert for field {:?}: episode scope mismatch",
+            brick.field
+        )));
+    }
+    if brick.status == BrickStatus::Found {
+        if !value_shape_fits(brick.field, &brick.value) {
+            return Err(Error::other(format!(
+                "metadata: brick insert for field {:?}: value shape mismatch",
+                brick.field
+            )));
+        }
+        if found_value_is_empty(&brick.value) {
+            return Err(Error::other(format!(
+                "metadata: brick insert for field {:?}: empty Found value",
+                brick.field
+            )));
+        }
+    }
+    Ok(())
+}
 /// Whether `field` is about one episode (`true`: episode title/synopsis) or
 /// about the entity itself.
 fn field_is_episode_scoped(field: BrickField) -> bool {
@@ -659,28 +797,7 @@ impl BrickCache {
                 brick.entity.id, entity.id
             )));
         }
-        let episode_scoped = field_is_episode_scoped(brick.field);
-        let has_episode = !matches!(brick.episode, EpisodeKey::None);
-        if episode_scoped != has_episode {
-            return Err(Error::other(format!(
-                "metadata: brick insert for field {:?}: episode scope mismatch",
-                brick.field
-            )));
-        }
-        if brick.status == BrickStatus::Found {
-            if !value_shape_fits(brick.field, &brick.value) {
-                return Err(Error::other(format!(
-                    "metadata: brick insert for field {:?}: value shape mismatch",
-                    brick.field
-                )));
-            }
-            if found_value_is_empty(&brick.value) {
-                return Err(Error::other(format!(
-                    "metadata: brick insert for field {:?}: empty Found value",
-                    brick.field
-                )));
-            }
-        }
+        check_brick_storable(&brick)?;
         let slot = (brick.episode, brick.field);
         let existing = self
             .entities
@@ -730,6 +847,89 @@ impl BrickCache {
                 } else {
                     self.entities.remove(&bucket);
                 }
+                Err(err)
+            }
+        }
+    }
+
+    /// Stores a batch of bricks with ONE save for the whole batch (the
+    /// [`fill_entity`] path): every brick carries its own entity, so one
+    /// batch may span buckets. Each brick takes the same key/shape/precedence
+    /// checks as [`insert`]: an empty entity id, a scope mismatch, a shape
+    /// mismatch, or an empty Found value fails the WHOLE batch with nothing
+    /// applied; a Miss over a Found slot, or a provider Found over a Manual
+    /// Found, is refused per-brick exactly as in [`insert`] (external IDs
+    /// still absorbed, folded into the one save). Returns how many bricks
+    /// stored a slot. A failed save rolls every in-memory change back, so
+    /// memory always matches the last successful save; an empty batch stores
+    /// nothing and saves nothing (`Ok(0)`).
+    ///
+    /// [`insert`]: BrickCache::insert
+    /// [`fill_entity`]: crate::brick::fill_entity
+    pub fn insert_many(&mut self, bricks: Vec<Brick>) -> Result<usize, Error> {
+        if bricks.is_empty() {
+            return Ok(0);
+        }
+        for brick in &bricks {
+            if brick.entity.key().is_empty() {
+                return Err(Error::other(
+                    "metadata: brick insert with an empty entity id",
+                ));
+            }
+            check_brick_storable(brick)?;
+        }
+        let backup = self.entities.clone();
+        let mut stored = 0usize;
+        for brick in bricks {
+            let bucket = brick.entity.key();
+            let slot = (brick.episode, brick.field);
+            let existing = self
+                .entities
+                .get(&bucket)
+                .and_then(|entry| {
+                    entry
+                        .bricks
+                        .iter()
+                        .find(|old| (old.episode, old.field) == slot)
+                })
+                .cloned();
+            if let Some(old) = existing {
+                let miss_over_found =
+                    old.status == BrickStatus::Found && brick.status == BrickStatus::Miss;
+                let provider_over_manual = old.status == BrickStatus::Found
+                    && old.source == BrickSource::Manual
+                    && brick.status == BrickStatus::Found
+                    && brick.source != BrickSource::Manual;
+                if miss_over_found || provider_over_manual {
+                    if let Some(entry) = self.entities.get_mut(&bucket) {
+                        entry.entity.absorb(&brick.entity);
+                    }
+                    continue;
+                }
+            }
+            let entry = self
+                .entities
+                .entry(bucket.clone())
+                .or_insert_with(|| EntityEntry {
+                    entity: brick.entity.clone(),
+                    bricks: Vec::new(),
+                });
+            entry.entity.absorb(&brick.entity);
+            if let Some(old) = entry
+                .bricks
+                .iter_mut()
+                .find(|old| (old.episode, old.field) == slot)
+            {
+                *old = brick;
+            } else {
+                entry.bricks.push(brick);
+            }
+            stored += 1;
+        }
+        match self.save() {
+            Ok(()) => Ok(stored),
+            Err(err) => {
+                self.entities = backup;
                 Err(err)
             }
         }
@@ -959,4 +1159,565 @@ fn create_temp(dir: &Path) -> std::io::Result<(PathBuf, File)> {
         std::io::ErrorKind::AlreadyExists,
         "could not create a unique temp file for the atomic write",
     ))
+}
+
+// --- T7-2: identity, extraction, priority, and the fill engine ---------------
+
+/// `entityKeyForQuery`: the target identity for a query -- the same shape as
+/// [`cache::cache_key`] (`series|<title>|<year>|<season>` or
+/// `movie|<title>|<year>`), with no external IDs yet. Providers corroborate
+/// IDs later through [`with_media_id`]; the key itself never carries one, so
+/// two queries that differ only by what a provider already knows still
+/// address one entity.
+///
+/// [`cache::cache_key`]: crate::cache::cache_key
+pub fn entity_key_for_query(q: &Query) -> EntityKey {
+    EntityKey::new(crate::cache::cache_key(q))
+}
+
+/// Maps a provider answer's `source`/`source_id` into the right [`EntityKey`]
+/// slot: `cinemeta` carries an IMDb id (`tt...`) into `imdb`, `tvmaze` a
+/// numeric id into `tvmaze`, `anilist` a numeric id into `anilist`. Every
+/// other provider (tenrai/kitsu/episodate/bangumi/livechart/ann/wikipedia/
+/// justwatch) has no `EntityKey` slot and absorbs nothing. A slot that
+/// already holds an ID is never overwritten: the merge learns IDs over time
+/// without ever clobbering one it holds.
+pub fn with_media_id(key: &EntityKey, media: &Media) -> EntityKey {
+    let mut out = key.clone();
+    match media.source.as_str() {
+        "cinemeta" => {
+            let id = media.source_id.trim();
+            if out.imdb.is_none() && id.starts_with("tt") && id.len() > 2 {
+                out.imdb = Some(id.to_string());
+            }
+        }
+        "tvmaze" => {
+            if out.tvmaze.is_none()
+                && let Ok(id) = media.source_id.trim().parse::<i64>()
+                && id > 0
+            {
+                out.tvmaze = Some(id);
+            }
+        }
+        "anilist" => {
+            if out.anilist.is_none()
+                && let Ok(id) = media.source_id.trim().parse::<i64>()
+                && id > 0
+            {
+                out.anilist = Some(id);
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// The episode identity for a query: `Episode{season,number}` when both are
+/// meaningful, `Absolute{number}` when the query carries absolute anime
+/// numbering, `None` for movies and for queries without an episode. An
+/// absolute number NEVER becomes `Episode{season: 0, ...}` (no `S00`): the
+/// key keeps the query's own addressing, and extraction matches it
+/// number-exact.
+pub fn episode_key_for_query(q: &Query) -> EpisodeKey {
+    if q.kind == Kind::MOVIE {
+        return EpisodeKey::None;
+    }
+    if q.absolute && q.episode > 0 {
+        return EpisodeKey::Absolute { number: q.episode };
+    }
+    if q.season > 0 && q.episode > 0 {
+        return EpisodeKey::Episode {
+            season: q.season,
+            number: q.episode,
+        };
+    }
+    EpisodeKey::None
+}
+
+/// The exact episode `episode_key` names, or `None`: season/number pairs
+/// match season- and number-exact, absolute numbers match number-exact (the
+/// provider numbers absolutely, as AniList's season-0 table does). Never a
+/// positional index -- a wrong episode title is worse than no title.
+fn find_episode(episodes: &[Episode], episode_key: &EpisodeKey) -> Option<Episode> {
+    match *episode_key {
+        EpisodeKey::None => None,
+        EpisodeKey::Episode { season, number } => episodes
+            .iter()
+            .find(|episode| i64::from(episode.season) == season && episode.number == number)
+            .cloned(),
+        EpisodeKey::Absolute { number } => episodes
+            .iter()
+            .find(|episode| episode.number == number)
+            .cloned(),
+    }
+}
+
+/// Whether `year` names a plausible release year: old enough for the
+/// earliest films, capped where `wikipedia::wiki_year` caps. The zero year
+/// (unknown) and garbage never pass.
+fn is_plausible_year(year: i32) -> bool {
+    (1800..=2100).contains(&year)
+}
+
+/// Pure per-provider field extraction: the `(field, value)` pairs one
+/// provider answer yields for one query, in a fixed order (artwork, episode
+/// title, episode synopsis, synopsis, genres, length, year). Only
+/// provider-returned values appear here -- nothing is fabricated from the
+/// query or the title -- and every value is non-empty (blank text, an
+/// implausible year, no usable genre name yield nothing), so whatever this
+/// returns is storable as a Found brick.
+///
+/// * artwork: `media.artwork` when non-empty (always the series/movie
+///   poster; episode stills never override).
+/// * episode title/synopsis: only for the exact episode `episode_key`
+///   names (season/number or absolute, number-exact); an episode the table
+///   does not carry yields nothing. AniList episode rows carry titles only
+///   (their synopsis is empty), so they naturally yield no synopsis.
+/// * show vs movie synopsis: chosen by kind exactly as the resolver serves
+///   it (a movie answer or a movie query takes `MovieSynopsis`); a series
+///   synopsis never lands in `movie_synopsis` or vice versa.
+/// * genres: `media.genres` split on the `join_genres` middle-dot
+///   separator, blank names dropped; empty when the provider carries none.
+/// * length: `media.length` when non-empty.
+/// * year: `media.year` when plausible.
+/// * title: never (titles are manual-only until the T7-4 Fix flow).
+///
+/// `source` records nothing here: provenance is attached at insert time by
+/// [`fill_entity`], where the winning source is known.
+pub fn extract_field_bricks(
+    source: BrickSource,
+    media: &Media,
+    q: &Query,
+    episode_key: EpisodeKey,
+) -> Vec<(BrickField, BrickValue)> {
+    let _ = source;
+    let mut out = Vec::new();
+    let artwork = media.artwork.trim();
+    if !artwork.is_empty() {
+        out.push((
+            BrickField::Artwork,
+            BrickValue::Text {
+                text: artwork.to_string(),
+            },
+        ));
+    }
+    if let Some(episode) = find_episode(&media.episodes, &episode_key) {
+        let title = episode.title.trim();
+        if !title.is_empty() {
+            out.push((
+                BrickField::EpisodeTitle,
+                BrickValue::Text {
+                    text: title.to_string(),
+                },
+            ));
+        }
+        let synopsis = episode.synopsis.trim();
+        if !synopsis.is_empty() {
+            out.push((
+                BrickField::EpisodeSynopsis,
+                BrickValue::Text {
+                    text: synopsis.to_string(),
+                },
+            ));
+        }
+    }
+    let synopsis = media.synopsis.trim();
+    if !synopsis.is_empty() {
+        let field = if media.kind == Kind::MOVIE || q.kind == Kind::MOVIE {
+            BrickField::MovieSynopsis
+        } else {
+            BrickField::ShowSynopsis
+        };
+        out.push((
+            field,
+            BrickValue::Text {
+                text: synopsis.to_string(),
+            },
+        ));
+    }
+    let genres: Vec<String> = media
+        .genres
+        .split('·')
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+    if !genres.is_empty() {
+        out.push((BrickField::Genres, BrickValue::Genres { genres }));
+    }
+    let length = media.length.trim();
+    if !length.is_empty() {
+        out.push((
+            BrickField::Length,
+            BrickValue::Text {
+                text: length.to_string(),
+            },
+        ));
+    }
+    if is_plausible_year(media.year) {
+        out.push((BrickField::Year, BrickValue::Year { year: media.year }));
+    }
+    out
+}
+
+/// Artwork order for series/anime queries.
+static ARTWORK_SERIES: &[BrickSource] = &[
+    BrickSource::Anilist,
+    BrickSource::Tvmaze,
+    BrickSource::Tenrai,
+    BrickSource::Kitsu,
+    BrickSource::Cinemeta,
+    BrickSource::JustWatch,
+    BrickSource::Episodate,
+    BrickSource::Bangumi,
+    BrickSource::Livechart,
+    BrickSource::Ann,
+];
+
+/// Artwork order for movie queries (`Anilist` is a documented no-op: its
+/// `find` answers `Ok(None)` for movies, so it only marks the end of the
+/// list and never fills).
+static ARTWORK_MOVIE: &[BrickSource] = &[
+    BrickSource::Cinemeta,
+    BrickSource::JustWatch,
+    BrickSource::Wikipedia,
+    BrickSource::Anilist,
+];
+
+/// Episode-title order: tables with real per-episode titles first, AniList
+/// (mislabeled absolute tables) last.
+static EPISODE_TITLE: &[BrickSource] = &[
+    BrickSource::Tvmaze,
+    BrickSource::Tenrai,
+    BrickSource::Kitsu,
+    BrickSource::Cinemeta,
+    BrickSource::Episodate,
+    BrickSource::Anilist,
+];
+
+/// Episode-synopsis order: AniList episode rows carry no synopsis, so it
+/// sits behind Cinemeta; Episodate rows carry no synopsis at all, so it is
+/// last.
+static EPISODE_SYNOPSIS: &[BrickSource] = &[
+    BrickSource::Tvmaze,
+    BrickSource::Tenrai,
+    BrickSource::Kitsu,
+    BrickSource::Cinemeta,
+    BrickSource::Anilist,
+    BrickSource::Episodate,
+];
+
+/// Show-synopsis order: every series-capable provider with a synopsis.
+/// Wikipedia is absent by gating (its `find` answers `Ok(None)` for series),
+/// not by omission.
+static SHOW_SYNOPSIS: &[BrickSource] = &[
+    BrickSource::Tvmaze,
+    BrickSource::Anilist,
+    BrickSource::Tenrai,
+    BrickSource::Kitsu,
+    BrickSource::Cinemeta,
+    BrickSource::Episodate,
+    BrickSource::Bangumi,
+    BrickSource::Livechart,
+    BrickSource::Ann,
+];
+
+/// Movie-synopsis order: the movie chain in resolver order.
+static MOVIE_SYNOPSIS: &[BrickSource] = &[
+    BrickSource::Wikipedia,
+    BrickSource::Cinemeta,
+    BrickSource::JustWatch,
+];
+
+/// Genre order: the only providers that carry display genres.
+static GENRES: &[BrickSource] = &[
+    BrickSource::Tvmaze,
+    BrickSource::Anilist,
+    BrickSource::Tenrai,
+    BrickSource::Cinemeta,
+];
+
+/// Length order: the providers that carry a runtime.
+static LENGTH: &[BrickSource] = &[
+    BrickSource::Tvmaze,
+    BrickSource::Anilist,
+    BrickSource::Tenrai,
+    BrickSource::Kitsu,
+    BrickSource::Cinemeta,
+    BrickSource::JustWatch,
+    BrickSource::Ann,
+];
+
+/// Year order: every live provider carries a year.
+static YEAR: &[BrickSource] = &[
+    BrickSource::Cinemeta,
+    BrickSource::Tvmaze,
+    BrickSource::Anilist,
+    BrickSource::Tenrai,
+    BrickSource::Kitsu,
+    BrickSource::Wikipedia,
+    BrickSource::JustWatch,
+    BrickSource::Episodate,
+    BrickSource::Bangumi,
+    BrickSource::Livechart,
+    BrickSource::Ann,
+];
+
+/// `priority`: the provider order for one kind and field, most capable
+/// first (see the module docs for the tables and the TMDb/Wikipedia-series
+/// deviations). [`fill_entity`] walks this against the supplied sources;
+/// providers the caller did not supply are skipped, never fetched. Title
+/// answers an empty list: titles are manual-only until the T7-4 Fix flow.
+pub fn priority(kind: Kind, field: BrickField) -> &'static [BrickSource] {
+    match field {
+        BrickField::Artwork if kind == Kind::MOVIE => ARTWORK_MOVIE,
+        BrickField::Artwork => ARTWORK_SERIES,
+        BrickField::EpisodeTitle => EPISODE_TITLE,
+        BrickField::EpisodeSynopsis => EPISODE_SYNOPSIS,
+        BrickField::ShowSynopsis => SHOW_SYNOPSIS,
+        BrickField::MovieSynopsis => MOVIE_SYNOPSIS,
+        BrickField::Genres => GENRES,
+        BrickField::Length => LENGTH,
+        BrickField::Year => YEAR,
+        BrickField::Title => &[],
+    }
+}
+
+/// `FillReport`: one [`fill_entity`] pass over one entity: the target
+/// identity, the fields that gained a Found brick, the fields that proved
+/// definitively absent (a bounded Miss brick now guards them), and the
+/// fields left `Absent` because at least one provider failed transiently.
+///
+/// [`fill_entity`]: crate::brick::fill_entity
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FillReport {
+    /// The target identity the pass filled (bare: no external IDs).
+    pub key: EntityKey,
+    /// Fields that gained a Found brick this pass.
+    pub found: Vec<BrickField>,
+    /// Fields that proved definitively absent (Miss bricks stored).
+    pub missed: Vec<BrickField>,
+    /// Fields left `Absent`: at least one provider errored, so the next
+    /// pass retries them (field, provider errors joined).
+    pub errored: Vec<(BrickField, String)>,
+}
+
+/// The fields one fill pass attempts: entity-level facts always, episode
+/// fields only for non-movie queries that address one episode, the synopsis
+/// slot chosen by kind. Title is never attempted (manual-only).
+fn applicable_fields(kind: Kind, episode_key: EpisodeKey) -> Vec<BrickField> {
+    let mut fields = vec![BrickField::Artwork];
+    if kind != Kind::MOVIE && !matches!(episode_key, EpisodeKey::None) {
+        fields.push(BrickField::EpisodeTitle);
+        fields.push(BrickField::EpisodeSynopsis);
+    }
+    fields.push(if kind == Kind::MOVIE {
+        BrickField::MovieSynopsis
+    } else {
+        BrickField::ShowSynopsis
+    });
+    fields.push(BrickField::Genres);
+    fields.push(BrickField::Length);
+    fields.push(BrickField::Year);
+    fields
+}
+
+/// The episode scope one field stores under: episode fields under the
+/// query's episode key, entity-level fields under `None` (enforced again by
+/// [`BrickCache::insert`]).
+///
+/// [`BrickCache::insert`]: BrickCache::insert
+fn brick_episode_for(field: BrickField, episode_key: EpisodeKey) -> EpisodeKey {
+    if field_is_episode_scoped(field) {
+        episode_key
+    } else {
+        EpisodeKey::None
+    }
+}
+
+/// Folds a title for the cross-entity guard: lowercase, punctuation to
+/// spaces, whitespace collapsed -- the [`cache::cache_key_title`] bucketing
+/// plus punctuation folding, so `Show: Arc` still meets `Show - Arc`.
+///
+/// [`cache::cache_key_title`]: crate::cache::cache_key_title
+fn normalize_title(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Cross-entity guard: whether a provider answer may file bricks under the
+/// query's target. Titles must agree after case/punctuation/whitespace
+/// folding (a wrong title is always a reject, however plausible the rest),
+/// and when BOTH sides name a year they must agree: a same-title answer
+/// carrying a different year than the query asked for is a miss. A missing
+/// year on either side corroborates nothing and rejects nothing -- year
+/// never gates on its own.
+fn answer_matches_target(q: &Query, media: &Media) -> bool {
+    let want = normalize_title(&q.title);
+    let got = normalize_title(&media.title);
+    if want.is_empty() || got.is_empty() || want != got {
+        return false;
+    }
+    if q.year > 0 && media.year > 0 && media.year != q.year {
+        return false;
+    }
+    true
+}
+
+/// The free-text provider-record note on a filled brick: the provider name,
+/// the record title, and the episode address for per-episode fields.
+fn provenance_for(
+    source: BrickSource,
+    media: &Media,
+    field: BrickField,
+    episode_key: &EpisodeKey,
+) -> String {
+    let title = media.title.trim();
+    if !field_is_episode_scoped(field) {
+        return format!("{} {title}", source.provider_name());
+    }
+    let address = match *episode_key {
+        EpisodeKey::Episode { season, number } => format!("S{season:02}E{number:02}"),
+        EpisodeKey::Absolute { number } => format!("#{number}"),
+        EpisodeKey::None => String::new(),
+    };
+    if address.is_empty() {
+        format!("{} {title}", source.provider_name())
+    } else {
+        format!("{} {title} {address}", source.provider_name())
+    }
+}
+
+/// The cache-filling pass: for every applicable field of the query's target
+/// entity, serve what the cache already holds and fetch only the rest.
+///
+/// * A slot holding `Found` or a fresh miss (`MissWaiting`) is skipped: no
+///   fetch, no write.
+/// * A `RetryDue`/`Absent` slot walks the field's [`priority`] list against
+///   the supplied sources matched by [`BrickSource::provider_name`]. One
+///   answer per provider is fetched per pass (a local map): a provider
+///   backing several fields is still called at most once.
+/// * `Ok(Some(media))`: only the requested field is extracted
+///   ([`extract_field_bricks`]); a media without the field, or one the
+///   cross-entity guard ([`answer_matches_target`], normalised title plus
+///   corroborating year) rejects, is a definitive skip to the next
+///   provider. A win inserts `Found` keyed to the TARGET identity (with the
+///   provider's IDs absorbed via [`with_media_id`]), never the provider's.
+/// * `Ok(None)`, a media without the field, or a guard rejection simply
+///   continues down the list.
+/// * `Err` records the error and continues -- and inserts NO miss for that
+///   field: a transient failure must never become a 24 h miss. After the
+///   last provider, a field no provider filled is a bounded
+///   [`Brick::miss`] ONLY when every consulted provider answered
+///   definitively; any error leaves the slot `Absent` so the next pass
+///   retries it. A field no supplied source covers at all is likewise left
+///   `Absent` (nothing was learned).
+///
+/// All bricks of the pass persist through one [`BrickCache::insert_many`]
+/// call: one save, all-or-nothing. `sources` is the caller's provider set
+/// (usually the resolver's ordered chain); `cancel` bounds every `find`.
+/// This performs the provider I/O itself -- it is the one `brick` entry
+/// point that is not pure storage.
+///
+/// [`Brick::miss`]: Brick::miss
+/// [`BrickCache::insert_many`]: BrickCache::insert_many
+pub fn fill_entity(
+    cache: &mut BrickCache,
+    q: &Query,
+    episode_key: EpisodeKey,
+    sources: &[&dyn Source],
+    cancel: &Cancel,
+) -> Result<FillReport, Error> {
+    let target = entity_key_for_query(q);
+    let mut report = FillReport {
+        key: target.clone(),
+        ..FillReport::default()
+    };
+    let mut fetched: HashMap<String, Result<Option<Media>, String>> = HashMap::new();
+    let mut bricks: Vec<Brick> = Vec::new();
+    for field in applicable_fields(q.kind, episode_key) {
+        let episode = brick_episode_for(field, episode_key);
+        match cache.lookup(&target, &episode, field) {
+            BrickLookup::Found(_) | BrickLookup::MissWaiting(_) => continue,
+            BrickLookup::RetryDue | BrickLookup::Absent => {}
+        }
+        let mut consulted = 0usize;
+        let mut miss_source = None::<BrickSource>;
+        let mut errors: Vec<String> = Vec::new();
+        let mut won: Option<Brick> = None;
+        for want in priority(q.kind, field) {
+            let Some(provider) = sources
+                .iter()
+                .find(|source| source.name() == want.provider_name())
+            else {
+                continue;
+            };
+            if miss_source.is_none() {
+                miss_source = Some(*want);
+            }
+            consulted += 1;
+            let name = provider.name().to_string();
+            let answer =
+                fetched
+                    .entry(name.clone())
+                    .or_insert_with(|| match provider.find(cancel, q) {
+                        Ok(media) => Ok(media),
+                        Err(err) => Err(err.to_string()),
+                    });
+            let media = match answer {
+                Err(message) => {
+                    errors.push(format!("{name}: {message}"));
+                    continue;
+                }
+                Ok(None) => continue,
+                Ok(Some(media)) => media,
+            };
+            if !answer_matches_target(q, media) {
+                continue;
+            }
+            let value = extract_field_bricks(*want, media, q, episode_key)
+                .into_iter()
+                .find(|(found_field, _)| *found_field == field)
+                .map(|(_, value)| value);
+            let Some(value) = value else { continue };
+            won = Some(Brick::found(
+                field,
+                value,
+                *want,
+                with_media_id(&target, media),
+                episode,
+                provenance_for(*want, media, field, &episode_key),
+            ));
+            break;
+        }
+        match won {
+            Some(brick) => {
+                report.found.push(field);
+                bricks.push(brick);
+            }
+            None if !errors.is_empty() => {
+                report.errored.push((field, errors.join("; ")));
+            }
+            None if consulted > 0 => {
+                report.missed.push(field);
+                bricks.push(Brick::miss(
+                    field,
+                    miss_source.expect("consulted > 0 implies a miss source"),
+                    target.clone(),
+                    episode,
+                    format!(
+                        "fill: no {field:?} from {consulted} provider(s) for {}",
+                        target.id
+                    ),
+                ));
+            }
+            None => {}
+        }
+    }
+    cache.insert_many(bricks)?;
+    Ok(report)
 }
