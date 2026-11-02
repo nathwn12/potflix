@@ -185,6 +185,7 @@ fn tenrai_year_prefers_beerus_over_2015_series() {
 /// and the absolute episode-1 title. Real network, real input; a mock proves
 /// nothing here.
 #[test]
+#[ignore = "live network; run with --ignored"]
 fn tenrai_live_naruto_round_trip() {
     let source = TenraiSource::new("", http_client());
     let cancel = Cancel::with_deadline(Duration::from_secs(25));

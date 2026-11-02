@@ -72,6 +72,7 @@ fn livechart_low_confidence_is_miss() {
 /// LIVE: the real LiveChart.me endpoint answers `re zero` with a synopsis.
 /// Real network, real input; a mock proves nothing here.
 #[test]
+#[ignore = "live network; run with --ignored"]
 fn livechart_live_rezero_round_trip() {
     let source = LivechartSource::new("", http_client());
     let cancel = Cancel::with_deadline(Duration::from_secs(25));

@@ -90,6 +90,7 @@ fn bangumi_empty_list_is_miss() {
 /// live anime leg is proven by the stub-shape fake above while the live
 /// round trip runs where the names are English.
 #[test]
+#[ignore = "live network; run with --ignored"]
 fn bangumi_live_bcs_round_trip() {
     let source = BangumiSource::new("", http_client());
     let cancel = Cancel::with_deadline(Duration::from_secs(30));
