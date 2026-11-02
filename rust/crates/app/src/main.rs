@@ -943,6 +943,9 @@ fn handle_lock_bind_failure(log: &'static Logger, err: std::io::Error) -> ! {
                 instance::ALREADY_RUNNING_MSG
             ));
             log.close();
+            // The loser still says why on stderr: the probe that made this
+            // path discriminating must not silence the user-facing reason.
+            eprintln!("{}", instance::ALREADY_RUNNING_MSG);
             std::process::exit(code);
         }
         InstanceProbe::Foreign => {
