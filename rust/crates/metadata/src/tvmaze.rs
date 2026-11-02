@@ -65,6 +65,30 @@ impl TvmazeSource {
     fn http_client(&self) -> &HttpClient {
         &self.client
     }
+
+    /// The `/search/shows` rows for `title`, ONE request, in the provider's own
+    /// score order. Rows without an id or a name are dropped.
+    fn search_shows(&self, cancel: &Cancel, title: &str) -> Result<Vec<TvmazeShow>, Error> {
+        if title.is_empty() {
+            return Ok(Vec::new());
+        }
+        let search_url = format!(
+            "{}/search/shows?q={}",
+            self.base_url(),
+            query_escape(&title.to_lowercase())
+        );
+        let response = self.http_client().get(cancel, &search_url)?;
+        if response.status() == StatusCode::NOT_FOUND {
+            drain_and_close(response);
+            return Ok(Vec::new());
+        }
+        let results: Vec<TvmazeSearchResult> = decode_capped(response)?;
+        Ok(results
+            .into_iter()
+            .map(|result| result.show)
+            .filter(|show| show.id != 0 && !show.name.is_empty())
+            .collect())
+    }
 }
 
 impl Default for TvmazeSource {
@@ -192,6 +216,10 @@ impl crate::resolver::Source for TvmazeSource {
         "tvmaze"
     }
 
+    fn path(&self) -> crate::resolver::SearchPath {
+        crate::resolver::SearchPath::Regular
+    }
+
     /// `Find` resolves one season (`Season>0`, not absolute) via
     /// `/shows/<id>/seasons` + `/seasons/<seasonId>/episodes`, or the whole show
     /// in air order for absolute/`Season==0` queries via `/shows/<id>/episodes`.
@@ -211,36 +239,19 @@ impl crate::resolver::Source for TvmazeSource {
         // rows and zero exact matches for films -- `inception` must miss, not
         // become `Deception`), and a low-confidence best returns not-found so
         // the resolver falls through to AniList/Jikan.
-        let search_url = format!(
-            "{base}/search/shows?q={}",
-            query_escape(&q.title.to_lowercase())
-        );
-        let response = client.get(cancel, &search_url)?;
-        if response.status() == StatusCode::NOT_FOUND {
-            drain_and_close(response);
+        let shows = self.search_shows(cancel, &q.title)?;
+        if shows.is_empty() {
             return Ok(None);
         }
-        let results: Vec<TvmazeSearchResult> = decode_capped(response)?;
-        if results.is_empty() {
-            return Ok(None);
-        }
-        let mut cands: Vec<ShowCand> = Vec::with_capacity(results.len());
-        let mut shows: Vec<TvmazeShow> = Vec::with_capacity(results.len());
-        for result in results {
-            if result.show.id == 0 || result.show.name.is_empty() {
-                continue;
-            }
-            cands.push(ShowCand {
-                name: result.show.name.clone(),
-                weight: result.show.weight,
+        let cands: Vec<ShowCand> = shows
+            .iter()
+            .map(|show| ShowCand {
+                name: show.name.clone(),
+                weight: show.weight,
                 episode_count: 0,
                 aliases: Vec::new(),
-            });
-            shows.push(result.show);
-        }
-        if cands.is_empty() {
-            return Ok(None);
-        }
+            })
+            .collect();
         // Title identity: rank only candidates that match the query on their
         // own. No year can rescue a title miss, so this runs before any year
         // preference; an empty confident set is a definitive miss.
@@ -277,11 +288,6 @@ impl crate::resolver::Source for TvmazeSource {
         let take =
             crate::yearpref::prefer_year_match(&q.title, q.year, &cands, &years, winner_at);
         let show = shows[take].clone();
-
-        let year = date_year(&show.premiered);
-        let genres = join_genres(&show.genres);
-        let length = tvmaze_show_length(&show);
-        let show_url = normalize_url(&show.url);
 
         let (episodes, episode_url) = if q.season > 0 && !q.absolute {
             let seasons_url = format!("{base}/shows/{}/seasons", show.id);
@@ -337,22 +343,60 @@ impl crate::resolver::Source for TvmazeSource {
             (out, url)
         };
 
-        Ok(Some(Media {
-            source: "tvmaze".to_string(),
-            source_id: show.id.to_string(),
-            kind: Kind::SERIES,
-            title: show.name.clone(),
-            year,
-            artwork: tvmaze_art(show.image.as_ref()),
-            synopsis: cap_synopsis(&strip_html(&show.summary)),
-            genres,
-            length,
-            show_url,
-            episode_url,
-            movie_url: String::new(),
-            trailer_url: String::new(),
-            episodes,
-            fetched_at: crate::timefmt::now_rfc3339(),
-        }))
+        let mut media = show_media(&show);
+        media.episode_url = episode_url;
+        media.episodes = episodes;
+        Ok(Some(media))
+    }
+
+    /// The manual search's rows: the same one-request `/search/shows` answer,
+    /// each row the provider brings back as its own pickable entry (title
+    /// identity only -- year never gates here, the searcher applies the gate,
+    /// and nothing fetches an episode table).
+    fn find_all(&self, cancel: &Cancel, q: &Query) -> Result<Vec<Media>, Error> {
+        if q.kind == Kind::MOVIE || q.title.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out: Vec<Media> = Vec::new();
+        for show in self.search_shows(cancel, &q.title)? {
+            let cand = ShowCand {
+                name: show.name.clone(),
+                weight: show.weight,
+                episode_count: 0,
+                aliases: Vec::new(),
+            };
+            // The same floor `Find` applies: a fuzzy row never becomes a pick.
+            if pick_best_show(&q.title, std::slice::from_ref(&cand)).is_none() {
+                continue;
+            }
+            out.push(show_media(&show));
+            if out.len() == crate::resolver::FIND_ALL_LIMIT {
+                break;
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The candidate-ready [`Media`] for one search row: identity, year, cover,
+/// synopsis and page URL, with an EMPTY episode table (a search never fetches
+/// one; `Find` is what carries the table).
+fn show_media(show: &TvmazeShow) -> Media {
+    Media {
+        source: "tvmaze".to_string(),
+        source_id: show.id.to_string(),
+        kind: Kind::SERIES,
+        title: show.name.trim().to_string(),
+        year: date_year(&show.premiered),
+        artwork: tvmaze_art(show.image.as_ref()),
+        synopsis: cap_synopsis(&strip_html(&show.summary)),
+        genres: join_genres(&show.genres),
+        length: tvmaze_show_length(show),
+        show_url: normalize_url(&show.url),
+        episode_url: String::new(),
+        movie_url: String::new(),
+        trailer_url: String::new(),
+        episodes: Vec::new(),
+        fetched_at: crate::timefmt::now_rfc3339(),
     }
 }

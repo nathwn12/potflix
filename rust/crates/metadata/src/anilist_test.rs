@@ -6,8 +6,61 @@ use metadata_core::types::{Episode, Kind, Media, Query};
 use metadata_http::cancel::Cancel;
 
 use crate::anilist::AnilistSource;
+use crate::animeschedule::AnimescheduleSource;
 use crate::resolver::Source;
 use crate::testsupport::{FakeServer, Request, Response, TempDir, http_client, resolver_with};
+
+/// Defect 1: an HTTP-200 error document (`{"errors":...,"data":null}`) or a
+/// null payload (`{"anime":null}`) must return `Err` -- a transient failure
+/// the chain retries and the search reports -- never `Ok(None)`, which would
+/// persist a 30-day negative and suppress the failed leg.
+#[test]
+fn provider_error_document_is_transient() {
+    let anilist = FakeServer::start(|_req: &Request| {
+        Response::json(r#"{"errors":[{"message":"rate limited"}],"data":null}"#)
+    });
+    let source = AnilistSource::new(anilist.url(), http_client());
+    let err = source
+        .find(
+            &Cancel::background(),
+            &Query {
+                kind: Kind::SERIES,
+                title: "Show".to_string(),
+                ..Query::default()
+            },
+        )
+        .expect_err("anilist error document must be Err, got Ok");
+    assert!(
+        !err.message().is_empty(),
+        "anilist error document needs a message, got {err:?}"
+    );
+
+    let anilist_null = FakeServer::start(|_req: &Request| Response::json(r#"{"data":null}"#));
+    let null_source = AnilistSource::new(anilist_null.url(), http_client());
+    null_source
+        .find(
+            &Cancel::background(),
+            &Query {
+                kind: Kind::SERIES,
+                title: "Show".to_string(),
+                ..Query::default()
+            },
+        )
+        .expect_err("anilist null data must be Err, got Ok");
+
+    let schedule = FakeServer::start(|_req: &Request| Response::json(r#"{"anime":null}"#));
+    let sched_source = AnimescheduleSource::new(schedule.url(), http_client());
+    sched_source
+        .find(
+            &Cancel::background(),
+            &Query {
+                kind: Kind::SERIES,
+                title: "Show".to_string(),
+                ..Query::default()
+            },
+        )
+        .expect_err("animeschedule null payload must be Err, got Ok");
+}
 
 /// `TestAniList`: one GraphQL POST, the search variable echoed, and the
 /// episode number/title/URL mapping.

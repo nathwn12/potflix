@@ -157,14 +157,18 @@ fn chain_call_counts() {
             want: vec![("cinemeta", 1), ("anilist", 1)],
         },
         Case {
-            name: "movie hit at justwatch walks past cinemeta and wikipedia",
+            name: "movie hit at justwatch walks the movie legs then the unranked tail",
             q: movie_q.clone(),
             answer_at: "justwatch",
             want: vec![
                 ("cinemeta", 1),
+                // Walked once on the way past, then once for the artwork
+                // backfill: the winning fixture carries no cover.
+                ("anilist", 2),
+                ("tenrai", 1),
+                ("kitsu", 1),
                 ("wikipedia", 1),
                 ("justwatch", 1),
-                ("anilist", 1),
             ],
         },
         Case {

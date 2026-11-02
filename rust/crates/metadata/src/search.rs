@@ -13,20 +13,36 @@
 //! returns the same latch with a refreshed payload. Persistence is
 //! [`crate::overrides`]'s job; this module only builds the record.
 //!
-//! # One pass, ranked
+//! # One concurrent pass, ranked
 //!
 //! [`search`] walks the legs applicable to the wanted kind ONCE -- the movie
 //! legs for [`Kind::MOVIE`], the series/anime legs otherwise (the resolver's
-//! own ranking, with Cinemeta as the general fallback) -- deduplicates by
-//! (provider, provider_id), ranks, and caps at [`SEARCH_LIMIT`]. The rank:
-//! the wanted kind first, then a year match (only when a year was given) above
-//! a mismatch, then the entry whose title best matches the typed name, then
-//! provider order. The title order reuses the crate's own matcher
-//! ([`pick_best_show`]) with its weight/episode-count tie-breaks neutralized,
-//! so the order is pure title strength; entries the matcher declines to rank
-//! (below its similarity floor) keep provider order. A leg error, an empty
-//! answer and a cancelled scope all end as an empty (or shortened) vector --
-//! never a panic.
+//! own ranking, with Cinemeta as the general fallback) -- with EVERY leg on its
+//! own thread ([`std::thread::scope`]), so one slow provider never holds the
+//! picker. Each leg answers with its provider's own multi-row search
+//! ([`Source::find_all`]): one request per leg, no episode table.
+//! [`search_stream`] hands each leg's rows to a sink the moment THAT leg
+//! finishes; the returned vector is deduplicated by (provider, provider_id),
+//! merged by work ([`merge_same_work`], so one work is one row), ranked and
+//! capped at [`SEARCH_LIMIT`], and is the same sequence on every run whatever
+//! order the threads complete in. The rank: the wanted kind
+//! first, then a year match above a mismatch, then the entry whose title best
+//! matches the typed name, then provider order. The title order reuses the
+//! crate's own matcher ([`pick_best_show`]) with its weight/episode-count
+//! tie-breaks neutralized, so the order is pure title strength; entries the
+//! matcher declines to rank (below its similarity floor) keep provider order.
+//! A leg's failure is recorded by provider name in [`SearchOutcome::failed`]
+//! (an EMPTY answer is a success), so [`search_stream_only`] can run the
+//! picker's next pass over exactly the legs that did not answer; a cancelled
+//! scope ends the pass early and nothing here panics.
+//!
+//! # The year is a gate
+//!
+//! A known year is an identity check, NOT a preference: with `year > 0` every
+//! candidate whose year is unknown or different is DROPPED, before it can
+//! reach the rank or the streaming sink. `edgerunners 2026` used to surface a
+//! 1990s entry through the soft year preference; no rank term may reintroduce
+//! a mismatch.
 //!
 //! # The latch's identity
 //!
@@ -37,8 +53,10 @@
 //! re-ranked search can never silently latch a different work: a mismatched
 //! or missing answer is an [`Error`] the caller shows, never a half-built
 //! latch. The provider legs expose find-by-query only -- no fetch-by-id entry
-//! point -- so this verified single-leg fetch is the strongest form of the
-//! rule available without each provider module; the refusal is proven in
+//! point -- so when `find` lands on the wrong-year entry (a soft preference
+//! can still pick a same-titled work) the fetch falls back to
+//! [`Source::find_all`] and takes the row carrying the STORED id, and only a
+//! search that lacks that id refuses. The refusal is proven in
 //! `refresh_and_pin_refuse_a_mismatched_provider_id` below.
 //!
 //! # Cancellation
@@ -52,49 +70,57 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use metadata_core::match_::{ShowCand, pick_best_show};
+use metadata_core::match_::{ShowCand, normalize_title, pick_best_show};
 use metadata_core::types::{Episode, Kind, Media, Query};
 use metadata_http::cancel::Cancel;
+use serde::{Deserialize, Serialize};
 
 use crate::Error;
 use crate::overrides::{EpisodePin, Override, Scope, now_ms};
 use crate::resolver::{Source, default_sources};
 
-/// The most candidates [`search`] returns.
-pub const SEARCH_LIMIT: usize = 8;
+/// The most candidates a search returns.
+pub const SEARCH_LIMIT: usize = 24;
 
-/// The legs a movie search walks, in provider order (the resolver's own movie
-/// ranking).
-const MOVIE_LEGS: &[&str] = &["cinemeta", "wikipedia", "justwatch"];
-
-/// The legs a series/anime search walks, in provider order (the resolver's
-/// own series ranking; Cinemeta is the general fallback and carries series
-/// too).
-const SERIES_LEGS: &[&str] = &[
-    "tvmaze",
-    "anilist",
-    "tenrai",
-    "kitsu",
-    "cinemeta",
-    "episodate",
-    "bangumi",
-    "livechart",
-    "ann",
-];
+/// The old flat MOVIE_LEGS/SERIES_LEGS list lived here; routing is now
+/// path-tagged (Regular vs Anime) with concurrent primaries on both paths.
+/// Regular available 3 (Cinemeta + TVmaze + IMDb), anime primary 4
+/// (AniList + Tenrai + Kitsu + AnimeSchedule).
+pub const REGULAR_LEGS: &[&str] = &["cinemeta", "tvmaze", "imdb"];
+pub const ANIME_LEGS: &[&str] = &["anilist", "tenrai", "kitsu", "animeschedule"];
 
 /// The legs applicable to `want`: the movie legs for [`Kind::MOVIE`], the
 /// series/anime legs for every other kind (an unknown want gets the wider
-/// search, whose Cinemeta leg answers either kind).
+/// search, whose Cinemeta leg answers either kind). All seven primaries run
+/// concurrently; IMDb is a concurrent regular leg (first paint still comes
+/// from Cinemeta in ~0.1s, IMDb only delays the final count).
 fn legs_for(want: Kind) -> &'static [&'static str] {
     if want == Kind::MOVIE {
-        MOVIE_LEGS
+        &[
+            "cinemeta",
+            "imdb",
+            "anilist",
+            "tenrai",
+            "kitsu",
+            "animeschedule",
+        ]
     } else {
-        SERIES_LEGS
+        &[
+            "tvmaze",
+            "anilist",
+            "tenrai",
+            "kitsu",
+            "animeschedule",
+            "cinemeta",
+            "imdb",
+        ]
     }
 }
 
-/// One pickable entry a leg offered for the typed name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One pickable entry a leg offered for the typed name. It is also the row the
+/// picker's result cache stores, so it travels as JSON ([`crate::searchcache`]):
+/// the field names are stable on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Candidate {
     /// The entry's own kind, as the leg reported it.
     pub kind: Kind,
@@ -109,21 +135,127 @@ pub struct Candidate {
     pub provider_id: String,
     /// The entry's series/movie cover.
     pub poster: String,
-    /// The real number of episodes the entry can serve: the length of the
-    /// episode table a latch built from it carries ([`Self::poster`]'s sibling
-    /// tell for choosing between a season entry and a whole-show entry).
-    /// `0` for a movie.
+    /// The entry's series/movie summary, `""` when the leg's own row carries
+    /// none. [`merge_same_work`] splices another provider's copy in, and
+    /// [`pin_from_candidate`]/[`refresh`] carry it onto the latched media when
+    /// the identity fetch has none.
+    pub synopsis: String,
+    /// "Drama . Crime", `""` if unknown.
+    pub genres: String,
+    /// Show/movie length ("45 min", "2h 19m"), `""` if unknown.
+    pub length: String,
+    /// The length of the episode table the leg's own answer carried: `0` for a
+    /// movie, and `0` for a manual search's row, whose `find_all` never fetches
+    /// a table. A latch built from the candidate carries the table `find`
+    /// fetches, not this count.
     pub episode_count: usize,
+}
+
+/// One search pass's answer: the ranked rows plus the provider legs that
+/// FAILED. `failed` carries the provider name of every leg whose
+/// [`Source::find_all`] returned `Err`, in provider order, deduplicated; an
+/// empty `failed` is a clean pass, and rows may still be present (a PARTIAL
+/// answer). An empty answer is a success, never a failure. The caller retries
+/// with [`search_stream_only`], and the cache stores both halves so the retry
+/// survives a restart.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchOutcome {
+    /// The ranked, merged, capped rows the legs answered.
+    pub rows: Vec<Candidate>,
+    /// The provider names whose leg failed, in provider order.
+    pub failed: Vec<String>,
 }
 
 /// `search`: one pass over the legs applicable to `want`, over the built-in
 /// provider set.
 pub fn search(cancel: &Cancel, name: &str, year: i32, want: Kind) -> Vec<Candidate> {
-    search_with(&default_sources(), cancel, name, year, want)
+    search_stream(cancel, name, year, want, &|_| {}).rows
+}
+
+/// `searchStream`: [`search`] over the built-in provider set, with every leg's
+/// rows handed to `sink` the moment THAT leg answers -- the picker can paint
+/// the first provider's entries while the slower legs are still on the wire.
+/// The sink is called from the leg threads, so it is `Send + Sync`; an empty
+/// leg calls it not at all, and the outcome's rows are the full ranked result
+/// regardless of what the sink does. Each leg attempt also emits one debug
+/// line (`search: leg <name> ok|fail <n> rows <ms>`) through the process log
+/// hook when one is installed (see [`search_stream_with_log`]); a cached
+/// second search issues zero new leg lines because no leg runs.
+pub fn search_stream(
+    cancel: &Cancel,
+    name: &str,
+    year: i32,
+    want: Kind,
+    sink: &(dyn Fn(Vec<Candidate>) + Send + Sync),
+) -> SearchOutcome {
+    search_stream_with(&default_sources(), cancel, name, year, want, sink)
+}
+
+/// `searchStreamOnly`: [`search_stream`] restricted to the named providers, so
+/// a partial outcome's [`SearchOutcome::failed`] legs can be retried without
+/// re-walking the ones that already answered. Only names in the want's own leg
+/// list are walked, in that list's provider order; an unknown or blank name
+/// matches nothing, and an empty list walks no leg at all (a full search is
+/// [`search_stream`]).
+pub fn search_stream_only(
+    cancel: &Cancel,
+    name: &str,
+    year: i32,
+    want: Kind,
+    providers: &[String],
+    sink: &(dyn Fn(Vec<Candidate>) + Send + Sync),
+) -> SearchOutcome {
+    search_stream_only_with(&default_sources(), cancel, name, year, want, providers, sink)
+}
+
+/// [`search_stream`] over the built-in provider set with per-leg debug lines
+/// sent to `log` (`search: leg <name> ok|fail <n> rows <ms>`).
+pub fn search_stream_with_log(
+    cancel: &Cancel,
+    name: &str,
+    year: i32,
+    want: Kind,
+    sink: &(dyn Fn(Vec<Candidate>) + Send + Sync),
+    log: &(dyn Fn(&str) + Send + Sync),
+) -> SearchOutcome {
+    search_core(
+        &default_sources(),
+        cancel,
+        name,
+        year,
+        want,
+        None,
+        sink,
+        Some(log),
+    )
+}
+
+/// [`search_stream_only`] over the built-in provider set with per-leg debug
+/// lines sent to `log`.
+pub fn search_stream_only_with_log(
+    cancel: &Cancel,
+    name: &str,
+    year: i32,
+    want: Kind,
+    providers: &[String],
+    sink: &(dyn Fn(Vec<Candidate>) + Send + Sync),
+    log: &(dyn Fn(&str) + Send + Sync),
+) -> SearchOutcome {
+    search_core(
+        &default_sources(),
+        cancel,
+        name,
+        year,
+        want,
+        Some(providers),
+        sink,
+        Some(log),
+    )
 }
 
 /// The injectable core of [`search`]: the same pass over an explicit source
 /// set (the tests drive fixture legs here).
+#[cfg(test)]
 pub(crate) fn search_with(
     sources: &[Arc<dyn Source>],
     cancel: &Cancel,
@@ -131,55 +263,228 @@ pub(crate) fn search_with(
     year: i32,
     want: Kind,
 ) -> Vec<Candidate> {
+    search_stream_with(sources, cancel, name, year, want, &|_| {}).rows
+}
+
+/// The injectable core of [`search_stream`]: every applicable leg runs on its
+/// own thread ([`std::thread::scope`]) and the outcome keeps the failed legs
+/// named. See [`search_core`].
+pub(crate) fn search_stream_with(
+    sources: &[Arc<dyn Source>],
+    cancel: &Cancel,
+    name: &str,
+    year: i32,
+    want: Kind,
+    sink: &(dyn Fn(Vec<Candidate>) + Send + Sync),
+) -> SearchOutcome {
+    search_core(sources, cancel, name, year, want, None, sink, None)
+}
+
+/// The injectable core of [`search_stream_only`]: [`search_core`] over exactly
+/// the named providers.
+pub(crate) fn search_stream_only_with(
+    sources: &[Arc<dyn Source>],
+    cancel: &Cancel,
+    name: &str,
+    year: i32,
+    want: Kind,
+    providers: &[String],
+    sink: &(dyn Fn(Vec<Candidate>) + Send + Sync),
+) -> SearchOutcome {
+    search_core(sources, cancel, name, year, want, Some(providers), sink, None)
+}
+
+/// The injectable core of [`search_stream_only_with_log`]: [`search_core`]
+/// over exactly the named providers with per-leg debug lines sent to `log`.
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+pub(crate) fn search_stream_only_with_logged(
+    sources: &[Arc<dyn Source>],
+    cancel: &Cancel,
+    name: &str,
+    year: i32,
+    want: Kind,
+    providers: &[String],
+    sink: &(dyn Fn(Vec<Candidate>) + Send + Sync),
+    log: &(dyn Fn(&str) + Send + Sync),
+) -> SearchOutcome {
+    search_core(
+        sources,
+        cancel,
+        name,
+        year,
+        want,
+        Some(providers),
+        sink,
+        Some(log),
+    )
+}
+
+/// The shared pass behind [`search_stream`] and [`search_stream_only`]: EVERY
+/// walked leg runs on its own thread; a leg searches with its provider's own
+/// [`Source::find_all`] (one request), maps the rows to [`Candidate`]s, drops
+/// the mismatched years, hands its rows to `sink`, and only then joins the
+/// final pass. A leg whose `find_all` returned `Err` contributes no rows and
+/// its name lands in [`SearchOutcome::failed`]; an empty answer is a success.
+/// `only` (`Some`) restricts the walk to those provider names, matched
+/// case-insensitively, in the want's own provider order. The rows are
+/// concatenated in provider order, so the rank sees the same input sequence on
+/// every run whatever order the threads complete in.
+#[allow(clippy::too_many_arguments)]
+fn search_core(
+    sources: &[Arc<dyn Source>],
+    cancel: &Cancel,
+    name: &str,
+    year: i32,
+    want: Kind,
+    only: Option<&[String]>,
+    sink: &(dyn Fn(Vec<Candidate>) + Send + Sync),
+    log: Option<&(dyn Fn(&str) + Send + Sync)>,
+) -> SearchOutcome {
     let name = name.trim();
     if name.is_empty() {
-        return Vec::new();
+        return SearchOutcome::default();
     }
-    let mut hits: Vec<(usize, Candidate)> = Vec::new();
-    let mut seen: HashSet<(String, String)> = HashSet::new();
-    let mut order = 0usize;
-    'legs: for leg in legs_for(want) {
+    let only: Option<HashSet<String>> = only.map(|names| {
+        names
+            .iter()
+            .map(|name| name.trim().to_ascii_lowercase())
+            .filter(|name| !name.is_empty())
+            .collect()
+    });
+    // The legs in provider order: (position, source). One thread per leg, the
+    // same walk the sequential pass made, so a source mounted twice still
+    // answers twice (its rows dedupe below).
+    let mut legs: Vec<(usize, Arc<dyn Source>)> = Vec::new();
+    for leg in legs_for(want) {
+        if let Some(only) = &only
+            && !only.contains(*leg)
+        {
+            continue;
+        }
         for source in sources.iter().filter(|source| source.name() == *leg) {
-            let order_at = order;
-            order += 1;
-            if cancel.err().is_some() {
-                break 'legs;
-            }
-            let q = Query {
-                kind: want,
-                title: name.to_string(),
-                year,
-                season: 0,
-                episode: 0,
-                absolute: false,
-            };
-            // A leg error or an empty answer is another leg's chance, never a
-            // failed search: the UI's "no results" is the empty vector.
-            let Ok(Some(media)) = source.find(cancel, &q) else {
-                continue;
-            };
-            let provider = source.name().to_string();
-            let provider_id = media.source_id.trim().to_string();
-            if !seen.insert((provider.clone(), provider_id.clone())) {
-                continue;
-            }
-            hits.push((
-                order_at,
-                Candidate {
-                    kind: media.kind,
-                    title: media.title.trim().to_string(),
-                    year: media.year,
-                    provider,
-                    provider_id,
-                    poster: media.artwork,
-                    episode_count: media.episodes.len(),
-                },
-            ));
+            legs.push((legs.len(), Arc::clone(source)));
         }
     }
-    let mut ranked = rank_hits(hits, name, year, want);
-    ranked.truncate(SEARCH_LIMIT);
-    ranked
+    if legs.is_empty() || cancel.err().is_some() {
+        return SearchOutcome::default();
+    }
+    let per_leg: Vec<(usize, Vec<Candidate>, Option<String>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = legs
+            .into_iter()
+            .map(|(order, source)| {
+                scope.spawn(move || {
+                    let provider = source.name().to_string();
+                    let started = std::time::Instant::now();
+                    let outcome = leg_candidates(source.as_ref(), cancel, name, year, want);
+                    let elapsed_ms = started.elapsed().as_millis();
+                    let Ok(candidates) = outcome
+                    else {
+                        // A leg error is a PARTIAL answer: the other legs'
+                        // rows stand and the caller learns which name to retry.
+                        if let Some(log) = log {
+                            log(&format!(
+                                "search: leg {provider} fail 0 rows {elapsed_ms}ms"
+                            ));
+                        }
+                        return (order, Vec::new(), Some(provider));
+                    };
+                    let mut seen: HashSet<(String, String)> = HashSet::new();
+                    let mut rows: Vec<Candidate> = Vec::new();
+                    for candidate in candidates {
+                        // The HARD year gate: a known year admits only its own.
+                        if !year_admits(candidate.year, year) {
+                            continue;
+                        }
+                        if seen.insert((candidate.provider.clone(), candidate.provider_id.clone()))
+                        {
+                            rows.push(candidate);
+                        }
+                    }
+                    // This leg is done: its rows are the picker's NOW, before
+                    // the slower legs answer.
+                    if !rows.is_empty() {
+                        sink(rows.clone());
+                    }
+                    if let Some(log) = log {
+                        let n = rows.len();
+                        log(&format!("search: leg {provider} ok {n} rows {elapsed_ms}ms"));
+                    }
+                    (order, rows, None)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap_or_default())
+            .collect()
+    });
+    let mut hits: Vec<(usize, Candidate)> = Vec::new();
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    let mut failed: Vec<String> = Vec::new();
+    for (order, rows, fail) in per_leg {
+        if let Some(provider) = fail
+            && !failed.contains(&provider)
+        {
+            failed.push(provider);
+        }
+        for candidate in rows {
+            if seen.insert((candidate.provider.clone(), candidate.provider_id.clone())) {
+                hits.push((order, candidate));
+            }
+        }
+    }
+    // The same work can be offered by several legs: the best-ranked row keeps
+    // the identity and gains the fields it lacks from the others, and the cap
+    // applies to the merged result so a duplicate never costs a slot.
+    let mut rows = merge_same_work(rank_hits(hits, name, year, want));
+    rows.truncate(SEARCH_LIMIT);
+    SearchOutcome { rows, failed }
+}
+
+/// One leg's rows, as candidates: the provider's own [`Source::find_all`]
+/// answer for the typed name. An `Err` is returned to the caller, which records
+/// the leg in [`SearchOutcome::failed`]; an empty answer is a success.
+fn leg_candidates(
+    source: &dyn Source,
+    cancel: &Cancel,
+    name: &str,
+    year: i32,
+    want: Kind,
+) -> Result<Vec<Candidate>, Error> {
+    let q = Query {
+        kind: want,
+        title: name.to_string(),
+        year,
+        season: 0,
+        episode: 0,
+        absolute: false,
+    };
+    let rows = source.find_all(cancel, &q)?;
+    Ok(rows
+        .into_iter()
+        .filter(|media| !media.title.trim().is_empty())
+        .map(|media| Candidate {
+            kind: media.kind,
+            title: media.title.trim().to_string(),
+            year: media.year,
+            provider: source.name().to_string(),
+            provider_id: media.source_id.trim().to_string(),
+            poster: media.artwork,
+            synopsis: media.synopsis,
+            genres: media.genres,
+            length: media.length,
+            episode_count: media.episodes.len(),
+        })
+        .collect())
+}
+
+/// The HARD year gate: with a known query year, an entry whose year is unknown
+/// or different is DROPPED -- not ranked lower. A soft preference let
+/// `edgerunners 2026` offer a 1990s entry, and a year mismatch is the wrong
+/// work, not a weaker guess.
+fn year_admits(candidate_year: i32, year: i32) -> bool {
+    year <= 0 || candidate_year == year
 }
 
 /// The ranking of [`search`]: the wanted kind first, then a year match (only
@@ -244,6 +549,121 @@ fn title_rank(query: &str, cands: &[ShowCand]) -> Vec<usize> {
     out
 }
 
+/// Splice duplicate rows for the SAME work into the first (best-ranked) one.
+///
+/// Walks `rows` in order and keeps the first row of every work, so the rank
+/// still decides which provider the picker shows: the kept row's
+/// provider/provider_id/title/year are never touched. Each later duplicate
+/// fills only the kept row's EMPTY poster/synopsis/genres/length -- a provider
+/// value is never replaced -- and contributes its episode count to the kept
+/// row's maximum, then is dropped. The kept order is the input order.
+///
+/// `search` returns merged rows; [`search_stream`]'s batches stay raw, so the
+/// UI merges its own batches with this same public helper.
+///
+/// Two rows are one work when their kind matches, their years agree (two known
+/// years must be equal; an unknown year agrees with anything), and their
+/// normalized titles are equal -- accents folded, a trailing sequel numeral
+/// folded to its digit, so "Edgerunners II" is "Edgerunners 2". A token
+/// subset never merges: "National Treasure" and "National Treasure: Book of
+/// Secrets" are different works even in the same year. A blank
+/// title never matches anything.
+pub fn merge_same_work(rows: Vec<Candidate>) -> Vec<Candidate> {
+    let mut kept: Vec<Candidate> = Vec::with_capacity(rows.len());
+    for row in rows {
+        match kept.iter().position(|first| same_work(first, &row)) {
+            Some(at) => {
+                let first = &mut kept[at];
+                fill_blank(&mut first.poster, &row.poster);
+                fill_blank(&mut first.synopsis, &row.synopsis);
+                fill_blank(&mut first.genres, &row.genres);
+                fill_blank(&mut first.length, &row.length);
+                first.episode_count = first.episode_count.max(row.episode_count);
+            }
+            None => kept.push(row),
+        }
+    }
+    kept
+}
+
+/// Whether two rows name the same work: same kind, agreeing years, and equal
+/// normalized titles. Never a subset: a shorter title inside a longer one is
+/// a different work, even with the same known year.
+fn same_work(a: &Candidate, b: &Candidate) -> bool {
+    if a.kind != b.kind || !years_agree(a.year, b.year) {
+        return false;
+    }
+    let (ta, tb) = (title_tokens(&a.title), title_tokens(&b.title));
+    if ta.is_empty() || tb.is_empty() {
+        return false;
+    }
+    ta == tb
+}
+
+/// Two known years must be equal; an unknown (`0`) year agrees with anything.
+fn years_agree(a: i32, b: i32) -> bool {
+    a <= 0 || b <= 0 || a == b
+}
+
+/// A title's lowercase alphanumeric tokens through the crate's own
+/// [`normalize_title`](metadata_core::match_::normalize_title) -- accents
+/// folded so "Amélie" and "Amelie" compare equal -- with the trailing sequel
+/// numeral folded to its digit ("II" -> "2"), so "Edgerunners II" and
+/// "Edgerunners 2" compare equal instead of through a looser similarity.
+fn title_tokens(title: &str) -> HashSet<String> {
+    let normalized = metadata_core::match_::normalize_title(title);
+    let mut tokens: Vec<String> = normalized
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    if let Some(last) = tokens.last_mut()
+        && let Some(digit) = sequel_numeral(last)
+    {
+        *last = digit.to_string();
+    }
+    tokens.into_iter().collect()
+}
+
+/// The digit a trailing sequel numeral stands for; only the roman spellings
+/// this rule names (II, III, IV). Everything else is left as typed.
+fn sequel_numeral(token: &str) -> Option<u32> {
+    match token {
+        "ii" => Some(2),
+        "iii" => Some(3),
+        "iv" => Some(4),
+        _ => None,
+    }
+}
+
+/// Overwrite `field` only when it is empty (or blank) and `from` carries a
+/// value: a spliced field is never replaced by a later empty one.
+fn fill_blank(field: &mut String, from: &str) {
+    if field.trim().is_empty() && !from.trim().is_empty() {
+        *field = from.to_string();
+    }
+}
+
+/// Fill each series/movie-level field `media` lacks from a source copy: the
+/// picked candidate's own row, or the previous latch's snapshot on a refresh.
+/// The media's non-empty fields always win; a known source year fills an
+/// unknown one.
+fn fill_missing_fields(
+    media: &mut Media,
+    poster: &str,
+    synopsis: &str,
+    genres: &str,
+    length: &str,
+    year: i32,
+) {
+    fill_blank(&mut media.artwork, poster);
+    fill_blank(&mut media.synopsis, synopsis);
+    fill_blank(&mut media.genres, genres);
+    fill_blank(&mut media.length, length);
+    if media.year <= 0 && year > 0 {
+        media.year = year;
+    }
+}
+
 /// `pin`: the latch for one picked candidate, over the built-in provider set.
 pub fn pin_from_candidate(
     cancel: &Cancel,
@@ -271,7 +691,7 @@ pub(crate) fn pin_from_candidate_with(
     scope: Scope,
     key: &str,
 ) -> Result<Override, Error> {
-    let media = fetch_identity(
+    let mut media = fetch_identity(
         sources,
         cancel,
         &cand.provider,
@@ -280,6 +700,17 @@ pub(crate) fn pin_from_candidate_with(
         cand.year,
         scope_kind(scope),
     )?;
+    // The picked row can carry a synopsis/genre/length the identity record has
+    // none of (another provider answered the search): fill each field the
+    // fetch left empty from the candidate, never replacing a provider value.
+    fill_missing_fields(
+        &mut media,
+        &cand.poster,
+        &cand.synopsis,
+        &cand.genres,
+        &cand.length,
+        cand.year,
+    );
     let mut over = Override {
         scope,
         key: key.to_string(),
@@ -318,7 +749,7 @@ pub(crate) fn refresh_with(
     cancel: &Cancel,
     over: &Override,
 ) -> Result<Override, Error> {
-    let media = fetch_identity(
+    let mut media = fetch_identity(
         sources,
         cancel,
         &over.provider,
@@ -327,6 +758,38 @@ pub(crate) fn refresh_with(
         over.year,
         scope_kind(over.scope),
     )?;
+    // A latch may carry data the provider never returns again (a synopsis
+    // spliced from another leg): a refresh fills what the fetch lacks from the
+    // stored snapshot, so it never drops the spliced fields.
+    if let Some(prev) = &over.media {
+        fill_missing_fields(
+            &mut media,
+            &prev.artwork,
+            &prev.synopsis,
+            &prev.genres,
+            &prev.length,
+            prev.year,
+        );
+    }
+    // A refresh that returns an empty table must not zero the pins: the
+    // provider is having a bad day (or the `find_all` fallback answered with
+    // a search row that never carries a table), so keep the existing episodes
+    // and report instead of a clean success.
+    if over.scope != Scope::Movie
+        && media.episodes.is_empty()
+        && (!over.episodes.is_empty()
+            || over
+                .media
+                .as_ref()
+                .is_some_and(|prev| !prev.episodes.is_empty()))
+    {
+        return Err(Error::other(format!(
+            "metadata: search: {:?} returned an empty episode table for {:?}; keeping the existing {} pins",
+            over.provider,
+            over.title,
+            over.episodes.len(),
+        )));
+    }
     let mut out = over.clone();
     if over.scope == Scope::Movie {
         out.media = Some(media);
@@ -349,11 +812,28 @@ fn scope_kind(scope: Scope) -> Kind {
     }
 }
 
+/// Whether an empty-id answer may latch `title`: the provider's title must
+/// name the same work (accents, case and punctuation folded), so a partial
+/// latch never takes another work's record and `media.title` stays the latch
+/// title.
+fn titles_match(answer: &str, latched: &str) -> bool {
+    let (a, b) = (normalize_title(answer), normalize_title(latched));
+    !a.is_empty() && a == b
+}
+
 /// One identity fetch. ONLY the leg named `provider` is called, with the
 /// stored title/year, and its answer must carry the stored `provider_id`: a
 /// different entry is refused rather than latched, so the identity cannot
-/// drift beneath a re-ranked search. An empty stored id (a provider with no
-/// id) accepts the leg's answer as-is.
+/// drift beneath a re-ranked search.
+///
+/// `find` narrows to ONE entry with a soft year preference, so it can land on
+/// the wrong-year same-title work. When it misses or its id differs, the
+/// leg's own multi-row [`Source::find_all`] search is consulted and the row
+/// carrying the EXACT stored id is taken -- the provider has it, `find` just
+/// did not pick it. Only a search that lacks that id refuses. An empty stored
+/// id (a provider with no id) accepts the leg's answer only when its title
+/// matches the latched title, so a partial latch can never drift onto another
+/// work's record.
 fn fetch_identity(
     sources: &[Arc<dyn Source>],
     cancel: &Cancel,
@@ -379,19 +859,37 @@ fn fetch_identity(
         episode: 0,
         absolute: false,
     };
-    let Some(media) = source.find(cancel, &q)? else {
-        return Err(Error::other(format!(
-            "metadata: search: {provider:?} no longer has {title:?}"
-        )));
-    };
-    if !provider_id.is_empty() && media.source_id != provider_id {
-        return Err(Error::other(format!(
-            "metadata: search: {provider:?} answered id {:?} for {title:?}, not {provider_id:?}; \
-             refusing to latch a different entry",
-            media.source_id
-        )));
+    let found = source.find(cancel, &q)?;
+    let want_id = provider_id.trim();
+    match found {
+        Some(media)
+            if (!want_id.is_empty() && media.source_id.trim() == want_id)
+                || (want_id.is_empty() && titles_match(&media.title, title)) =>
+        {
+            Ok(media)
+        }
+        other => {
+            if !want_id.is_empty() {
+                let exact = source
+                    .find_all(cancel, &q)?
+                    .into_iter()
+                    .find(|media| media.source_id.trim() == want_id);
+                if let Some(media) = exact {
+                    return Ok(media);
+                }
+            }
+            Err(match other {
+                Some(media) => Error::other(format!(
+                    "metadata: search: {provider:?} answered id {:?} for {title:?}, not {provider_id:?}; \
+                     refusing to latch a different entry",
+                    media.source_id
+                )),
+                None => Error::other(format!(
+                    "metadata: search: {provider:?} no longer has {title:?}"
+                )),
+            })
+        }
     }
-    Ok(media)
 }
 
 /// The per-episode pins for one fetched table, in table order. An episode
@@ -460,6 +958,62 @@ mod tests {
         Arc::new(CinemetaSource::new(url, http_client()))
     }
 
+    /// A leg that answers several rows at once, so a test can prove the
+    /// multi-result pass and the per-leg sink without a wire fixture.
+    struct MultiSource {
+        name: &'static str,
+        rows: Vec<Media>,
+    }
+
+    impl MultiSource {
+        fn shared(name: &'static str, rows: Vec<Media>) -> Arc<dyn Source> {
+            Arc::new(MultiSource { name, rows })
+        }
+    }
+
+    impl Source for MultiSource {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn find(&self, _cancel: &Cancel, _q: &Query) -> Result<Option<Media>, Error> {
+            Ok(self.rows.first().cloned())
+        }
+
+        fn find_all(&self, _cancel: &Cancel, _q: &Query) -> Result<Vec<Media>, Error> {
+            Ok(self.rows.clone())
+        }
+    }
+
+    /// One series row for a [`MultiSource`].
+    fn row(id: &str, title: &str, year: i32) -> Media {
+        Media {
+            source: "fake".to_string(),
+            source_id: id.to_string(),
+            kind: Kind::SERIES,
+            title: title.to_string(),
+            year,
+            ..Media::default()
+        }
+    }
+
+    /// One candidate for the merge and splice tests: the identity is named and
+    /// every field the splice fills starts empty.
+    fn cand(provider: &str, id: &str, title: &str, year: i32) -> Candidate {
+        Candidate {
+            kind: Kind::SERIES,
+            title: title.to_string(),
+            year,
+            provider: provider.to_string(),
+            provider_id: id.to_string(),
+            poster: String::new(),
+            synopsis: String::new(),
+            genres: String::new(),
+            length: String::new(),
+            episode_count: 0,
+        }
+    }
+
     /// The (provider, provider_id) pairs in order: the sequence under test.
     fn identities(hits: &[Candidate]) -> Vec<(String, String)> {
         hits.iter()
@@ -478,40 +1032,42 @@ mod tests {
         {"id":2,"name":"Cat's in the Bag...","season":1,"number":2},
         {"id":3,"name":"Seven Thirty-Seven","season":2,"number":1,"summary":"<p>Krazy-8.</p>","url":"https://tvmaze/ep/3","runtime":45}]"#;
 
+    /// Three TVmaze rows for "Show": two title matches (2008, 2013) and one
+    /// unrelated row the matcher's floor drops.
+    const TVMAZE_MANY: &str = r#"[{"score":1.0,"show":{"id":169,"name":"Show","premiered":"2008-01-20","weight":99,"image":{"original":"https://art/show.jpg"}}},{"score":0.9,"show":{"id":300,"name":"Totally Unrelated","premiered":"1999-01-01","weight":10}},{"score":0.8,"show":{"id":200,"name":"Show: The Return","premiered":"2013-05-01","weight":50}}]"#;
+
+    /// Two same-titled TVmaze entries from the same year: `find` takes the
+    /// first-ranked row, so a latch on the second id can only come from
+    /// `find_all`.
+    const TVMAZE_TWO_ROWS: &str = r#"[{"score":1.0,"show":{"id":1,"name":"Show","premiered":"2008-01-01","weight":99}},{"score":1.0,"show":{"id":2,"name":"Show","premiered":"2008-06-01","weight":99}}]"#;
+
     #[test]
-    fn search_ranks_a_year_match_above_a_mismatch_and_repeats_the_order() {
+    fn search_gates_the_year_hard_and_repeats_the_order() {
         let tvmaze = FakeServer::start(|req: &Request| match req.path.as_str() {
             "/search/shows" => Response::json(TVMAZE_2010),
-            "/shows/1/episodes" => Response::json(EPISODES),
             _ => Response::error(404, "not found"),
         });
         let cinemeta = FakeServer::start(|req: &Request| match req.path.as_str() {
             "/catalog/series/top/search=Show.json" => {
                 Response::json(r#"{"metas":[{"id":"tt1","name":"Show","releaseInfo":"2008"}]}"#)
             }
-            "/meta/series/tt1.json" => Response::json(
-                r#"{"meta":{"name":"Show","year":"2008","runtime":"","genre":["Drama"],"description":"Cinema.","poster":"https://art/cm.jpg","videos":[{"name":"Cinema Pilot","season":1,"number":1,"overview":"Pilot."}]}}"#,
-            ),
             _ => Response::error(404, "not found"),
         });
         let sources = vec![tvmaze_leg(&tvmaze.url()), cinemeta_leg(&cinemeta.url())];
 
-        // The year match (Cinemeta's 2008 over TVmaze's 2010) wins despite
-        // provider order, and the same fixtures reproduce the same sequence.
+        // A known year is a GATE: TVmaze's 2010 entry is dropped, never ranked
+        // lower, and the same fixtures reproduce the same sequence.
         for _ in 0..2 {
             let hits = search_with(&sources, &cancel(), "Show", 2008, Kind::SERIES);
             assert_eq!(
                 identities(&hits),
-                vec![
-                    ("cinemeta".to_string(), "tt1".to_string()),
-                    ("tvmaze".to_string(), "1".to_string()),
-                ]
+                vec![("cinemeta".to_string(), "tt1".to_string())]
             );
             assert_eq!(hits[0].year, 2008);
-            assert_eq!(hits[1].year, 2010);
         }
 
-        // With no year given, provider order is the tie-break (equal titles).
+        // With no year given nothing is gated, and provider order is the
+        // tie-break (equal titles).
         for _ in 0..2 {
             let hits = search_with(&sources, &cancel(), "Show", 0, Kind::SERIES);
             assert_eq!(
@@ -541,16 +1097,16 @@ mod tests {
             ..Media::default()
         };
 
-        // Wikipedia answers a SERIES record for a movie query; JustWatch
-        // answers the movie. The wanted kind beats the earlier leg.
-        let wikipedia: Arc<dyn Source> =
-            FakeSource::with_media("wikipedia", series("Show", "series-1")).shared();
-        let justwatch: Arc<dyn Source> =
-            FakeSource::with_media("justwatch", movie("Show", "movie-1")).shared();
-        let hits = search_with(&[wikipedia, justwatch], &cancel(), "Show", 0, Kind::MOVIE);
+        // Cinemeta answers a SERIES record for a movie query; AniList answers
+        // the movie. The wanted kind beats the earlier leg.
+        let cinemeta: Arc<dyn Source> =
+            FakeSource::with_media("cinemeta", series("Show", "series-1")).shared();
+        let anilist: Arc<dyn Source> =
+            FakeSource::with_media("anilist", movie("Show", "movie-1")).shared();
+        let hits = search_with(&[cinemeta, anilist], &cancel(), "Show", 0, Kind::MOVIE);
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].kind, Kind::MOVIE);
-        assert_eq!(hits[0].provider, "justwatch");
+        assert_eq!(hits[0].provider, "anilist");
 
         // ...and for a series want, a movie-kind answer loses to a series one.
         let tvmaze_movie: Arc<dyn Source> =
@@ -589,46 +1145,48 @@ mod tests {
     }
 
     #[test]
-    fn search_caps_at_eight_candidates() {
-        let leg_names = [
-            "tvmaze", "anilist", "tenrai", "kitsu", "cinemeta", "episodate", "bangumi",
-            "livechart", "ann",
-        ];
-        let sources: Vec<Arc<dyn Source>> = leg_names
+    fn search_caps_at_the_limit() {
+        let legs = ["tvmaze", "anilist", "tenrai", "kitsu", "cinemeta"];
+        // Every row is its own work (a distinct year), so the cap is measured
+        // over 30 rows instead of collapsing them through the same-work merge.
+        let sources: Vec<Arc<dyn Source>> = legs
             .iter()
             .enumerate()
-            .map(|(i, name)| {
-                let media = Media {
-                    source: "fake".to_string(),
-                    source_id: format!("{i}"),
-                    kind: Kind::SERIES,
-                    title: "Show".to_string(),
-                    ..Media::default()
-                };
-                FakeSource::with_media(name, media).shared()
+            .map(|(leg, name)| {
+                let rows = (0..6)
+                    .map(|i| {
+                        row(
+                            &format!("{name}-{i}"),
+                            "Show",
+                            2000 + i32::try_from(leg * 6 + i).expect("small grid"),
+                        )
+                    })
+                    .collect();
+                MultiSource::shared(name, rows)
             })
             .collect();
         let hits = search_with(&sources, &cancel(), "Show", 0, Kind::SERIES);
+        assert_eq!(SEARCH_LIMIT, 24, "the picker page's size");
         assert_eq!(hits.len(), SEARCH_LIMIT);
-        // Nine legs answered, all at equal strength: the last one in provider
-        // order is the one dropped.
-        assert!(!hits.iter().any(|cand| cand.provider == "ann"));
+        // Five legs at six equally-titled rows each: the cap drops the tail of
+        // provider order, never a middle row.
         assert_eq!(hits[0].provider, "tvmaze");
+        assert_eq!(identities(&hits).last().map(|(p, _)| p.as_str()), Some("kitsu"));
+        assert!(!hits.iter().any(|cand| cand.provider == "cinemeta"));
     }
 
     #[test]
     fn search_dedupes_by_provider_and_id_across_legs() {
+        // Neither server answers `/shows/<id>/episodes`: the search must not
+        // fetch an episode table, so a request for one would 404 and empty the
+        // leg -- the assertion below would then fail.
         let one = FakeServer::start(|req: &Request| match req.path.as_str() {
             "/search/shows" => Response::json(TVMAZE_2008),
-            "/shows/169/episodes" => Response::json(EPISODES),
             _ => Response::error(404, "not found"),
         });
         let two = FakeServer::start(|req: &Request| match req.path.as_str() {
             "/search/shows" => Response::json(
                 r#"[{"score":1.0,"show":{"id":170,"name":"Show","premiered":"2009-01-01","weight":50}}]"#,
-            ),
-            "/shows/170/episodes" => Response::json(
-                r#"[{"id":9,"name":"Other Pilot","season":1,"number":1}]"#,
             ),
             _ => Response::error(404, "not found"),
         });
@@ -651,8 +1209,13 @@ mod tests {
                 ("tvmaze".to_string(), "170".to_string()),
             ]
         );
-        assert_eq!(hits[0].episode_count, 3, "the real table length is the tell");
-        assert_eq!(hits[1].episode_count, 1);
+        assert_eq!(
+            hits[0].poster, "https://art/show.jpg",
+            "the row's own cover is the tell"
+        );
+        assert_eq!(hits[0].year, 2008);
+        assert_eq!(hits[1].year, 2009);
+        assert_eq!(hits[1].poster, "");
     }
 
     #[test]
@@ -673,6 +1236,9 @@ mod tests {
             provider: "cinemeta".to_string(),
             provider_id: "tt15239678".to_string(),
             poster: "https://art/dune-search.jpg".to_string(),
+            synopsis: String::new(),
+            genres: String::new(),
+            length: String::new(),
             episode_count: 0,
         };
         // The search pass over the same fixture offers that entry as a
@@ -688,7 +1254,10 @@ mod tests {
         assert_eq!(hits[0].kind, Kind::MOVIE);
         assert_eq!(hits[0].provider_id, "tt15239678");
         assert_eq!(hits[0].episode_count, 0);
-        assert_eq!(hits[0].poster, "https://art/dune.jpg");
+        assert_eq!(
+            hits[0].poster, "",
+            "a catalog row carries no poster: the search is one request"
+        );
 
         let over = pin_from_candidate_with(
             &[cinemeta_leg(&server.url())],
@@ -734,6 +1303,9 @@ mod tests {
             provider: "tvmaze".to_string(),
             provider_id: "169".to_string(),
             poster: "https://art/show-picked.jpg".to_string(),
+            synopsis: String::new(),
+            genres: String::new(),
+            length: String::new(),
             episode_count: 3,
         };
 
@@ -817,6 +1389,9 @@ mod tests {
             provider: "tvmaze".to_string(),
             provider_id: "169".to_string(),
             poster: "https://art/v1.jpg".to_string(),
+            synopsis: String::new(),
+            genres: String::new(),
+            length: String::new(),
             episode_count: 1,
         };
         let over = pin_from_candidate_with(
@@ -872,6 +1447,9 @@ mod tests {
             provider: "tvmaze".to_string(),
             provider_id: "169".to_string(),
             poster: String::new(),
+            synopsis: String::new(),
+            genres: String::new(),
+            length: String::new(),
             episode_count: 3,
         };
         let mut over =
@@ -904,6 +1482,9 @@ mod tests {
             provider: "tvmaze".to_string(),
             provider_id: "169".to_string(),
             poster: String::new(),
+            synopsis: String::new(),
+            genres: String::new(),
+            length: String::new(),
             episode_count: 3,
         };
         let over = Override {
@@ -934,6 +1515,197 @@ mod tests {
     }
 
     #[test]
+    fn find_all_returns_every_matching_row_in_one_request() {
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&log);
+        let server = FakeServer::start(move |req: &Request| {
+            seen.lock().unwrap().push(req.path.clone());
+            match req.path.as_str() {
+                "/search/shows" => Response::json(TVMAZE_MANY),
+                _ => Response::error(404, "not found"),
+            }
+        });
+        let source = tvmaze_leg(&server.url());
+        let q = Query {
+            kind: Kind::SERIES,
+            title: "Show".to_string(),
+            ..Query::default()
+        };
+        let rows = source.find_all(&cancel(), &q).expect("find_all");
+        assert_eq!(rows.len(), 2, "both title matches, the unrelated row dropped");
+        assert_eq!(rows[0].source_id, "169");
+        assert_eq!(rows[0].title, "Show");
+        assert_eq!(rows[0].year, 2008);
+        assert_eq!(rows[0].kind, Kind::SERIES);
+        assert_eq!(rows[0].artwork, "https://art/show.jpg");
+        assert!(rows[0].episodes.is_empty(), "a search row carries no table");
+        assert_eq!(rows[1].source_id, "200");
+        assert_eq!(rows[1].year, 2013);
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["/search/shows".to_string()],
+            "one request: no episode table is fetched"
+        );
+    }
+
+    #[test]
+    fn find_all_caps_at_twelve_rows_per_provider() {
+        let body: String = format!(
+            "[{}]",
+            (1..=14)
+                .map(|id| {
+                    format!(
+                        r#"{{"score":1.0,"show":{{"id":{id},"name":"Show","premiered":"2008-01-01"}}}}"#
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let server = FakeServer::start(move |req: &Request| match req.path.as_str() {
+            "/search/shows" => Response::json(&body),
+            _ => Response::error(404, "not found"),
+        });
+        let q = Query {
+            kind: Kind::SERIES,
+            title: "Show".to_string(),
+            ..Query::default()
+        };
+        let rows = tvmaze_leg(&server.url())
+            .find_all(&cancel(), &q)
+            .expect("find_all");
+        assert_eq!(rows.len(), crate::resolver::FIND_ALL_LIMIT);
+        assert_eq!(rows.len(), 12);
+        assert_eq!(rows[0].source_id, "1");
+        assert_eq!(rows[11].source_id, "12");
+    }
+
+    #[test]
+    fn search_stream_hands_each_leg_its_rows_as_it_finishes() {
+        let sources = vec![
+            MultiSource::shared(
+                "tvmaze",
+                vec![row("t1", "Show", 2008), row("t2", "Show: The Return", 2013)],
+            ),
+            MultiSource::shared("anilist", vec![row("a1", "Show", 2008)]),
+        ];
+        let batches: Mutex<Vec<Vec<Candidate>>> = Mutex::new(Vec::new());
+        let sink = |rows: Vec<Candidate>| batches.lock().unwrap().push(rows);
+        let outcome = search_stream_with(&sources, &cancel(), "Show", 0, Kind::SERIES, &sink);
+        assert!(outcome.failed.is_empty(), "both legs answered");
+        let hits = outcome.rows;
+        let batches = batches.lock().unwrap().clone();
+        assert_eq!(batches.len(), 2, "one batch per answering leg");
+        let streamed: usize = batches.iter().map(Vec::len).sum();
+        assert_eq!(streamed, 3, "every leg's rows reached the sink RAW");
+        // The batches stay raw -- the same work arrives once per leg -- and the
+        // final result merges the duplicates into the best-ranked identity.
+        assert_eq!(
+            identities(&hits),
+            vec![
+                ("tvmaze".to_string(), "t1".to_string()),
+                ("tvmaze".to_string(), "t2".to_string()),
+            ],
+            "anilist's 2008 duplicate is spliced into tvmaze's kept row"
+        );
+        assert_eq!(hits[0].title, "Show", "the exact title still ranks first");
+    }
+
+    #[test]
+    fn search_drops_a_wrong_year_entry_instead_of_ranking_it() {
+        // `edgerunners 2026` used to surface the 1990s entry through the soft
+        // year preference. The year is a GATE now: nothing admits a mismatch.
+        let sources = vec![MultiSource::shared(
+            "tvmaze",
+            vec![
+                row("90", "Edgerunners", 1995),
+                row("26", "Edgerunners", 2026),
+                row("0", "Edgerunners", 0),
+            ],
+        )];
+        let batches: Mutex<Vec<Vec<Candidate>>> = Mutex::new(Vec::new());
+        let sink = |rows: Vec<Candidate>| batches.lock().unwrap().push(rows);
+        let hits =
+            search_stream_with(&sources, &cancel(), "Edgerunners", 2026, Kind::SERIES, &sink).rows;
+        assert_eq!(
+            identities(&hits),
+            vec![("tvmaze".to_string(), "26".to_string())]
+        );
+        assert_eq!(hits[0].year, 2026);
+        // The sink never sees a mismatch either: the gate runs before it.
+        let batches = batches.lock().unwrap().clone();
+        assert_eq!(
+            batches.iter().flatten().count(),
+            1,
+            "one row streamed, the 1990s and unknown-year rows dropped"
+        );
+
+        // A year-0 entry is a mismatch too: no known year never satisfies a
+        // known query year.
+        let sources = vec![MultiSource::shared(
+            "tvmaze",
+            vec![row("0", "Edgerunners", 0)],
+        )];
+        assert!(
+            search_with(&sources, &cancel(), "Edgerunners", 2026, Kind::SERIES).is_empty(),
+            "no soft preference may reintroduce a mismatch"
+        );
+
+        // With no year given, every row is admitted.
+        let sources = vec![MultiSource::shared(
+            "tvmaze",
+            vec![row("90", "Edgerunners", 1995)],
+        )];
+        assert_eq!(
+            search_with(&sources, &cancel(), "Edgerunners", 0, Kind::SERIES).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn refresh_takes_the_stored_id_from_find_all_when_find_picks_another_entry() {
+        let server = FakeServer::start(|req: &Request| match req.path.as_str() {
+            "/search/shows" => Response::json(TVMAZE_TWO_ROWS),
+            // `find` settles on id 1 and fetches its table; the latch wants
+            // id 2, which only `find_all` carries.
+            "/shows/1/episodes" => Response::json(
+                r#"[{"id":1,"name":"Pilot","season":1,"number":1,"summary":"<p>One.</p>"}]"#,
+            ),
+            _ => Response::error(404, "not found"),
+        });
+        let sources = [tvmaze_leg(&server.url())];
+        // The latch stores the second 2008 entry (id 2); `find` ranks the
+        // first (id 1) and never looks past it, so the stored id can only come
+        // from find_all.
+        let cand = Candidate {
+            kind: Kind::SERIES,
+            title: "Show".to_string(),
+            year: 2008,
+            provider: "tvmaze".to_string(),
+            provider_id: "2".to_string(),
+            poster: String::new(),
+            synopsis: String::new(),
+            genres: String::new(),
+            length: String::new(),
+            episode_count: 0,
+        };
+        let over = pin_from_candidate_with(&sources, &cancel(), &cand, Scope::Series, "k")
+            .expect("the fallback finds the stored id");
+        assert_eq!(over.provider_id, "2");
+        assert_eq!(
+            over.media.as_ref().map(|media| media.source_id.as_str()),
+            Some("2")
+        );
+
+        let refreshed = refresh_with(&sources, &cancel(), &over).expect("refresh");
+        assert_eq!(refreshed.provider_id, "2");
+        assert_eq!(
+            refreshed.media.as_ref().map(|media| media.source_id.as_str()),
+            Some("2"),
+            "the refreshed latch keeps the stored identity"
+        );
+    }
+
+    #[test]
     fn search_returns_empty_on_no_results_or_total_failure() {
         let none: [Arc<dyn Source>; 0] = [];
         assert!(search_with(&none, &cancel(), "Show", 0, Kind::SERIES).is_empty());
@@ -961,5 +1733,529 @@ mod tests {
         let cancelled = Cancel::background();
         cancelled.cancel();
         assert!(search_with(&sources, &cancelled, "Show", 0, Kind::SERIES).is_empty());
+    }
+
+    #[test]
+    fn subset_titles_never_merge_accents_fold() {
+        // Defect 5: a token subset is a different work even with the same
+        // known year -- only an exact normalized title (numeral-folded equal)
+        // may merge.
+        let merged = merge_same_work(vec![
+            cand("tvmaze", "1", "National Treasure", 2004),
+            cand("cinemeta", "2", "National Treasure Book of Secrets", 2004),
+        ]);
+        assert_eq!(
+            merged.len(),
+            2,
+            "a real second work must survive, got {merged:?}"
+        );
+        // Accents fold like match_.rs:99, so Amélie and Amelie are one work.
+        let merged = merge_same_work(vec![
+            cand("tvmaze", "1", "Amélie", 2001),
+            cand("cinemeta", "2", "Amelie", 2001),
+        ]);
+        assert_eq!(merged.len(), 1, "accents must fold, got {merged:?}");
+    }
+
+    #[test]
+    fn merge_same_work_keeps_the_first_identity_and_splices_the_missing_synopsis() {
+        let mut first = cand("tvmaze", "169", "Show", 2008);
+        first.poster = "https://art/t.jpg".to_string();
+        first.episode_count = 3;
+        let mut second = cand("cinemeta", "tt1", "Show", 2008);
+        second.synopsis = "Show.".to_string();
+        second.genres = "Drama".to_string();
+        second.length = "45 min".to_string();
+        second.episode_count = 5;
+
+        let merged = merge_same_work(vec![first, second]);
+        assert_eq!(merged.len(), 1, "one work, one row");
+        assert_eq!(merged[0].provider, "tvmaze", "the first row keeps the identity");
+        assert_eq!(merged[0].provider_id, "169");
+        assert_eq!(merged[0].title, "Show");
+        assert_eq!(merged[0].year, 2008);
+        assert_eq!(
+            merged[0].poster, "https://art/t.jpg",
+            "a non-empty field is never replaced"
+        );
+        assert_eq!(
+            merged[0].synopsis, "Show.",
+            "the second provider's synopsis fills the empty one"
+        );
+        assert_eq!(merged[0].genres, "Drama");
+        assert_eq!(merged[0].length, "45 min");
+        assert_eq!(merged[0].episode_count, 5, "the larger table wins");
+
+        // A duplicate carrying nothing never clears a spliced field, and a
+        // different year is another work.
+        let mut with_synopsis = cand("tvmaze", "169", "Show", 2008);
+        with_synopsis.synopsis = "Show.".to_string();
+        let merged = merge_same_work(vec![
+            with_synopsis,
+            cand("kitsu", "k1", "Show", 2008),
+            cand("anilist", "a1", "Show", 2009),
+        ]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].synopsis, "Show.");
+        assert_eq!(merged[1].provider, "anilist");
+
+        // The roman and the digit spelling of a sequel numeral are one title.
+        let merged = merge_same_work(vec![
+            cand("tvmaze", "1", "Cyberpunk: Edgerunners II", 2022),
+            cand("anilist", "2", "Cyberpunk: Edgerunners 2", 2022),
+        ]);
+        assert_eq!(
+            identities(&merged),
+            vec![("tvmaze".to_string(), "1".to_string())],
+            "a trailing II folds to 2"
+        );
+
+        // A token subset never merges, even with a known equal year: the
+        // sequel is a different work and keeps its own row.
+        let merged = merge_same_work(vec![
+            cand("tvmaze", "1", "National Treasure", 2004),
+            cand("anilist", "2", "National Treasure: Book of Secrets", 2004),
+            cand("kitsu", "3", "National Treasure: Book of Secrets", 2007),
+        ]);
+        assert_eq!(merged.len(), 3, "a subset title is a different work");
+        let merged = merge_same_work(vec![
+            cand("tvmaze", "1", "National Treasure", 2004),
+            cand("kitsu", "2", "National Treasure: Book of Secrets", 0),
+        ]);
+        assert_eq!(merged.len(), 2, "a yearless near title is not the same work");
+    }
+
+    #[test]
+    fn pin_fills_the_media_snapshot_from_the_candidate() {
+        // The leg's identity record carries no synopsis, genres, length, cover
+        // or year: the picked candidate's copy is what the latch keeps.
+        let sources = [MultiSource::shared("tvmaze", vec![row("169", "Show", 0)])];
+        let mut picked = cand("tvmaze", "169", "Show", 2008);
+        picked.poster = "https://art/search.jpg".to_string();
+        picked.synopsis = "Spliced.".to_string();
+        picked.genres = "Drama".to_string();
+        picked.length = "45 min".to_string();
+
+        let over =
+            pin_from_candidate_with(&sources, &cancel(), &picked, Scope::Movie, "k").expect("pin");
+        let media = over.media.expect("media snapshot");
+        assert_eq!(media.synopsis, "Spliced.", "the candidate's synopsis lands on the media");
+        assert_eq!(media.genres, "Drama");
+        assert_eq!(media.length, "45 min");
+        assert_eq!(media.artwork, "https://art/search.jpg");
+        assert_eq!(media.year, 2008, "an unknown fetched year takes the candidate's");
+        assert_eq!(media.source_id, "169", "the fetched identity is untouched");
+    }
+
+    #[test]
+    fn refresh_preserves_a_spliced_synopsis_the_provider_never_returns() {
+        let sources = [MultiSource::shared("tvmaze", vec![row("169", "Show", 2008)])];
+        let mut picked = cand("tvmaze", "169", "Show", 2008);
+        picked.poster = "https://art/search.jpg".to_string();
+        picked.synopsis = "Spliced.".to_string();
+        picked.genres = "Drama".to_string();
+        picked.length = "45 min".to_string();
+
+        let over =
+            pin_from_candidate_with(&sources, &cancel(), &picked, Scope::Series, "k").expect("pin");
+        assert_eq!(
+            over.media.as_ref().map(|media| media.synopsis.as_str()),
+            Some("Spliced.")
+        );
+
+        let refreshed = refresh_with(&sources, &cancel(), &over).expect("refresh");
+        let media = refreshed.media.expect("media snapshot");
+        assert_eq!(
+            media.synopsis, "Spliced.",
+            "a refresh never drops the spliced synopsis"
+        );
+        assert_eq!(media.genres, "Drama");
+        assert_eq!(media.length, "45 min");
+        assert_eq!(media.artwork, "https://art/search.jpg");
+        assert_eq!(
+            refreshed.poster, "https://art/search.jpg",
+            "the show cover follows the filled media"
+        );
+    }
+
+    #[test]
+    fn a_failing_leg_is_named_and_the_other_legs_rows_stand() {
+        let sources = vec![
+            MultiSource::shared("tvmaze", vec![row("t1", "Show", 2008)]),
+            FakeSource::with_error("kitsu", "kitsu is down").shared(),
+        ];
+        let outcome = search_stream_with(&sources, &cancel(), "Show", 0, Kind::SERIES, &|_| {});
+        assert_eq!(
+            identities(&outcome.rows),
+            vec![("tvmaze".to_string(), "t1".to_string())],
+            "the answering leg's rows stand"
+        );
+        assert_eq!(
+            outcome.failed,
+            vec!["kitsu".to_string()],
+            "the failing leg is named"
+        );
+
+        // A clean pass names no leg: an empty answer is a success, not a
+        // failure, and a dead scope runs no leg at all.
+        let clean: Vec<Arc<dyn Source>> = vec![
+            MultiSource::shared("tvmaze", vec![row("t1", "Show", 2008)]),
+            MultiSource::shared("kitsu", Vec::new()),
+        ];
+        let outcome = search_stream_with(&clean, &cancel(), "Show", 0, Kind::SERIES, &|_| {});
+        assert_eq!(outcome.rows.len(), 1);
+        assert!(outcome.failed.is_empty(), "an empty answer is a success");
+
+        let cancelled = Cancel::background();
+        cancelled.cancel();
+        let outcome = search_stream_with(&sources, &cancelled, "Show", 0, Kind::SERIES, &|_| {});
+        assert!(outcome.rows.is_empty() && outcome.failed.is_empty());
+    }
+
+    #[test]
+    fn search_stream_only_walks_only_the_named_provider() {
+        let tvmaze = FakeSource::with_media("tvmaze", row("t1", "Show", 2008));
+        let tvmaze_calls = tvmaze.counter();
+        let anilist = FakeSource::with_media("anilist", row("a1", "Show", 2008));
+        let anilist_calls = anilist.counter();
+        let sources = vec![tvmaze.shared(), anilist.shared()];
+
+        let outcome = search_stream_only_with(
+            &sources,
+            &cancel(),
+            "Show",
+            0,
+            Kind::SERIES,
+            &["anilist".to_string()],
+            &|_| {},
+        );
+        assert_eq!(
+            identities(&outcome.rows),
+            vec![("anilist".to_string(), "a1".to_string())]
+        );
+        assert!(outcome.failed.is_empty());
+        assert_eq!(
+            tvmaze_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an unnamed leg is never called"
+        );
+        assert_eq!(
+            anilist_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the named leg is called once"
+        );
+
+        // No names walk nothing; a name outside the want's leg list matches
+        // nothing either.
+        let outcome =
+            search_stream_only_with(&sources, &cancel(), "Show", 0, Kind::SERIES, &[], &|_| {});
+        assert!(outcome.rows.is_empty() && outcome.failed.is_empty());
+        let outcome = search_stream_only_with(
+            &sources,
+            &cancel(),
+            "Show",
+            0,
+            Kind::SERIES,
+            &["wikipedia".to_string()],
+            &|_| {},
+        );
+        assert!(outcome.rows.is_empty() && outcome.failed.is_empty());
+        assert_eq!(
+            anilist_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "no extra call was made"
+        );
+    }
+
+    #[test]
+    fn retrying_only_the_failed_leg_clears_the_failure() {
+        // First pass: tvmaze answers, kitsu fails.
+        let sources = vec![
+            FakeSource::with_media("tvmaze", row("t1", "Show", 2008)).shared(),
+            FakeSource::with_error("kitsu", "down").shared(),
+        ];
+        let first = search_stream_with(&sources, &cancel(), "Show", 0, Kind::SERIES, &|_| {});
+        assert_eq!(first.failed, vec!["kitsu".to_string()]);
+        assert_eq!(
+            identities(&first.rows),
+            vec![("tvmaze".to_string(), "t1".to_string())]
+        );
+
+        // The retry walks only the failed name, now healthy: its rows arrive
+        // and the failure list is empty.
+        let retry: Vec<Arc<dyn Source>> = vec![
+            FakeSource::with_media("kitsu", row("k1", "Show", 2008)).shared(),
+            FakeSource::with_media("tvmaze", row("t1", "Show", 2008)).shared(),
+        ];
+        let second = search_stream_only_with(
+            &retry,
+            &cancel(),
+            "Show",
+            0,
+            Kind::SERIES,
+            &first.failed,
+            &|_| {},
+        );
+        assert!(second.failed.is_empty(), "the retried leg answered");
+        assert_eq!(
+            identities(&second.rows),
+            vec![("kitsu".to_string(), "k1".to_string())],
+            "only the retried leg was walked"
+        );
+    }
+
+    fn counting_media(name: &str, id: &str) -> Media {
+        Media {
+            source: name.to_string(),
+            source_id: id.to_string(),
+            kind: Kind::SERIES,
+            // Distinct titles per leg so the same-work merge keeps every
+            // leg's row: the test counts attempted legs, not merged works.
+            title: format!("Show {name}"),
+            year: 2008,
+            ..Media::default()
+        }
+    }
+
+    fn regular_providers() -> Vec<String> {
+        REGULAR_LEGS.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn anime_providers() -> Vec<String> {
+        ANIME_LEGS.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn regular_scope_calls_all_three_regular_legs_and_zero_anime_legs() {
+        use std::sync::atomic::Ordering;
+        let makers = [
+            ("cinemeta", "c1"),
+            ("tvmaze", "t1"),
+            ("imdb", "i1"),
+            ("anilist", "a1"),
+            ("tenrai", "te1"),
+            ("kitsu", "k1"),
+            ("animeschedule", "s1"),
+        ];
+        let mut sources: Vec<Arc<dyn Source>> = Vec::new();
+        let mut counters: Vec<(String, Arc<std::sync::atomic::AtomicI32>)> = Vec::new();
+        for (name, id) in makers {
+            let fake = FakeSource::with_media(name, counting_media(name, id));
+            counters.push((name.to_string(), fake.counter()));
+            sources.push(fake.shared());
+        }
+        let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let logs_clone = Arc::clone(&logs);
+        let outcome = search_stream_only_with_logged(
+            &sources,
+            &cancel(),
+            "Show",
+            0,
+            Kind::SERIES,
+            &regular_providers(),
+            &|_| {},
+            &|line: &str| logs_clone.lock().unwrap().push(line.to_string()),
+        );
+        assert_eq!(outcome.rows.len(), 3, "all three regular legs answer");
+        for (name, counter) in &counters {
+            let calls = counter.load(Ordering::SeqCst);
+            if REGULAR_LEGS.contains(&name.as_str()) {
+                assert_eq!(calls, 1, "regular leg {name} is attempted");
+            } else {
+                assert_eq!(calls, 0, "anime leg {name} is never called");
+            }
+        }
+        let lines = logs.lock().unwrap().clone();
+        assert_eq!(lines.len(), 3, "one debug line per leg attempt");
+        for line in &lines {
+            assert!(
+                line.starts_with("search: leg "),
+                "observability line shape: {line}"
+            );
+            assert!(line.contains(" ok "), "regular legs succeed: {line}");
+            assert!(line.contains(" rows "), "line carries row count: {line}");
+            assert!(line.ends_with("ms"), "line carries timing: {line}");
+        }
+        assert_eq!(REGULAR_LEGS.len(), 3, "regular path source count");
+        assert_eq!(ANIME_LEGS.len(), 4, "anime path source count");
+    }
+
+    #[test]
+    fn anime_scope_calls_all_four_anime_legs_and_zero_regular_legs() {
+        use std::sync::atomic::Ordering;
+        let makers = [
+            ("cinemeta", "c1"),
+            ("tvmaze", "t1"),
+            ("imdb", "i1"),
+            ("anilist", "a1"),
+            ("tenrai", "te1"),
+            ("kitsu", "k1"),
+            ("animeschedule", "s1"),
+        ];
+        let mut sources: Vec<Arc<dyn Source>> = Vec::new();
+        let mut counters: Vec<(String, Arc<std::sync::atomic::AtomicI32>)> = Vec::new();
+        for (name, id) in makers {
+            let fake = FakeSource::with_media(name, counting_media(name, id));
+            counters.push((name.to_string(), fake.counter()));
+            sources.push(fake.shared());
+        }
+        let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let logs_clone = Arc::clone(&logs);
+        let outcome = search_stream_only_with_logged(
+            &sources,
+            &cancel(),
+            "Show",
+            0,
+            Kind::SERIES,
+            &anime_providers(),
+            &|_| {},
+            &|line: &str| logs_clone.lock().unwrap().push(line.to_string()),
+        );
+        assert_eq!(outcome.rows.len(), 4, "all four anime legs answer");
+        for (name, counter) in &counters {
+            let calls = counter.load(Ordering::SeqCst);
+            if ANIME_LEGS.contains(&name.as_str()) {
+                assert_eq!(calls, 1, "anime leg {name} is attempted");
+            } else {
+                assert_eq!(calls, 0, "regular leg {name} is never called");
+            }
+        }
+        let lines = logs.lock().unwrap().clone();
+        assert_eq!(lines.len(), 4, "one debug line per leg attempt");
+    }
+
+    #[test]
+    fn full_cache_hit_issues_zero_leg_attempts() {
+        use std::collections::HashMap;
+        use std::sync::atomic::Ordering;
+        // First pass populates a cache map (the picker's persistent cache
+        // shape); the second pass hits it and never touches a leg.
+        let fake = FakeSource::with_media("cinemeta", counting_media("cinemeta", "c1"));
+        let calls = fake.counter();
+        let sources = vec![fake.shared()];
+        let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let logs_clone = Arc::clone(&logs);
+        let log = |line: &str| logs_clone.lock().unwrap().push(line.to_string());
+        let mut cache: HashMap<String, Vec<Candidate>> = HashMap::new();
+        let key = "show|0|tv".to_string();
+        let first = search_stream_only_with_logged(
+            &sources,
+            &cancel(),
+            "Show",
+            0,
+            Kind::SERIES,
+            &regular_providers(),
+            &|_| {},
+            &log,
+        );
+        assert!(!first.rows.is_empty());
+        cache.insert(key.clone(), first.rows.clone());
+        let calls_after_first = calls.load(Ordering::SeqCst);
+        assert_eq!(calls_after_first, 1);
+        let lines_after_first = logs.lock().unwrap().len();
+        assert_eq!(lines_after_first, 1);
+        // Cache hit: serve without walking any leg.
+        let hit = cache.get(&key).cloned().unwrap_or_default();
+        assert_eq!(hit, first.rows);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            calls_after_first,
+            "a full cache hit calls zero legs"
+        );
+        assert_eq!(
+            logs.lock().unwrap().len(),
+            lines_after_first,
+            "a cached second search shows zero new leg lines"
+        );
+    }
+
+    #[test]
+    fn refresh_empty_table_keeps_pins_and_reports_an_error() {
+        use metadata_core::types::Episode;
+        let fresh_empty = Media {
+            source: "fake".to_string(),
+            source_id: "1".to_string(),
+            kind: Kind::SERIES,
+            title: "Show".to_string(),
+            year: 2008,
+            episodes: Vec::new(),
+            ..Media::default()
+        };
+        let sources = [FakeSource::with_media("fake", fresh_empty).shared()];
+        let prev_media = Media {
+            source: "fake".to_string(),
+            source_id: "1".to_string(),
+            kind: Kind::SERIES,
+            title: "Show".to_string(),
+            year: 2008,
+            synopsis: "Kept.".to_string(),
+            episodes: vec![Episode {
+                season: 1,
+                number: 1,
+                title: "Pilot".to_string(),
+                synopsis: "Kept ep.".to_string(),
+                ..Episode::default()
+            }],
+            ..Media::default()
+        };
+        let over = Override {
+            scope: Scope::Series,
+            key: "k".to_string(),
+            title: "Show".to_string(),
+            year: 2008,
+            provider: "fake".to_string(),
+            provider_id: "1".to_string(),
+            poster: "https://art/show.jpg".to_string(),
+            media: Some(prev_media),
+            episodes: vec![EpisodePin {
+                season: 1,
+                number: 1,
+                absolute: 1,
+                title: "Pilot".to_string(),
+                synopsis: "Kept ep.".to_string(),
+            }],
+            created_at_ms: 42,
+        };
+        let err = refresh_with(&sources, &cancel(), &over)
+            .expect_err("an empty refresh table must not report success");
+        assert!(
+            err.to_string().contains("empty"),
+            "the refusal names the empty table: {err}"
+        );
+        assert_eq!(over.episodes.len(), 1, "the existing pins are kept");
+    }
+
+    #[test]
+    fn empty_provider_id_rejects_a_different_title_and_keeps_media_title_equal() {
+        let other = Media {
+            source: "fake".to_string(),
+            source_id: String::new(),
+            kind: Kind::SERIES,
+            title: "Other Work".to_string(),
+            ..Media::default()
+        };
+        let sources = [FakeSource::with_media("fake", other).shared()];
+        let picked = cand("fake", "", "Show", 2008);
+        let err = pin_from_candidate_with(&sources, &cancel(), &picked, Scope::Series, "k")
+            .expect_err("an empty id must not latch a different-titled answer");
+        assert!(
+            err.to_string().contains("Other Work") || err.to_string().contains("Show"),
+            "the refusal names the mismatch: {err}"
+        );
+        let same = Media {
+            source: "fake".to_string(),
+            source_id: String::new(),
+            kind: Kind::SERIES,
+            title: "Show".to_string(),
+            ..Media::default()
+        };
+        let sources = [FakeSource::with_media("fake", same).shared()];
+        let over = pin_from_candidate_with(&sources, &cancel(), &picked, Scope::Series, "k")
+            .expect("a title-matching empty-id answer latches");
+        assert_eq!(
+            over.media.as_ref().map(|media| media.title.as_str()),
+            Some(over.title.as_str()),
+            "the latched media title equals the latch title"
+        );
     }
 }

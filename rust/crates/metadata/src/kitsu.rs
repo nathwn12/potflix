@@ -108,6 +108,9 @@ struct KitsuAnimeAttrs {
     slug: String,
     #[serde(rename = "canonicalTitle", default, deserialize_with = "null_default")]
     canonical_title: String,
+    /// `TV`, `movie`, `OVA`, `ONA`, `special`, `music`: the entry's own form.
+    #[serde(default, deserialize_with = "null_default")]
+    subtype: String,
     #[serde(default)]
     titles: Option<KitsuTitles>,
     #[serde(rename = "startDate", default, deserialize_with = "null_default")]
@@ -232,25 +235,31 @@ fn build_episode(attrs: &KitsuEpisodeAttrs) -> Option<Episode> {
 }
 
 impl KitsuSource {
-    /// One validated search pick: the title-ranked best, with a known query
-    /// year preferring any challenger that both carries it and fully covers
-    /// the query title. `Ok(None)` is a definitive miss. Year never gates:
-    /// it may only ride along as a display field.
-    fn pick(&self, cancel: &Cancel, q: &Query) -> Result<Option<(KitsuAnime, KitsuAnimeAttrs)>, Error> {
+    /// The `/anime?filter[text]` rows for `title`, ONE request, in the
+    /// provider's own relevance order. Rows without an id, attributes or a
+    /// title are dropped.
+    fn search_rows(
+        &self,
+        cancel: &Cancel,
+        title: &str,
+    ) -> Result<Vec<(KitsuAnime, KitsuAnimeAttrs)>, Error> {
+        if title.is_empty() {
+            return Ok(Vec::new());
+        }
         let search_url = format!(
             "{}/anime?filter[text]={}&page[limit]={KITSU_SEARCH_LIMIT}",
             self.base_url(),
-            query_escape(&q.title),
+            query_escape(title),
         );
-        let response = self.client.get_with_accept(cancel, &search_url, KITSU_ACCEPT)?;
+        let response = self
+            .client
+            .get_with_accept(cancel, &search_url, KITSU_ACCEPT)?;
         if response.status() == StatusCode::NOT_FOUND {
             drain_and_close(response);
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let parsed: KitsuAnimeResp = decode_capped(response)?;
-        let mut cands: Vec<ShowCand> = Vec::with_capacity(parsed.data.len());
-        let mut entries: Vec<(KitsuAnime, KitsuAnimeAttrs)> = Vec::with_capacity(parsed.data.len());
-        let mut years: Vec<i32> = Vec::with_capacity(parsed.data.len());
+        let mut rows: Vec<(KitsuAnime, KitsuAnimeAttrs)> = Vec::with_capacity(parsed.data.len());
         for anime in parsed.data {
             let Some(attrs) = anime.attributes.clone() else {
                 continue;
@@ -258,10 +267,25 @@ impl KitsuSource {
             if anime.id.trim().is_empty() {
                 continue;
             }
-            let (name, aliases) = display_and_aliases(&attrs);
+            let (name, _) = display_and_aliases(&attrs);
             if name.is_empty() {
                 continue;
             }
+            rows.push((anime, attrs));
+        }
+        Ok(rows)
+    }
+
+    /// One validated search pick: the title-ranked best, with a known query
+    /// year preferring any challenger that both carries it and fully covers
+    /// the query title. `Ok(None)` is a definitive miss. Year never gates:
+    /// it may only ride along as a display field.
+    fn pick(&self, cancel: &Cancel, q: &Query) -> Result<Option<(KitsuAnime, KitsuAnimeAttrs)>, Error> {
+        let rows = self.search_rows(cancel, &q.title)?;
+        let mut cands: Vec<ShowCand> = Vec::with_capacity(rows.len());
+        let mut years: Vec<i32> = Vec::with_capacity(rows.len());
+        for (_, attrs) in &rows {
+            let (name, aliases) = display_and_aliases(attrs);
             cands.push(ShowCand {
                 name,
                 weight: attrs.user_count.unwrap_or(0),
@@ -269,7 +293,6 @@ impl KitsuSource {
                 aliases,
             });
             years.push(date_year(&attrs.start_date));
-            entries.push((anime, attrs));
         }
         if cands.is_empty() {
             return Ok(None);
@@ -291,7 +314,7 @@ impl KitsuSource {
         // Soft year preference only: no year match keeps the title winner.
         let take =
             crate::yearpref::prefer_year_match(&q.title, q.year, &cands, &years, winner_idx);
-        Ok(Some(entries[take].clone()))
+        Ok(rows.get(take).cloned())
     }
 
     /// The one episode page holding the requested Number (the first page when
@@ -336,6 +359,10 @@ impl crate::resolver::Source for KitsuSource {
         "kitsu"
     }
 
+    fn path(&self) -> crate::resolver::SearchPath {
+        crate::resolver::SearchPath::Anime
+    }
+
     /// `Find`: series only (movies never reach the anime legs through the
     /// resolver, and a series-only source self-gates a ruled-out kind before
     /// touching the wire).
@@ -350,29 +377,75 @@ impl crate::resolver::Source for KitsuSource {
         if title.is_empty() {
             return Ok(None);
         }
-        let year = date_year(&attrs.start_date);
         let episodes = self.episodes(cancel, anime.id.trim(), q.episode)?;
-        Ok(Some(Media {
-            source: "kitsu".to_string(),
-            source_id: anime.id.trim().to_string(),
-            kind: Kind::SERIES,
-            title,
-            year,
-            artwork: kitsu_poster(attrs.poster_image.as_ref()),
-            synopsis: cap_synopsis(&strip_html(&attrs.synopsis)),
-            // Genres live behind a second request per show; the episode page
-            // is the lookup's whole episode budget, so this stays empty.
-            genres: String::new(),
-            length: runtime_length(attrs.episode_length.unwrap_or(0)),
-            show_url: normalize_url(&format!(
-                "https://kitsu.io/anime/{}",
-                attrs.slug.trim()
-            )),
-            episode_url: String::new(),
-            movie_url: String::new(),
-            trailer_url: String::new(),
-            episodes,
-            fetched_at: crate::timefmt::now_rfc3339(),
-        }))
+        let mut media = kitsu_media(&anime, &attrs, title, Kind::SERIES);
+        media.episodes = episodes;
+        Ok(Some(media))
+    }
+
+    /// The manual search's rows: the same ONE `/anime?filter[text]` request,
+    /// each entry whose title clears the matcher's floor as its own pickable
+    /// row, with an EMPTY episode table (no episode page is fetched). The
+    /// entry's own `subtype` decides the kind: `movie` is a movie, everything
+    /// else a series.
+    fn find_all(&self, cancel: &Cancel, q: &Query) -> Result<Vec<Media>, Error> {
+        if q.title.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out: Vec<Media> = Vec::new();
+        for (anime, attrs) in self.search_rows(cancel, &q.title)? {
+            let (name, aliases) = display_and_aliases(&attrs);
+            if name.is_empty() {
+                continue;
+            }
+            let cand = ShowCand {
+                name: name.clone(),
+                weight: attrs.user_count.unwrap_or(0),
+                episode_count: attrs.episode_count.unwrap_or(0),
+                aliases,
+            };
+            // The same floor `Find` applies: a fuzzy row never becomes a pick.
+            if pick_best_show(&q.title, std::slice::from_ref(&cand)).is_none() {
+                continue;
+            }
+            let kind = if attrs.subtype.trim().eq_ignore_ascii_case("movie") {
+                Kind::MOVIE
+            } else {
+                Kind::SERIES
+            };
+            out.push(kitsu_media(&anime, &attrs, name, kind));
+            if out.len() == crate::resolver::FIND_ALL_LIMIT {
+                break;
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The candidate-ready [`Media`] for one Kitsu entry: identity, year, cover,
+/// length and page URL, with the kind the caller derives from `subtype`. The
+/// episode table is the caller's to fill.
+fn kitsu_media(anime: &KitsuAnime, attrs: &KitsuAnimeAttrs, title: String, kind: Kind) -> Media {
+    Media {
+        source: "kitsu".to_string(),
+        source_id: anime.id.trim().to_string(),
+        kind,
+        title,
+        year: date_year(&attrs.start_date),
+        artwork: kitsu_poster(attrs.poster_image.as_ref()),
+        synopsis: cap_synopsis(&strip_html(&attrs.synopsis)),
+        // Genres live behind a second request per show; the episode page is
+        // the lookup's whole episode budget, so this stays empty.
+        genres: String::new(),
+        length: runtime_length(attrs.episode_length.unwrap_or(0)),
+        show_url: normalize_url(&format!(
+            "https://kitsu.io/anime/{}",
+            attrs.slug.trim()
+        )),
+        episode_url: String::new(),
+        movie_url: String::new(),
+        trailer_url: String::new(),
+        episodes: Vec::new(),
+        fetched_at: crate::timefmt::now_rfc3339(),
     }
 }

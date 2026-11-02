@@ -10,6 +10,7 @@ pub mod artwork;
 pub mod brand;
 pub mod search;
 pub mod settings;
+pub mod snapshot;
 pub mod tray;
 pub mod win32;
 pub mod window;

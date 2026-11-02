@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Background prefetch of the playing title the moment a video starts, so
+  `Fix match` opens already populated from that cache instead of running its
+  search in front of you.
+- Pattern detection reads `S1`/`S01`/`Season` folders and `E1`/`E01`/`Episode`
+  filenames, plus matching sibling files and anime folder names, to choose TV
+  against movie and regular against anime.
+- Same-work rows from different providers merge into one result: the merge
+  keeps the first-ranked identity and splices that row's empty poster,
+  synopsis, genres and length from the others, and the provisional latch
+  carries the merged synopsis into the RPC immediately.
+
 ### Changed
 
 - The window is rebuilt around one object: the title PotPlayer is playing. The
@@ -59,6 +72,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`rust\crates\presence\src\cardspec.rs`,
   `rust\crates\app-support\src\config.rs`,
   `rust\crates\potflix-win\src\window.rs`).
+- Search runs every provider leg concurrently and streams rows into the picker
+  as each leg answers, instead of waiting for the slowest.
+- The reliable chain is TVmaze, AniList, Tenrai, Kitsu and Cinemeta;
+  Wikipedia, JustWatch, Episodate, Bangumi, LiveChart and ANN are removed.
+- Scopes are `All` / `TV` / `Movies` / `Anime TV` / `Anime Movies` and rows
+  read `Regular TV`, `Regular movie`, `Anime TV`, `Anime movie`; clicking a
+  result latches it immediately with the season/show or movie scope the file
+  shape implies.
 
 ### Fixed
 
@@ -67,6 +88,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   season is cleared, so the show cover, episode pins, and every other episode
   keep resolving while the corrected file resolves movie
   (`rust\crates\metadata\src\overrides.rs`, `Store::put_correction`).
+- `edgerunners 2026` can no longer show a 1990s entry: a trailing year is now
+  an identity gate, while a future number such as `Blade Runner 2049` stays
+  part of the title.
 
 ## [1.1.0] - 2026-10-19
 

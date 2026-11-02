@@ -8,8 +8,9 @@ use std::time::Duration;
 use metadata_core::types::{Kind, Query};
 use metadata_http::cancel::Cancel;
 
+use crate::cinemeta::CinemetaSource;
 use crate::resolver::{Options, Resolver, Source};
-use crate::testsupport::{FakeServer, Request, Response, TempDir, dead_url, wiki_client};
+use crate::testsupport::{FakeServer, Request, Response, TempDir, dead_url, http_client, wiki_client};
 use crate::wikipedia::{
     WIKIPEDIA_USER_AGENT, WikipediaSource, strip_disambiguation, wiki_pick_poster,
     wiki_sanitize_cause, wiki_transient, wiki_year,
@@ -497,14 +498,19 @@ fn wiki_year_extraction() {
     }
 }
 
-/// `TestWikipediaMovieOrder`: for a movie query the default chain ranks
-/// Cinemeta first with Wikipedia immediately after.
+/// `TestWikipediaMovieOrder`: for a movie query Cinemeta outranks Wikipedia.
+/// Both legs are injected: Wikipedia is off the default chain now, so the
+/// ORDER is the contract, not the default source list.
 #[test]
 fn wikipedia_movie_order() {
     let dir = TempDir::new();
     let resolver = Resolver::new(Options {
         dir: dir.path(),
         timeout: Duration::from_secs(5),
+        sources: Some(vec![
+            Arc::new(WikipediaSource::new(dead_url(), wiki_client())),
+            Arc::new(CinemetaSource::new(dead_url(), http_client())),
+        ]),
         ..Options::default()
     });
     let names: Vec<String> = resolver

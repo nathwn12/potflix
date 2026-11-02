@@ -185,3 +185,32 @@ fn pick_best_show_scores_aliases() {
     let best = pick_best_show("Shingeki no Kyojin", &cands).expect("romaji alias must win");
     assert_eq!(best.name, "Attack on Titan");
 }
+
+/// Defect 6: sequel numerals fold (`Rocky 2` ≡ `Rocky II`) and unspaced
+/// scripts get partial credit above the 0.5 floor (`你好，李焕英` ≡
+/// `你好李焕英`).
+#[test]
+fn sequel_numerals_fold_and_unspaced_cjk_scores() {
+    assert_eq!(
+        normalize_title("Rocky II"),
+        normalize_title("Rocky 2"),
+        "a sequel numeral must fold to its digit"
+    );
+    let best = pick_best_show(
+        "Rocky II",
+        &[cand("Rocky 2", 0), cand("Totally Unrelated", 0)],
+    )
+    .expect("Rocky II must find Rocky 2");
+    assert_eq!(best.name, "Rocky 2");
+    let sim = title_similarity("你好，李焕英", "你好李焕英");
+    assert!(
+        sim > 0.5,
+        "unspaced CJK must clear the floor, got {sim}"
+    );
+    let best = pick_best_show(
+        "你好李焕英",
+        &[cand("你好，李焕英", 0), cand("Breaking Bad", 0)],
+    )
+    .expect("unspaced CJK must pick the same work");
+    assert_eq!(best.name, "你好，李焕英");
+}

@@ -34,7 +34,7 @@ pub const ANILIST_DEFAULT_BASE: &str = "https://graphql.anilist.co";
 /// soft year preference): a singular `Media(search:)` hands back only the
 /// server's top pick, which for `dragon ball super` is the 2015 series while
 /// the 2026 `Dragon Ball Super: Beerus` release never surfaces.
-pub const ANILIST_QUERY: &str = "query ($search:String){Page(perPage:10){media(search:$search,type:ANIME){id idMal title{romaji english} synonyms season seasonYear episodes genres duration siteUrl description coverImage{extraLarge large} bannerImage streamingEpisodes{title url site thumbnail}}}}";
+pub const ANILIST_QUERY: &str = "query ($search:String){Page(perPage:10){media(search:$search,type:ANIME){id idMal title{romaji english} synonyms format season seasonYear episodes genres duration siteUrl description coverImage{extraLarge large} bannerImage streamingEpisodes{title url site thumbnail}}}}";
 
 /// `anilistSource`.
 pub struct AnilistSource {
@@ -102,6 +102,10 @@ struct AnilistMedia {
     title: AnilistTitle,
     #[serde(default, deserialize_with = "null_default")]
     synonyms: Vec<String>,
+    /// `TV`, `MOVIE`, `OVA`, `ONA`, ...: the entry's own form, so a manual
+    /// search can offer a movie as a movie.
+    #[serde(default, deserialize_with = "null_default")]
+    format: String,
     #[serde(rename = "seasonYear", default)]
     season_year: Option<i32>,
     #[serde(default, deserialize_with = "null_default")]
@@ -140,6 +144,34 @@ struct AnilistData {
 struct AnilistResp {
     #[serde(default)]
     data: Option<AnilistData>,
+    #[serde(default)]
+    errors: Option<serde_json::Value>,
+}
+
+/// A 200 body carrying a provider error or a null payload is transient, never
+/// a definitive miss: returning `Ok(None)` here would persist a 30-day
+/// negative and never mark the leg failed.
+fn anilist_items(parsed: AnilistResp) -> Result<Vec<AnilistMedia>, Error> {
+    if let Some(errors) = parsed.errors
+        && !errors.is_null()
+        && !errors.as_array().is_some_and(|arr| arr.is_empty())
+        && !errors.as_object().is_some_and(|obj| obj.is_empty())
+    {
+        return Err(Error::other(
+            "metadata: anilist error document (transient)",
+        ));
+    }
+    let Some(data) = parsed.data else {
+        return Err(Error::other(
+            "metadata: anilist null payload (transient)",
+        ));
+    };
+    let Some(page) = data.page else {
+        return Err(Error::other(
+            "metadata: anilist null payload (transient)",
+        ));
+    };
+    Ok(page.media)
 }
 
 /// Go's `\s`, which `regexp` defines as `[\t\n\f\r ]`.
@@ -379,6 +411,10 @@ impl crate::resolver::Source for AnilistSource {
         "anilist"
     }
 
+    fn path(&self) -> crate::resolver::SearchPath {
+        crate::resolver::SearchPath::Anime
+    }
+
     /// `Find`: the keyless GraphQL endpoint, candidates ranked locally by
     /// title with a soft year preference, absolute episodes built from
     /// `streamingEpisodes`, sorted by Number for deterministic ordering. A
@@ -397,7 +433,7 @@ impl crate::resolver::Source for AnilistSource {
         // POST would use `post_json` and never retry.
         let response = self.client.post_json_idempotent(cancel, self.base_url(), &payload)?;
         let parsed: AnilistResp = decode_capped(response)?;
-        let items = parsed.data.and_then(|data| data.page).map(|page| page.media).unwrap_or_default();
+        let items = anilist_items(parsed)?;
         // Title identity check: no candidates is a definitive miss (a film
         // query such as `inception` must return `Ok(None)`, not a wrong anime).
         let mut cands: Vec<metadata_core::match_::ShowCand> = Vec::with_capacity(items.len());
@@ -467,14 +503,7 @@ impl crate::resolver::Source for AnilistSource {
         if title.is_empty() {
             return Ok(None);
         }
-        let year = media.season_year.unwrap_or(0);
-        let genres = join_genres(&media.genres);
-        let length = media.duration.map(runtime_length).unwrap_or_default();
-        let show_url = if media.id_mal > 0 {
-            format!("https://myanimelist.net/anime/{}", media.id_mal)
-        } else {
-            normalize_url(&media.site_url)
-        };
+        let mut out = anilist_media(media, title, Kind::SERIES);
         let mut episodes: Vec<Episode> = Vec::with_capacity(media.streaming.len());
         for (i, entry) in media.streaming.iter().enumerate() {
             let (number, title) = parse_anilist_episode(&entry.title, i as i32 + 1);
@@ -488,29 +517,90 @@ impl crate::resolver::Source for AnilistSource {
             });
         }
         episodes.sort_by_key(|episode| episode.number);
-        let artwork = match media.cover_image.as_ref() {
-            Some(cover) => {
-                first_non_empty(&[&cover.extra_large, &cover.large, &media.banner_image])
+        out.episodes = episodes;
+        Ok(Some(out))
+    }
+
+    /// The manual search's rows: the same one-POST `Page` answer, each entry
+    /// whose title clears the matcher's floor as its own pickable row. The
+    /// entry's own `format` decides the kind (`MOVIE` is a movie, everything
+    /// else a series), and no episode table is fetched: `streamingEpisodes`
+    /// rides along in the answer, but a search row stays candidate-ready.
+    fn find_all(&self, cancel: &Cancel, q: &Query) -> Result<Vec<Media>, Error> {
+        if q.title.is_empty() {
+            return Ok(Vec::new());
+        }
+        let payload = json!({
+            "query": ANILIST_QUERY,
+            "variables": {"search": q.title},
+        });
+        let response = self.client.post_json_idempotent(cancel, self.base_url(), &payload)?;
+        let parsed: AnilistResp = decode_capped(response)?;
+        let items = anilist_items(parsed)?;
+        let mut out: Vec<Media> = Vec::new();
+        for media in items {
+            if media.id == 0 {
+                continue;
             }
-            None => media.banner_image.trim().to_string(),
-        };
-        Ok(Some(Media {
-            source: "anilist".to_string(),
-            source_id: media.id.to_string(),
-            kind: Kind::SERIES,
-            title,
-            year,
-            artwork,
-            synopsis: cap_synopsis(&strip_html(&media.description)),
-            genres,
-            length,
-            show_url,
-            episode_url: String::new(),
-            movie_url: String::new(),
-            trailer_url: String::new(),
-            episodes,
-            fetched_at: crate::timefmt::now_rfc3339(),
-        }))
+            let name = canonical_title(&media.title.english, &media.title.romaji);
+            if name.is_empty() {
+                continue;
+            }
+            let cand = metadata_core::match_::ShowCand {
+                name: name.clone(),
+                weight: 0,
+                episode_count: 0,
+                aliases: match_aliases(&media.title.english, &media.synonyms, &media.title.romaji),
+            };
+            // The same floor `Find` applies: a fuzzy row never becomes a pick.
+            if metadata_core::match_::pick_best_show(&q.title, std::slice::from_ref(&cand))
+                .is_none()
+            {
+                continue;
+            }
+            let kind = if media.format.trim().eq_ignore_ascii_case("movie") {
+                Kind::MOVIE
+            } else {
+                Kind::SERIES
+            };
+            out.push(anilist_media(&media, name, kind));
+            if out.len() == crate::resolver::FIND_ALL_LIMIT {
+                break;
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The candidate-ready [`Media`] for one AniList entry: identity, year, cover,
+/// rating metadata and page URL, with the kind the caller derives from the
+/// entry's `format`. The episode table is the caller's to fill.
+fn anilist_media(media: &AnilistMedia, title: String, kind: Kind) -> Media {
+    let show_url = if media.id_mal > 0 {
+        format!("https://myanimelist.net/anime/{}", media.id_mal)
+    } else {
+        normalize_url(&media.site_url)
+    };
+    let artwork = match media.cover_image.as_ref() {
+        Some(cover) => first_non_empty(&[&cover.extra_large, &cover.large, &media.banner_image]),
+        None => media.banner_image.trim().to_string(),
+    };
+    Media {
+        source: "anilist".to_string(),
+        source_id: media.id.to_string(),
+        kind,
+        title,
+        year: media.season_year.unwrap_or(0),
+        artwork,
+        synopsis: cap_synopsis(&strip_html(&media.description)),
+        genres: join_genres(&media.genres),
+        length: media.duration.map(runtime_length).unwrap_or_default(),
+        show_url,
+        episode_url: String::new(),
+        movie_url: String::new(),
+        trailer_url: String::new(),
+        episodes: Vec::new(),
+        fetched_at: crate::timefmt::now_rfc3339(),
     }
 }
 

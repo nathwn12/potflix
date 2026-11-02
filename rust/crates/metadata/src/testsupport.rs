@@ -103,6 +103,7 @@ pub(crate) struct Response {
     pub(crate) status: u16,
     pub(crate) content_type: String,
     pub(crate) body: Vec<u8>,
+    pub(crate) headers: Vec<(String, String)>,
 }
 
 impl Response {
@@ -112,6 +113,7 @@ impl Response {
             status: 200,
             content_type: "application/json".to_string(),
             body: body.as_bytes().to_vec(),
+            headers: Vec::new(),
         }
     }
 
@@ -121,7 +123,14 @@ impl Response {
             status,
             content_type: "text/plain; charset=utf-8".to_string(),
             body: format!("{body}\n").into_bytes(),
+            headers: Vec::new(),
         }
+    }
+
+    /// An extra header (e.g. `Retry-After`) on the canned response.
+    pub(crate) fn with_header(mut self, name: &str, value: &str) -> Response {
+        self.headers.push((name.to_string(), value.to_string()));
+        self
     }
 }
 
@@ -271,13 +280,14 @@ where
         } else {
             "Error"
         };
-        let head = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
-            response.status,
-            reason,
-            response.content_type,
-            response.body.len()
+        let mut head = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n",
+            response.status, reason, response.content_type, response.body.len()
         );
+        for (name, value) in &response.headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        head.push_str("Connection: keep-alive\r\n\r\n");
         if writer.write_all(head.as_bytes()).is_err() || writer.write_all(&response.body).is_err() {
             return;
         }

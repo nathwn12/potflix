@@ -108,6 +108,9 @@ struct TenraiEntry {
     title: String,
     #[serde(default, deserialize_with = "null_default")]
     title_english: String,
+    /// `TV`, `Movie`, `OVA`, `ONA`, `Special`, `Music`: the entry's own form.
+    #[serde(rename = "type", default, deserialize_with = "null_default")]
+    media_type: String,
     #[serde(default)]
     year: Option<i32>,
     #[serde(default, deserialize_with = "null_default")]
@@ -196,36 +199,42 @@ fn build_episode(e: &TenraiEpisode) -> Episode {
 }
 
 impl TenraiSource {
+    /// The `/v1/anime?q=` rows for `title`, ONE request. Rows without an id or
+    /// a title are dropped; the provider's own member order is kept.
+    fn search_rows(&self, cancel: &Cancel, title: &str) -> Result<Vec<TenraiEntry>, Error> {
+        if title.is_empty() {
+            return Ok(Vec::new());
+        }
+        let search_url = format!(
+            "{}/v1/anime?q={}&limit={TENRAI_SEARCH_LIMIT}&order_by=members&sort=desc",
+            self.base_url(),
+            query_escape(title),
+        );
+        let response = self.client.get(cancel, &search_url)?;
+        if response.status() == StatusCode::NOT_FOUND {
+            drain_and_close(response);
+            return Ok(Vec::new());
+        }
+        let parsed: TenraiSearchResp = decode_capped(response)?;
+        Ok(parsed
+            .data
+            .into_iter()
+            .filter(|entry| entry.mal_id != 0 && entry_name(entry).is_some())
+            .collect())
+    }
+
     /// One validated search pick: the title-ranked best, with a known query
     /// year preferring any challenger that both carries it and fully covers
     /// the query title. `Ok(None)` is a definitive miss. Year never gates:
     /// it may only ride along as a display field.
     fn pick(&self, cancel: &Cancel, q: &Query) -> Result<Option<TenraiEntry>, Error> {
-        let search_url = format!(
-            "{}/v1/anime?q={}&limit={TENRAI_SEARCH_LIMIT}&order_by=members&sort=desc",
-            self.base_url(),
-            query_escape(&q.title),
-        );
-        let response = self.client.get(cancel, &search_url)?;
-        if response.status() == StatusCode::NOT_FOUND {
-            drain_and_close(response);
-            return Ok(None);
-        }
-        let parsed: TenraiSearchResp = decode_capped(response)?;
-        let mut cands: Vec<ShowCand> = Vec::with_capacity(parsed.data.len());
-        let mut entries: Vec<TenraiEntry> = Vec::with_capacity(parsed.data.len());
-        let mut years: Vec<i32> = Vec::with_capacity(parsed.data.len());
-        for entry in parsed.data {
-            if entry.mal_id == 0 {
+        let rows = self.search_rows(cancel, &q.title)?;
+        let mut cands: Vec<ShowCand> = Vec::with_capacity(rows.len());
+        let mut years: Vec<i32> = Vec::with_capacity(rows.len());
+        for entry in &rows {
+            let Some(name) = entry_name(entry) else {
                 continue;
-            }
-            let mut name = entry.title_english.trim().to_string();
-            if name.is_empty() {
-                name = entry.title.trim().to_string();
-            }
-            if name.is_empty() {
-                continue;
-            }
+            };
             // Both spellings score: a romaji query must find the
             // English-titled main series, not a romaji-named special.
             let mut aliases = Vec::new();
@@ -242,7 +251,6 @@ impl TenraiSource {
                 aliases,
             });
             years.push(entry.year.unwrap_or(0));
-            entries.push(entry);
         }
         if cands.is_empty() {
             return Ok(None);
@@ -264,7 +272,7 @@ impl TenraiSource {
         // Soft year preference only: no year match keeps the title winner.
         let take =
             crate::yearpref::prefer_year_match(&q.title, q.year, &cands, &years, winner_idx);
-        Ok(Some(entries[take].clone()))
+        Ok(rows.get(take).cloned())
     }
 
     /// The episode table for a validated pick, walked only until the requested
@@ -313,6 +321,10 @@ impl crate::resolver::Source for TenraiSource {
         "tenrai"
     }
 
+    fn path(&self) -> crate::resolver::SearchPath {
+        crate::resolver::SearchPath::Anime
+    }
+
     /// `Find`: series only (movies never reach the anime legs through the
     /// resolver, and a series-only source self-gates a ruled-out kind before
     /// touching the wire).
@@ -323,38 +335,93 @@ impl crate::resolver::Source for TenraiSource {
         let Some(picked) = self.pick(cancel, q)? else {
             return Ok(None);
         };
-        let mut title = picked.title_english.trim().to_string();
-        if title.is_empty() {
-            title = picked.title.trim().to_string();
-        }
-        if title.is_empty() {
+        let Some(title) = entry_name(&picked) else {
             return Ok(None);
-        }
-        let year = picked.year.unwrap_or(0);
+        };
         let episodes = self.episodes(cancel, &picked, q.episode)?;
         // The wire numbers are already absolute: no positional renumbering, so
         // a short table simply lacks the Number and the chain falls through.
-        let genres: Vec<String> = picked
-            .genres
-            .iter()
-            .map(|g| g.name.clone())
-            .collect();
-        Ok(Some(Media {
-            source: "tenrai".to_string(),
-            source_id: picked.mal_id.to_string(),
-            kind: Kind::SERIES,
-            title,
-            year,
-            artwork: tenrai_art(picked.images.as_ref()),
-            synopsis: cap_synopsis(&strip_html(&picked.synopsis)),
-            genres: join_genres(&genres),
-            length: runtime_length(tenrai_minutes(&picked.duration)),
-            show_url: normalize_url(&picked.url),
-            episode_url: String::new(),
-            movie_url: String::new(),
-            trailer_url: String::new(),
-            episodes,
-            fetched_at: crate::timefmt::now_rfc3339(),
-        }))
+        let mut media = tenrai_media(&picked, title, Kind::SERIES);
+        media.episodes = episodes;
+        Ok(Some(media))
+    }
+
+    /// The manual search's rows: the same ONE `/v1/anime?q=` request, each
+    /// entry whose title clears the matcher's floor as its own pickable row,
+    /// with an EMPTY episode table (no episode page is fetched). The entry's
+    /// own `type` decides the kind: `Movie` is a movie, everything else a
+    /// series.
+    fn find_all(&self, cancel: &Cancel, q: &Query) -> Result<Vec<Media>, Error> {
+        if q.title.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out: Vec<Media> = Vec::new();
+        for entry in self.search_rows(cancel, &q.title)? {
+            let Some(name) = entry_name(&entry) else {
+                continue;
+            };
+            let mut aliases = Vec::new();
+            for title in [&entry.title_english, &entry.title] {
+                let title = title.trim();
+                if !title.is_empty() {
+                    aliases.push(title.to_string());
+                }
+            }
+            let cand = ShowCand {
+                name: name.clone(),
+                weight: entry.members.unwrap_or(0),
+                episode_count: entry.episodes.unwrap_or(0),
+                aliases,
+            };
+            // The same floor `Find` applies: a fuzzy row never becomes a pick.
+            if pick_best_show(&q.title, std::slice::from_ref(&cand)).is_none() {
+                continue;
+            }
+            let kind = if entry.media_type.trim().eq_ignore_ascii_case("movie") {
+                Kind::MOVIE
+            } else {
+                Kind::SERIES
+            };
+            out.push(tenrai_media(&entry, name, kind));
+            if out.len() == crate::resolver::FIND_ALL_LIMIT {
+                break;
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The entry's display name: its English title, else its romaji one; `None`
+/// when it carries neither.
+fn entry_name(entry: &TenraiEntry) -> Option<String> {
+    let english = entry.title_english.trim();
+    if !english.is_empty() {
+        return Some(english.to_string());
+    }
+    let title = entry.title.trim();
+    (!title.is_empty()).then(|| title.to_string())
+}
+
+/// The candidate-ready [`Media`] for one search row: identity, year, cover,
+/// genres and page URL, with the kind the caller derives from `type`. The
+/// episode table is the caller's to fill.
+fn tenrai_media(entry: &TenraiEntry, title: String, kind: Kind) -> Media {
+    let genres: Vec<String> = entry.genres.iter().map(|g| g.name.clone()).collect();
+    Media {
+        source: "tenrai".to_string(),
+        source_id: entry.mal_id.to_string(),
+        kind,
+        title,
+        year: entry.year.unwrap_or(0),
+        artwork: tenrai_art(entry.images.as_ref()),
+        synopsis: cap_synopsis(&strip_html(&entry.synopsis)),
+        genres: join_genres(&genres),
+        length: runtime_length(tenrai_minutes(&entry.duration)),
+        show_url: normalize_url(&entry.url),
+        episode_url: String::new(),
+        movie_url: String::new(),
+        trailer_url: String::new(),
+        episodes: Vec::new(),
+        fetched_at: crate::timefmt::now_rfc3339(),
     }
 }

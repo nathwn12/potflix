@@ -32,7 +32,7 @@ Discord shows `Watching <title>` while media plays. Closing the window parks the
 | Key | Default | Effect |
 | --- | --- | --- |
 | `POTFLIX_CLIENT_ID` env or `client-id.txt` beside the exe | built-in ID | Discord app name and artwork |
-| Search scope | `All types` | Limit lookup to `Movies` or `Series` |
+| Search scope | `All / TV / Movies / Anime TV / Anime Movies` | Limit lookup to one clear class |
 | `--minimized` | off | Start silent in the tray, for autostart |
 | `--selftest` | off | Headless wiring proof; needs no PotPlayer or Discord |
 

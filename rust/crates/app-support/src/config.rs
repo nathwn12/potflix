@@ -43,8 +43,10 @@
 //! # Tolerant-load rules (all reproduced)
 //!
 //! * missing file, unreadable file, malformed JSON, or a wrong field type ->
-//!   `Err` from [`load_config_from`]; the tolerant [`load_config`] turns that
-//!   into the zero [`Config`].
+//!   `Err` from [`load_config_from`] (the bad file is quarantined beside the
+//!   store as `<name>.corrupt-<ms>`, once); the tolerant [`load_config`] turns
+//!   that into the zero [`Config`], while [`load_config_for_update`] and
+//!   [`save_config_to`] refuse instead of saving defaults over real data.
 //! * a partial file -> the absent fields take their defaults.
 //! * `null` for any field -> the field takes its default (Go's no-op rule).
 //! * unknown fields -> ignored.
@@ -97,6 +99,14 @@ pub const SCAN_SPEED_BALANCED: &str = "balanced";
 
 /// 4x the published provider limits.
 pub const SCAN_SPEED_GENTLE: &str = "gentle";
+
+/// Theme names. AMOLED (pure-black OLED) is the default; Dark is today's
+/// palette exactly. Unknown/empty normalises to AMOLED so a bad stored value
+/// can never reach the painter.
+pub const THEME_AMOLED: &str = "amoled";
+
+/// Today's palette exactly.
+pub const THEME_DARK: &str = "dark";
 
 /// The Card view's stored choice of one preset per body line
 /// (`go\internal\presence\cardspec.go:41`), the preset ids that pick it, and
@@ -250,6 +260,21 @@ pub struct Config {
     /// for the series side).
     #[serde(default, deserialize_with = "de::card")]
     pub card: CardSpecs,
+    /// The UI theme as stored (`amoled`|`dark`); read through
+    /// [`Config::effective_theme`]. Omitted on the wire while the AMOLED
+    /// default holds, so unset/default stores keep their exact bytes.
+    #[serde(
+        default,
+        deserialize_with = "de::theme",
+        skip_serializing_if = "is_default_theme"
+    )]
+    pub theme: String,
+}
+
+/// Reports whether the stored theme is the AMOLED default (empty counts:
+/// absent/unreadable loads default, and the default is omitted on the wire).
+fn is_default_theme(value: &str) -> bool {
+    normalize_theme(value) == THEME_AMOLED
 }
 
 /// JSON `null` tolerance, one function per field: Go's `json.Unmarshal` leaves a
@@ -267,6 +292,12 @@ mod de {
     }
 
     pub fn string<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+        Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+    }
+
+    /// Null-tolerant theme: `null`/absent loads empty (effective AMOLED);
+    /// any string survives raw here and is normalised on load/save.
+    pub fn theme<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
         Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
     }
 
@@ -347,6 +378,16 @@ pub fn normalize_scan_speed(speed: &str) -> &'static str {
     }
 }
 
+/// Maps any input onto a known theme (case-insensitive; unknown/empty yields
+/// AMOLED, the default).
+pub fn normalize_theme(theme: &str) -> &'static str {
+    match theme.trim().to_lowercase().as_str() {
+        THEME_DARK => THEME_DARK,
+        THEME_AMOLED => THEME_AMOLED,
+        _ => THEME_AMOLED,
+    }
+}
+
 impl Config {
     /// The normalised profile for this config.
     pub fn effective_scan_speed(&self) -> &'static str {
@@ -400,6 +441,21 @@ impl Config {
             return false;
         }
         self.scan_speed = normalized.to_string();
+        true
+    }
+
+    /// The normalised theme for this config (AMOLED when absent/unreadable).
+    pub fn effective_theme(&self) -> &'static str {
+        normalize_theme(&self.theme)
+    }
+
+    /// Stores the normalised theme; reports whether it changed.
+    pub fn set_theme(&mut self, theme: &str) -> bool {
+        let normalized = normalize_theme(theme);
+        if self.theme == normalized {
+            return false;
+        }
+        self.theme = normalized.to_string();
         true
     }
 
@@ -535,10 +591,29 @@ pub fn scan_index_path() -> PathBuf {
 /// field is present the file is rewritten without it, and a clean file is never
 /// rewritten.
 pub fn load_config_from(path: &Path) -> io::Result<Config> {
-    let data = std::fs::read(path)?;
-    let mut config: Config = serde_json::from_slice(&data)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(err) => {
+            if err.kind() != io::ErrorKind::NotFound {
+                // Unreadable (permissions, a directory, a torn write): move the
+                // bytes aside once so the next write cannot silently replace
+                // them with defaults.
+                let _ = quarantine_corrupt_file(path);
+            }
+            return Err(err);
+        }
+    };
+    let mut config: Config = match serde_json::from_slice(&data) {
+        Ok(config) => config,
+        Err(err) => {
+            let _ = quarantine_corrupt_file(path);
+            return Err(io::Error::new(io::ErrorKind::InvalidData, err));
+        }
+    };
     config.scan_speed = normalize_scan_speed(&config.scan_speed).to_string();
+    // Theme stays raw here (`""` when absent): `effective_theme()` maps
+    // absent/unreadable to AMOLED, and the default is omitted on the wire so
+    // unset stores keep their exact bytes.
     if has_retired_fields(&data) {
         // Best-effort scrub: the load still succeeds when the rewrite fails, so
         // the error is dropped here.
@@ -547,9 +622,25 @@ pub fn load_config_from(path: &Path) -> io::Result<Config> {
     Ok(config)
 }
 
-/// Reads the store; missing/corrupt yields the zero `Config`.
+/// Reads the store; missing yields the zero `Config`. An unparsable or
+/// unreadable file is quarantined (renamed `.corrupt-<ms>` once, beside the
+/// store) and still yields the zero `Config`; the next write must go through
+/// [`load_config_for_update`]/[`save_config_to`], which refuse to silently
+/// replace the quarantined bytes.
 pub fn load_config() -> Config {
     load_config_from(&config_path()).unwrap_or_default()
+}
+
+/// Loads the store for a read-modify-write: a missing file yields the zero
+/// `Config` (nothing to keep), but an unparsable or unreadable file yields
+/// `Err` (after quarantine) so the caller refuses instead of saving defaults
+/// over the user's data.
+pub fn load_config_for_update(path: &Path) -> io::Result<Config> {
+    match load_config_from(path) {
+        Ok(config) => Ok(config),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(err) => Err(err),
+    }
 }
 
 /// Writes `config` atomically to the real store path.
@@ -566,8 +657,34 @@ pub fn save_config(config: &Config) -> io::Result<()> {
 /// the close-error branch has no separate case; a failed write or rename removes
 /// the temp file and returns the error.
 pub fn save_config_to(path: &Path, config: &Config) -> io::Result<()> {
+    // Never silently replace real data: a present-but-unparsable store is
+    // quarantined and the write is refused (the caller surfaces it). A
+    // missing store (nothing to keep, or already quarantined by a load) is
+    // writable.
+    if std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
+        match std::fs::read(path) {
+            Ok(data) => {
+                if serde_json::from_slice::<Config>(&data).is_err() {
+                    let _ = quarantine_corrupt_file(path);
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "refusing to overwrite corrupt store: {}",
+                            path.display()
+                        ),
+                    ));
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                let _ = quarantine_corrupt_file(path);
+                return Err(err);
+            }
+        }
+    }
     let mut out = config.clone();
     out.scan_speed = normalize_scan_speed(&out.scan_speed).to_string();
+    out.theme = normalize_theme(&out.theme).to_string();
     // T5-B, extended to the retired `episode` preset: a retired Details id
     // (`title`/`series`/`episode`) never persists again: the
     // store migrates it to the default line on save, as on load.
@@ -587,12 +704,70 @@ pub fn save_config_to(path: &Path, config: &Config) -> io::Result<()> {
         let _ = std::fs::remove_file(&temp_path);
         return Err(err);
     }
+    // Flush the file to stable storage BEFORE the rename, so a power cut
+    // cannot commit a zero-length file the next load would treat as defaults.
+    if let Err(err) = temp.sync_all() {
+        drop(temp);
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err);
+    }
     drop(temp);
     if let Err(err) = std::fs::rename(&temp_path, path) {
         let _ = std::fs::remove_file(&temp_path);
         return Err(err);
     }
+    // Fsync the directory so the rename itself survives a power cut.
+    fsync_dir(&dir);
     Ok(())
+}
+
+/// Best-effort directory fsync: persists the rename above. Failures are
+/// ignored (some platforms cannot open a directory); the file sync is the
+/// load-bearing half.
+fn fsync_dir(dir: &Path) {
+    if let Ok(file) = File::open(dir) {
+        let _ = file.sync_all();
+    }
+}
+
+/// The quarantine backup beside `path`, if one was already taken:
+/// `<file-name>.corrupt-<ms>`.
+pub fn corrupt_backup_for(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty())?;
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let prefix = format!("{name}.corrupt-");
+    let mut hits: Vec<PathBuf> = std::fs::read_dir(parent)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|candidate| {
+            candidate
+                .file_name()
+                .is_some_and(|file| file.to_string_lossy().starts_with(&prefix))
+        })
+        .collect();
+    hits.sort();
+    hits.into_iter().next()
+}
+
+/// Moves an unparsable/unreadable store aside once, returning the backup path.
+/// A missing file is not corrupt (`None`); when a backup already exists the
+/// first one is kept and returned, so repeated loads never stack renames.
+pub fn quarantine_corrupt_file(path: &Path) -> Option<PathBuf> {
+    if let Some(existing) = corrupt_backup_for(path) {
+        return Some(existing);
+    }
+    if !std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
+        return None;
+    }
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty())?;
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis())
+        .unwrap_or(0);
+    let backup = parent.join(format!("{name}.corrupt-{millis}"));
+    std::fs::rename(path, &backup).ok()?;
+    Some(backup)
 }
 
 /// Retired credential field names, built at runtime from concatenated fragments
@@ -712,6 +887,105 @@ mod tests {
             load_config_from(&scratch.join("missing-store.json")).unwrap_or_default(),
             Config::default()
         );
+    }
+
+    /// A corrupt store is quarantined (renamed `.corrupt-<ms>`, once) and a
+    /// write over corrupt bytes is refused: folders, scan speed, card and
+    /// theme are never silently replaced by defaults while the status says
+    /// saved.
+    #[test]
+    fn corrupt_config_is_quarantined_and_save_refuses_to_clobber() {
+        let scratch = Scratch::new("config-quarantine");
+        for (tag, junk) in [("junk", "{not json"), ("wrong-type", r#"{"dirs":7}"#)] {
+            let path = scratch.write(&format!("{tag}.json"), junk);
+            assert!(
+                load_config_from(&path).is_err(),
+                "{tag}: corrupt file must error"
+            );
+            let backup = corrupt_backup_for(&path).expect("quarantine backup");
+            assert_eq!(
+                std::fs::read(&backup).expect("read backup"),
+                junk.as_bytes(),
+                "{tag}: the user's bytes survive in the backup"
+            );
+            assert!(!path.exists(), "{tag}: the corrupt file is moved aside");
+            // A second corrupt load never stacks a second backup ("once").
+            std::fs::write(&path, junk).expect("re-seed corrupt");
+            assert!(load_config_from(&path).is_err());
+            let backups: Vec<_> = std::fs::read_dir(scratch.path())
+                .expect("read scratch")
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|p| {
+                    p.file_name().is_some_and(|n| {
+                        n.to_string_lossy()
+                            .starts_with(&format!("{tag}.json.corrupt-"))
+                    })
+                })
+                .collect();
+            assert_eq!(backups.len(), 1, "one quarantine, never stacked: {backups:?}");
+
+            // The write refuses instead of saving defaults over real data, and
+            // leaves the corrupt bytes in place for inspection.
+            let err = save_config_to(
+                &path,
+                &Config {
+                    dirs: vec![r"C:\Media".to_string()],
+                    ..Config::default()
+                },
+            )
+            .expect_err("a write over corrupt bytes must refuse");
+            assert!(
+                err.to_string().contains("corrupt"),
+                "the refusal names the cause: {err}"
+            );
+            assert_eq!(
+                std::fs::read(&path).expect("read target"),
+                junk.as_bytes(),
+                "refusal leaves the corrupt bytes untouched"
+            );
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(&backup);
+        }
+    }
+
+    /// A power-cut zero-length file is corruption, not defaults: it is
+    /// quarantined on load and refused on save, and a good save stages no
+    /// temp litter beside the store.
+    #[test]
+    fn power_cut_zero_length_config_is_quarantined() {
+        let scratch = Scratch::new("config-zero-length");
+        let path = store_path(&scratch);
+        std::fs::create_dir_all(path.parent().expect("store parent")).expect("mkdir");
+        std::fs::write(&path, b"").expect("seed torn write");
+        assert!(
+            load_config_from(&path).is_err(),
+            "zero-length must error, never default"
+        );
+        let backup = corrupt_backup_for(&path).expect("quarantine backup");
+        assert!(std::fs::read(&backup).expect("read backup").is_empty());
+        assert!(!path.exists());
+
+        // A clean save round-trips and stages no temp file beside the store.
+        let want = Config {
+            dirs: vec![r"C:\Media".to_string()],
+            scan_speed: SCAN_SPEED_TURBO.to_string(),
+            ..Config::default()
+        };
+        save_config_to(&path, &want).expect("saveConfigTo");
+        let parent = path.parent().expect("store parent");
+        let names: Vec<String> = std::fs::read_dir(parent)
+            .expect("read dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names.iter().filter(|n| n.starts_with(".tmp-")).count(), 0, "temp litter: {names:?}");
+        assert!(names.contains(&CONFIG_FILE_NAME.to_string()), "store written: {names:?}");
+        assert_eq!(load_config_from(&path).expect("reload"), want);
     }
 
     /// `config_scanspeed_test.go` — ScanSpeed survives an atomic save -> load

@@ -151,6 +151,68 @@ pub fn scan_button_for_profile(profile: &str) -> i32 {
     }
 }
 
+/// Theme segment model: the two named themes, AMOLED first (the default).
+#[must_use]
+pub fn theme_labels() -> [(&'static str, &'static str); 2] {
+    [
+        ("AMOLED", app_support::config::THEME_AMOLED),
+        ("Dark", app_support::config::THEME_DARK),
+    ]
+}
+
+/// `themeProfileForButton`: the stored id a theme button selects.
+#[must_use]
+pub fn theme_profile_for_button(id: i32) -> &'static str {
+    match id {
+        crate::window::BTN_THEME_AMOLED => app_support::config::THEME_AMOLED,
+        crate::window::BTN_THEME_DARK => app_support::config::THEME_DARK,
+        _ => "",
+    }
+}
+
+/// `themeButtonForProfile`: the button id a stored theme selects.
+#[must_use]
+pub fn theme_button_for_profile(theme: &str) -> i32 {
+    match app_support::config::normalize_theme(theme) {
+        app_support::config::THEME_DARK => crate::window::BTN_THEME_DARK,
+        _ => crate::window::BTN_THEME_AMOLED,
+    }
+}
+
+/// Theme segment style: the selected segment uses the text-colour underline
+/// convention (`BTN_TOGGLE_ON`), never red — the same anatomy as the Card
+/// scope row.
+#[must_use]
+pub fn theme_segment_style(theme: &str, current: &str) -> i32 {
+    if app_support::config::normalize_theme(theme)
+        == app_support::config::normalize_theme(current)
+    {
+        return crate::window::BTN_TOGGLE_ON;
+    }
+    crate::window::BTN_TOGGLE
+}
+
+/// `onSelectTheme`: the window-free core of the Theme-segment click. It
+/// normalises the choice, persists it to `cfg_path`, and returns the status
+/// text. It never touches the search cache or match state — only the `theme`
+/// key moves. Explicit `cfg_path` so tests drive it on a temp store.
+pub fn on_select_theme(cfg_path: &Path, theme: &str) -> Result<String, String> {
+    let theme = app_support::config::normalize_theme(theme);
+    let mut cfg = app_support::config::load_config_for_update(cfg_path).map_err(|e| {
+        format!("settings store unreadable ({e}) - quarantined; nothing saved")
+    })?;
+    cfg.theme = theme.to_string();
+    app_support::config::save_config_to(cfg_path, &cfg).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "Theme: {}",
+        if theme == app_support::config::THEME_DARK {
+            "Dark"
+        } else {
+            "AMOLED"
+        }
+    ))
+}
+
 /// `scanSegmentStyle` (`go\settings_sections.go:149`).
 #[must_use]
 pub fn scan_segment_style(seg: &str, current: &str) -> i32 {
@@ -171,7 +233,9 @@ pub fn scan_segment_style(seg: &str, current: &str) -> i32 {
 /// on a temp store instead of the real one.
 pub fn on_select_scan_speed(cfg_path: &Path, profile: &str) -> Result<String, String> {
     let profile = app_support::config::normalize_scan_speed(profile);
-    let mut cfg = app_support::config::load_config_from(cfg_path).unwrap_or_default();
+    let mut cfg = app_support::config::load_config_for_update(cfg_path).map_err(|e| {
+        format!("settings store unreadable ({e}) - quarantined; nothing saved")
+    })?;
     cfg.scan_speed = profile.to_string();
     app_support::config::save_config_to(cfg_path, &cfg).map_err(|e| e.to_string())?;
     metadata_http::set_rate_profile(profile);
@@ -586,6 +650,27 @@ pub fn query_startup_enabled() -> bool {
     read_startup_value().is_some_and(|got| startup_value_enabled(&got, &exe))
 }
 
+/// One source of truth for "start with Windows": the HKCU Run key. The config
+/// file only caches that value, refreshed here on every read, so the two can
+/// never drift apart (a write to config alone is not the switch).
+pub fn sync_startup_cache(cfg_path: &Path) -> bool {
+    sync_startup_cache_with(cfg_path, query_startup_enabled())
+}
+
+/// The testable core of [`sync_startup_cache`]: records `enabled` (the
+/// registry's answer) into the config cache. A missing store writes fresh; an
+/// unreadable one is left alone (already quarantined by the load) and the
+/// registry answer is still returned.
+pub fn sync_startup_cache_with(cfg_path: &Path, enabled: bool) -> bool {
+    if let Ok(mut cfg) = app_support::config::load_config_for_update(cfg_path)
+        && cfg.start_with_windows != enabled
+    {
+        cfg.start_with_windows = enabled;
+        let _ = app_support::config::save_config_to(cfg_path, &cfg);
+    }
+    enabled
+}
+
 /// `setStartupEnabled` (`go\settings_sections.go:560`).
 pub fn set_startup_enabled(on: bool) -> Result<(), String> {
     use windows_sys::Win32::System::Registry::{
@@ -805,6 +890,30 @@ mod tests {
             Path::new(&idx).ends_with(std::path::Path::new("Potflix").join("scanindex.json")),
             "{idx}"
         );
+    }
+
+    #[test]
+    fn startup_registry_is_source_of_truth_for_config_cache() {
+        // The registry says on but the cache says off: the sync rewrites the
+        // cache, so the two never drift.
+        let scratch = Scratch::new("startup-truth");
+        let path = scratch.path().join("config.json");
+        let stale = app_support::config::Config {
+            dirs: vec![r"C:\Media".into()],
+            ..app_support::config::Config::default()
+        };
+        app_support::config::save_config_to(&path, &stale).unwrap();
+        assert!(sync_startup_cache_with(&path, true));
+        let cached = app_support::config::load_config_from(&path).unwrap();
+        assert!(cached.start_with_windows, "cache follows the registry");
+        assert_eq!(cached.dirs, vec![r"C:\Media".to_string()], "dirs kept");
+
+        // And back off again; a missing store is created from the registry.
+        assert!(!sync_startup_cache_with(&path, false));
+        assert!(!app_support::config::load_config_from(&path).unwrap().start_with_windows);
+        let fresh = scratch.path().join("fresh.json");
+        assert!(sync_startup_cache_with(&fresh, true));
+        assert!(app_support::config::load_config_from(&fresh).unwrap().start_with_windows);
     }
 
     #[test]

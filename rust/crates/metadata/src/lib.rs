@@ -1,17 +1,17 @@
 //! `metadata` -- mirrors the Go package `go\internal\metadata`.
 //!
 //! Canonical series/episode titles from free, keyless sources (TVmaze for TV,
-//! AniList, Tenrai and Kitsu plus Cinemeta, Episodate, Bangumi, LiveChart.me
-//! and ANN for anime, Cinemeta then Wikipedia then JustWatch
-//! for movies) behind a
-//! permanent on-disk cache. The poll loop uses the non-blocking
+//! AniList, Tenrai and Kitsu for anime, Cinemeta for movies and as the general
+//! fallback) behind a permanent on-disk cache. Wikipedia, JustWatch, Episodate,
+//! Bangumi, LiveChart.me and ANN keep their modules and tests but sit off the
+//! default chain. The poll loop uses the non-blocking
 //! [`Resolver::resolve`]; the CLIs use the blocking [`Resolver::lookup_now`];
 //! [`Options::offline`] serves cache-only.
 //!
-//! Workspace seam: this crate carries the provider chain, the eleven providers and
-//! the cache; the shared record types, the filename parser, candidate matching,
-//! alternate titles and the path context live in `metadata-core`, and the
-//! transport in `metadata-http`.
+//! Workspace seam: this crate carries the provider chain, the five default
+//! providers and the cache; the shared record types, the filename parser,
+//! candidate matching, alternate titles and the path context live in
+//! `metadata-core`, and the transport in `metadata-http`.
 //!
 //! # Cancellation
 //!
@@ -29,18 +29,21 @@
 //! persists nothing. Callers must never bin the sentinel as not-found.
 
 pub mod anilist;
+pub mod animeschedule;
 pub mod ann;
 pub mod artwork;
 pub mod bangumi;
 pub mod cache;
 pub mod cinemeta;
 pub mod episodate;
+pub mod imdb;
 pub mod kitsu;
 pub mod justwatch;
 pub mod livechart;
 pub mod overrides;
 pub mod resolver;
 pub mod search;
+pub mod searchcache;
 mod serdeutil;
 pub mod tenrai;
 pub mod timefmt;
@@ -94,8 +97,12 @@ use metadata_http::cancel::CancelError;
 
 pub use metadata_core::types::{Button, Episode, Kind, Media, Query, Resolution};
 pub use overrides::{Override, Scope, Store, load};
-pub use resolver::{Options, Resolver, Source, default_sources};
-pub use search::{Candidate, pin_from_candidate, refresh, search};
+pub use resolver::{Options, Resolver, SearchPath, Source, default_sources};
+pub use search::{
+    Candidate, SearchOutcome, merge_same_work, pin_from_candidate, refresh, search, search_stream,
+    search_stream_only, search_stream_only_with_log, search_stream_with_log,
+};
+pub use searchcache::{CachedSearch, SearchCache, search_cache_get, search_cache_put};
 
 /// The text of Go's `ErrLookupUnavailable` sentinel.
 pub const LOOKUP_UNAVAILABLE_MESSAGE: &str = "metadata lookup unavailable";

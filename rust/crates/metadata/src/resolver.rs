@@ -4,10 +4,11 @@
 //! (a cache miss fires one background fetch per cache key, single-flight, and the
 //! card falls back to the clean title until it lands); the CLIs use the BLOCKING
 //! [`Resolver::lookup_now`]. Order: TVmaze for TV, AniList, Tenrai and Kitsu
-//! for anime with Cinemeta as the general fallback, Episodate, Bangumi,
-//! LiveChart.me and ANN as the further anime coverage legs, Cinemeta then
-//! Wikipedia then JustWatch
-//! for movies. Offline safe: with no cache entry and no
+//! for anime, Cinemeta as the general fallback and the first movie leg.
+//! Wikipedia, JustWatch, Episodate, Bangumi, LiveChart.me and ANN stay as
+//! modules (with their tests) but sit OFF the default chain: they answered too
+//! slowly or too unreliably to keep in front of a user's lookup.
+//! Offline safe: with no cache entry and no
 //! network the card is exactly the clean card, and [`Options::offline`] serves
 //! cache-only. `force` bypasses and re-attempts.
 //!
@@ -48,10 +49,8 @@ use crate::cache::{
     negative_mem_expiry, resolve_cache_dir,
 };
 use crate::tvmaze::TvmazeSource;
-use crate::wikipedia::{WikiClient, WikipediaSource};
 use crate::{Error, anilist::AnilistSource, cinemeta::CinemetaSource};
-use crate::{ann::AnnSource, bangumi::BangumiSource, episodate::EpisodateSource};
-use crate::{justwatch::JustWatchSource, livechart::LivechartSource};
+use crate::{animeschedule::AnimescheduleSource, imdb::ImdbClient, imdb::ImdbSource};
 use crate::{kitsu::KitsuSource, tenrai::TenraiSource};
 
 /// `negativeBackoff` keeps a failed key from being hammered. In-memory only; the
@@ -62,6 +61,20 @@ pub const NEGATIVE_BACKOFF: Duration = Duration::from_secs(10 * 60);
 /// (or empty, non-http(s), or signed/expiring) degrades to the app logo
 /// downstream. The backfill budget mirrors the presence guard exactly.
 const ARTWORK_BUDGET: usize = 300;
+
+/// The cap on rows one provider's [`Source::find_all`] returns: a picker page's
+/// worth of entries, never the provider's whole answer.
+pub(crate) const FIND_ALL_LIMIT: usize = 12;
+
+/// The search path a provider belongs to: `Regular` (live-action) or `Anime`.
+/// A Regular scope asks only Regular legs, an Anime scope only Anime legs,
+/// All asks both. The cache key already carries the scope, so no cross-path
+/// bleed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchPath {
+    Regular,
+    Anime,
+}
 
 /// `Source` is one keyless metadata provider. Go's `Source` interface:
 /// `Name() string` and `Find(ctx, q) (*Media, error)`.
@@ -74,10 +87,32 @@ pub trait Source: Send + Sync {
     /// chain ranking.
     fn name(&self) -> &str;
 
+    /// The path this leg belongs to. Every source tags its own path; the
+    /// default maps the known names so test fakes without an explicit tag
+    /// still route correctly.
+    fn path(&self) -> SearchPath {
+        match self.name() {
+            "anilist" | "tenrai" | "kitsu" | "animeschedule" => SearchPath::Anime,
+            _ => SearchPath::Regular,
+        }
+    }
+
     /// `Find`: `Ok(None)` is a definitive miss for this source, `Err` is a
     /// transient failure, `Ok(Some)` is an answer the chain still has to check
     /// against the query.
     fn find(&self, cancel: &Cancel, q: &Query) -> Result<Option<Media>, Error>;
+
+    /// The provider's OWN ranked answer for `q` as a list, so a manual search
+    /// can offer several pickable entries instead of the one `Find` narrows to.
+    /// A provider overrides this with ONE request (its search endpoint) and
+    /// maps each row to a [`Media`] with an EMPTY episode table: nothing here
+    /// fetches a table, so a search stays one request per leg.
+    ///
+    /// The default keeps every single-answer provider working unchanged: the
+    /// `Find` answer as a one-row list.
+    fn find_all(&self, cancel: &Cancel, q: &Query) -> Result<Vec<Media>, Error> {
+        Ok(self.find(cancel, q)?.into_iter().collect())
+    }
 }
 
 /// `Logf`: Go's `Logf func(format string, args ...any)`, with the message
@@ -92,7 +127,7 @@ pub struct Options {
     pub dir: String,
     /// Per-request HTTP budget; zero means [`DEFAULT_HTTP_TIMEOUT`].
     pub timeout: Duration,
-    /// The provider set; `None` selects the built-in eleven. `Some(vec![])` is a
+    /// The provider set; `None` selects the built-in seven. `Some(vec![])` is a
     /// deliberately empty chain (every lookup is a definitive miss).
     pub sources: Option<Vec<Arc<dyn Source>>>,
     /// A sink for the resolver's diagnostics (`metadata: source ... error: ...`).
@@ -113,8 +148,9 @@ impl Default for Options {
     }
 }
 
-/// `makeDefaultSources`: the built-in keyless providers in their historical
-/// order, sharing one connection pool.
+/// `makeDefaultSources`: the built-in keyless providers in their ranking
+/// order, sharing one connection pool. Regular primaries (Cinemeta, TVmaze,
+/// IMDb) plus anime primaries (AniList, Tenrai, Kitsu, AnimeSchedule).
 fn make_default_sources(timeout: Duration) -> Vec<Arc<dyn Source>> {
     let client = HttpClient::new(timeout);
     vec![
@@ -135,35 +171,19 @@ fn make_default_sources(timeout: Duration) -> Vec<Arc<dyn Source>> {
             "https://v3-cinemeta.strem.io",
             client.clone(),
         )),
-        // Wikipedia sends its own User-Agent, so it carries its own agent with
-        // the same timeout instead of the shared client.
-        Arc::new(WikipediaSource::new(
-            "https://en.wikipedia.org",
-            WikiClient::new(timeout),
-        )),
-        Arc::new(JustWatchSource::new(
-            "https://apis.justwatch.com",
+        Arc::new(AnimescheduleSource::new(
+            "https://animeschedule.net",
             client.clone(),
         )),
-        Arc::new(EpisodateSource::new(
-            "https://www.episodate.com",
-            client.clone(),
-        )),
-        Arc::new(BangumiSource::new("https://api.bgm.tv", client.clone())),
-        Arc::new(LivechartSource::new(
-            "https://www.livechart.me",
-            client.clone(),
-        )),
-        Arc::new(AnnSource::new(
-            "https://cdn.animenewsnetwork.com",
-            client.clone(),
+        Arc::new(ImdbSource::new(
+            "https://api.graphql.imdb.com",
+            ImdbClient::new(timeout),
         )),
     ]
 }
 
 /// `DefaultSources`: the built-in keyless providers (TVmaze, AniList, Tenrai,
-/// Kitsu, Cinemeta, Wikipedia, JustWatch, Episodate, Bangumi, LiveChart.me and
-/// ANN) in their historical order.
+/// Kitsu, Cinemeta, AnimeSchedule and IMDb) in their ranking order.
 pub fn default_sources() -> Vec<Arc<dyn Source>> {
     make_default_sources(Duration::ZERO)
 }
@@ -289,20 +309,27 @@ impl Resolver {
 
     /// `orderedSources`: ranks providers per Kind; unknown names keep their
     /// relative order at the end so injected test sources are still tried.
+    /// Series: TVmaze, AniList, Tenrai, Kitsu, AnimeSchedule, Cinemeta, IMDb.
+    /// Movie: Cinemeta, AniList, Tenrai, Kitsu, AnimeSchedule, IMDb.
     pub fn ordered_sources(&self, q: &Query) -> Vec<Arc<dyn Source>> {
         let pref: &[(&str, i32)] = if q.kind == Kind::MOVIE {
-            &[("cinemeta", 0), ("wikipedia", 1), ("justwatch", 2)]
+            &[
+                ("cinemeta", 0),
+                ("anilist", 1),
+                ("tenrai", 2),
+                ("kitsu", 3),
+                ("animeschedule", 4),
+                ("imdb", 5),
+            ]
         } else {
             &[
                 ("tvmaze", 0),
                 ("anilist", 1),
                 ("tenrai", 2),
                 ("kitsu", 3),
-                ("cinemeta", 4),
-                ("episodate", 5),
-                ("bangumi", 6),
-                ("livechart", 7),
-                ("ann", 8),
+                ("animeschedule", 4),
+                ("cinemeta", 5),
+                ("imdb", 6),
             ]
         };
         let mut out = self.inner.sources.clone();
@@ -561,12 +588,23 @@ impl Resolver {
             if let Some(reason) = reason {
                 // A cancelled fetch persists nothing; restore the negative
                 // cleared above so a failed forced refresh leaves prior
-                // suppression intact. A total-budget expiry lands here as
-                // `DeadlineExceeded`: bounded and transient, never a miss.
+                // suppression intact.
                 if force && let Some(prev) = prev_neg {
                     state.neg.insert(key.clone(), prev);
                 }
-                return Err(Error::Cancelled(reason));
+                // The child scope carries BOTH the parent's cancellation and
+                // its own total-budget deadline: only a dead parent is a user
+                // cancel. A budget expiry is bounded and transient, so it is
+                // lookup-unavailable, never `Cancelled` (which callers book
+                // as not-found).
+                if cancel.err().is_some() {
+                    let parent = cancel.err().unwrap_or(reason);
+                    return Err(Error::Cancelled(parent));
+                }
+                return Err(Error::unavailable(format!(
+                    "metadata: lookup budget exceeded for {key:?} ({reason}): {}",
+                    crate::LOOKUP_UNAVAILABLE_MESSAGE
+                )));
             }
             if !chain.definitive {
                 // Transient provider error/timeout: not a confirmed not-found,
@@ -829,6 +867,7 @@ impl Resolver {
     /// app logo downstream); year never gates at all.
     fn fetch_chain(&self, cancel: &Cancel, q: &Query) -> Chain {
         let mut saw_error = false;
+        let mut saw_ok = false;
         let mut first_err: Option<Error> = None;
         let mut bare: Option<Media> = None;
         for source in self.ordered_sources(q) {
@@ -841,7 +880,10 @@ impl Resolver {
                     }
                     continue;
                 }
-                Ok(None) => continue,
+                Ok(None) => {
+                    saw_ok = true;
+                    continue;
+                }
                 Ok(Some(mut media)) => {
                     if media.source.is_empty() {
                         media.source = source.name().to_string();
@@ -860,6 +902,7 @@ impl Resolver {
                         if bare.is_none() {
                             bare = Some(media);
                         }
+                        saw_ok = true;
                         continue;
                     }
                     if match_episode(&media.episodes, q).is_some() {
@@ -878,24 +921,32 @@ impl Resolver {
                         if bare.is_none() {
                             bare = Some(media);
                         }
+                        saw_ok = true;
                         continue;
                     }
                     // The show matched but its Numbers lack the requested
                     // episode: fall through to the next source rather than
-                    // caching/returning a wrong (positional) title.
+                    // caching/returning a wrong (positional) title. The leg
+                    // did answer, so a lone error elsewhere must not turn
+                    // this genuine not-found into Unavailable.
                     self.log(&format!(
                         "metadata: source {} lacks episode {} for {:?}, trying next",
                         source.name(),
                         q.episode,
                         q.title
                     ));
+                    saw_ok = true;
                 }
             }
         }
         if let Some(media) = bare {
             return Chain::found(media);
         }
-        if saw_error {
+        // One erroring leg never turns a genuine not-found into Unavailable:
+        // only a chain with NO definitive leg outcome (every leg errored) is
+        // transient. A single failed leg alongside real misses still stores
+        // the definitive miss.
+        if saw_error && !saw_ok {
             return Chain::transient(first_err);
         }
         if let Some(reason) = cancel.err() {

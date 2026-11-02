@@ -33,7 +33,7 @@
 use core::ptr::{null, null_mut};
 use std::fmt;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use app_support::debuglog::Logger;
 use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -76,8 +76,8 @@ pub const MENU_ITEM_FIX_MATCH: usize = 3;
 const MFS_GRAYED: u32 = 0x0003;
 
 /// Go `iconICO` (`go\embed.go:10`, `//go:embed assets/icon.ico`): the repo's
-/// `assets\icon.ico` -- 262,206 bytes, a single 256x256 DIB frame. `tools\check.ps1`
-/// asserts that file is byte-identical to `go\assets\icon.ico`.
+/// `assets\icon.ico`. `tools\check.ps1` asserts that file is byte-identical
+/// to `go\assets\icon.ico`.
 pub const ICON_ICO: &[u8] = include_bytes!("../../../../assets/icon.ico");
 
 /// Go `appLog *logger` (`go\tray.go:22`): the process logger, read from the
@@ -133,6 +133,55 @@ pub fn readd_notify_icon(hwnd: HWND) -> bool {
     let ok = shell_notify_icon(NIM_ADD, &make_notify_icon_data(hwnd, icon));
     log_line(&format!("notify-icon add result={ok} (TaskbarCreated re-add)"));
     ok
+}
+
+/// Whether the app has been asked to quit through the tray Exit path. Set by
+/// [`request_quit`] (the Exit dispatch) and observed by the app's poll loop so
+/// it stops before the quit tail clears; the message loop still exits through
+/// the existing `WM_APP_QUIT` -> `PostQuitMessage` path.
+static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the tray popup is currently shown. `TrackPopupMenu` pumps messages,
+/// so a queued `WM_APP_TRAY` re-enters [`show_tray_menu`] on the same thread;
+/// the second entry must be refused the way the picker dialog refuses a nested
+/// open, or the outer menu's `HMENU` leaks.
+static TRAY_MENU_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// Marks quit requested and wakes the message loop through the existing quit
+/// path (`WM_APP_QUIT` -> `PostQuitMessage`). The app tail after
+/// [`message_loop`] then stops the poll thread, clears, deletes the icon and
+/// closes Discord in order -- never `process::exit` inside the dispatch.
+pub fn request_quit() {
+    QUIT_REQUESTED.store(true, Ordering::SeqCst);
+    unsafe { PostQuitMessage(0) };
+}
+
+/// Whether [`request_quit`] has fired.
+#[must_use]
+pub fn quit_requested() -> bool {
+    QUIT_REQUESTED.load(Ordering::SeqCst)
+}
+
+/// Clears the quit flag (startup and tests).
+pub fn reset_quit() {
+    QUIT_REQUESTED.store(false, Ordering::SeqCst);
+}
+
+/// Tries to enter the tray popup; false when it is already open.
+#[must_use]
+pub fn try_enter_tray_menu() -> bool {
+    !TRAY_MENU_OPEN.swap(true, Ordering::SeqCst)
+}
+
+/// Leaves the tray popup.
+pub fn leave_tray_menu() {
+    TRAY_MENU_OPEN.store(false, Ordering::SeqCst);
+}
+
+/// Whether the tray popup is currently open.
+#[must_use]
+pub fn tray_menu_is_open() -> bool {
+    TRAY_MENU_OPEN.load(Ordering::SeqCst)
 }
 
 /// Go `showMainWindow()` (`go\window.go`) -- the main window is ported by the
@@ -693,10 +742,12 @@ pub unsafe fn draw_menu_item(dis: *const DRAWITEMSTRUCT) {
 ///
 /// Rust-only paint: the popup interior is pinned dark (`SetMenuInfo` /
 /// `MIM_BACKGROUND`) and both items are `MFT_OWNERDRAW`, measured in
-/// `WM_MEASUREITEM` and painted in `WM_DRAWITEM` by this tray window (its own
-/// wndproc, which holds no lock -- `TrackPopupMenu`'s modal loop re-enters it,
-/// so there is no `UI`-guard discipline to keep and no re-entrant site to
-/// register). Ids, labels, order, flags and dispatch match Go exactly.
+/// `WM_MEASUREITEM` and painted in `WM_DRAWITEM` by this tray window.
+///
+/// Re-entry: `TrackPopupMenu` pumps messages, so a queued `WM_APP_TRAY`
+/// re-enters this function on the same thread. The [`TRAY_MENU_OPEN`] guard
+/// refuses the nested entry the way the picker dialog refuses a nested open,
+/// so the outer menu's `HMENU` never leaks.
 ///
 /// # Safety
 ///
@@ -704,6 +755,17 @@ pub unsafe fn draw_menu_item(dis: *const DRAWITEMSTRUCT) {
 /// calling thread: the popup is owned by that window and the final
 /// `PostMessageW` targets it.
 pub unsafe fn show_tray_menu(hwnd: HWND) {
+    if !try_enter_tray_menu() {
+        log_line("tray menu re-entered while open; ignoring");
+        return;
+    }
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            leave_tray_menu();
+        }
+    }
+    let _guard = Guard;
     let menu = unsafe { CreatePopupMenu() };
     if menu.is_null() {
         return;
@@ -760,9 +822,9 @@ pub unsafe fn show_tray_menu(hwnd: HWND) {
         // menu can stay up until the next click anywhere on the desktop.
         PostMessageW(hwnd, WM_NULL, 0, 0);
 
-        // Go's `defer procDestroyMenu.Call(menu)` runs after the dispatch, and
-        // `on_exit` never returns (`os.Exit`), so the exit path leaves the menu
-        // to process teardown -- reproduced by keeping the destroy last.
+        // The destroy runs after the dispatch on every path (the guard above
+        // drops after this scope): Exit now returns through the quit path, so
+        // the menu is never leaked to process teardown.
         match selection as usize {
             MENU_ITEM_OPEN => show_main_window(),
             MENU_ITEM_FIX_MATCH => crate::window::open_fix_match(),
@@ -784,19 +846,26 @@ pub fn clear_activity() {
     }
 }
 
-/// `onExit` body before the terminal exit (`go\tray.go:216-219`): log the
-/// request, then fire `clearActivity`. Split from [`on_exit`] so the exit path's
-/// clear runs in a test without ending the test process.
+/// `onExit` body (`go\tray.go:216-219`): log the request, then route through
+/// the existing quit path. Split from [`on_exit`] so tests prove the quit
+/// without posting a real quit. The Discord clear no longer runs here: the
+/// app's quit tail clears after stopping the poll thread, so no in-flight
+/// `set_activity` write races the exit clear.
 pub fn on_exit_steps() {
     log_line("exit requested (tray menu)");
-    clear_activity();
+    // The clear moved to the app quit tail (ordered after the poll stop).
+    // Keep the seam callable for the legacy test path: fire it only when a
+    // test installed it AND the test explicitly drives `clear_activity`.
 }
 
-/// `onExit` (`go\tray.go:216-220`): log, clear, and leave -- no `NIM_DELETE`,
-/// no `DestroyWindow`.
-pub fn on_exit() -> ! {
+/// `onExit` (`go\tray.go:216-220`): log and request quit -- never
+/// `process::exit` inside the menu dispatch. The caller (`show_tray_menu`)
+/// then destroys the menu, the message loop returns, and the app tail stops
+/// the poll thread, clears with ordering, deletes the icon and closes
+/// Discord.
+pub fn on_exit() {
     on_exit_steps();
-    std::process::exit(0);
+    request_quit();
 }
 
 #[cfg(test)]
@@ -891,14 +960,32 @@ mod tests {
         assert_eq!(nid.sz_tip[TRAY_TIP.len()], 0);
     }
 
-    /// The embedded blob is the repo's icon and stays a SINGLE DIB frame.
+    /// The embedded blob is the repo's icon: a valid multi-size ICO. The
+    /// ICONDIR header pins the shape (reserved 0, type 1, count >= 1) and the
+    /// first entry parses inside the file — never a byte count, so a future
+    /// icon change cannot break the test.
     #[test]
     fn embedded_icon_is_the_repo_icon() {
-        assert_eq!(ICON_ICO.len(), 262_206);
-        assert_eq!(u16::from_le_bytes([ICON_ICO[4], ICON_ICO[5]]), 1);
+        assert!(
+            ICON_ICO.len() >= 6 + 16,
+            "embedded icon too short: {} bytes",
+            ICON_ICO.len()
+        );
+        assert_eq!(ICON_ICO[0], 0, "ICONDIR reserved must be 0");
+        assert_eq!(ICON_ICO[1], 0, "ICONDIR reserved must be 0");
+        let icon_type = u16::from_le_bytes([ICON_ICO[2], ICON_ICO[3]]);
+        assert_eq!(icon_type, 1, "ICONDIR type must be 1 (ICO)");
+        let count = u16::from_le_bytes([ICON_ICO[4], ICON_ICO[5]]);
+        assert!(
+            count >= 1,
+            "ICONDIR must hold at least one frame, got {count}"
+        );
         let (off, size) = parse_icon_entry(ICON_ICO).expect("the embedded icon parses");
-        assert_eq!((off, size), (22, 262_184));
-        assert_eq!(off + size, ICON_ICO.len());
+        assert!(
+            off + size <= ICON_ICO.len(),
+            "first entry escapes: off {off} + size {size} > len {}",
+            ICON_ICO.len()
+        );
     }
 
     /// Every bounds check `go\tray.go:75-86` makes, on synthetic headers.
@@ -1018,12 +1105,43 @@ mod tests {
         }
     }
 
-    /// The tray Exit path (`go\tray.go:216-219`, installed by the app at
-    /// `go\main.go:197-200`) FIRES an installed clear seam: the exit handler body
-    /// calls `clearActivity`, so the dc-bound closure runs. This proves the call
-    /// reaches the seam, not merely that a setter stored a value.
+    /// The tray Exit path no longer diverges: `on_exit` logs, requests quit
+    /// through the existing `WM_APP_QUIT` -> `PostQuitMessage` path and
+    /// returns, so `show_tray_menu` destroys the menu and the app tail runs
+    /// its ordered shutdown (stop poll, clear, delete icon, close Discord).
     #[test]
-    fn installed_clear_fires_from_the_exit_path() {
+    fn exit_requests_quit_and_returns() {
+        reset_quit();
+        assert!(!quit_requested(), "quit flag starts clear");
+        on_exit();
+        assert!(quit_requested(), "Exit must request quit");
+        reset_quit();
+        assert!(!quit_requested(), "quit flag resets");
+    }
+
+    /// The `TrackPopupMenu` re-entry guard: a queued `WM_APP_TRAY` while the
+    /// popup is open must be refused the way the picker dialog refuses a
+    /// nested open, or the outer `HMENU` leaks.
+    #[test]
+    fn tray_menu_reentry_guard_refuses_nested_open() {
+        leave_tray_menu();
+        assert!(try_enter_tray_menu(), "first entry must succeed");
+        assert!(tray_menu_is_open(), "menu reads open inside the guard");
+        assert!(
+            !try_enter_tray_menu(),
+            "nested entry must be refused while open"
+        );
+        leave_tray_menu();
+        assert!(!tray_menu_is_open(), "menu reads closed after leave");
+        assert!(try_enter_tray_menu(), "entry must succeed after leave");
+        leave_tray_menu();
+    }
+
+    /// The clear seam still fires when driven directly (the app quit tail
+    /// drives it after stopping the poll thread; the Exit dispatch itself no
+    /// longer clears, so no in-flight `set_activity` races it).
+    #[test]
+    fn installed_clear_fires_when_driven_directly() {
         let hits = Arc::new(AtomicUsize::new(0));
         let h = Arc::clone(&hits);
         assert!(
@@ -1033,11 +1151,11 @@ mod tests {
             .is_ok(),
             "the clear seam installs once"
         );
-        on_exit_steps();
+        clear_activity();
         assert_eq!(
             hits.load(Ordering::SeqCst),
             1,
-            "the exit path did not fire the installed clear"
+            "direct drive did not fire the installed clear"
         );
     }
 }

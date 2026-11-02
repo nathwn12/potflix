@@ -13,7 +13,8 @@ use crate::cache::{
 };
 use crate::resolver::{match_episode, Options, Resolver, Source, NEGATIVE_BACKOFF};
 use crate::testsupport::{
-    correct_media, mislabeled_media, resolver_with, series_media, FakeSource, TempDir,
+    FakeServer, Request, Response, correct_media, mislabeled_media, resolver_with, series_media,
+    FakeSource, TempDir,
 };
 use crate::timefmt::{format_rfc3339, now_rfc3339};
 
@@ -1175,8 +1176,8 @@ fn lookup_now_total_budget_bounds_a_total_miss() {
 /// LIVE chain (DoD 3): the REAL provider chain over the REAL network for
 /// `Dragon Ball Super` (year 2026, S1E1) must settle on the 2026 Beerus
 /// entity, never the 2015 series. The series walk (`ordered_sources`:
-/// tvmaze, anilist, tenrai, kitsu, cinemeta, episodate, bangumi, livechart,
-/// ann) stops at the first COMPLETE answer -- a number-exact episode match
+/// tvmaze, anilist, tenrai, kitsu, cinemeta) stops at the first COMPLETE
+/// answer -- a number-exact episode match
 /// carrying a synopsis -- so whichever leg answers Beerus-2026-complete
 /// first wins; this asserts the settled record, not the leg, and prints the
 /// winner. Real network, real input; a mock proves nothing here. Ignored by
@@ -1261,4 +1262,97 @@ fn chain_live_dbs_selects_beerus_2026_not_the_2015_series() {
         ),
         _ => {}
     }
+}
+
+/// Defect 2: one erroring leg must not turn a genuine not-found into
+/// Unavailable. A chain with a real miss alongside a single failure still
+/// stores the definitive miss and returns `Ok(miss)`, not the sentinel.
+#[test]
+fn single_failed_leg_keeps_definitive_miss() {
+    let dir = TempDir::new();
+    let d = dir.path();
+    let q = Query {
+        kind: Kind::SERIES,
+        title: "No Such Show Ever".to_string(),
+        season: 1,
+        episode: 1,
+        ..Query::default()
+    };
+    let boom = FakeSource::with_error("fake-first", "boom");
+    let miss = FakeSource::new("fake-second");
+    let resolver = resolver_with(&d, vec![boom.shared(), miss.shared()]);
+    let res = resolver
+        .lookup_now(&Cancel::background(), &q)
+        .expect("one failure beside a miss must still be a miss, got Err");
+    assert!(!res.found, "resolution = {res:?}, want a definitive miss");
+    let key = cache_key(&q);
+    assert!(
+        crate::cache::cache_live(&d, &key),
+        "a genuine not-found must still persist its negative"
+    );
+}
+
+/// Defect 3: the resolving total-budget expiry is lookup-unavailable, never
+/// `Cancelled`: indistinguishable-from-user-cancel is booked as not-found.
+#[test]
+fn budget_expiry_is_unavailable() {
+    let dir = TempDir::new();
+    let resolver = Resolver::new(Options {
+        dir: dir.path(),
+        timeout: Duration::from_millis(50),
+        sources: Some(vec![
+            FakeSource {
+                delay: Duration::from_secs(30),
+                ..FakeSource::new("slow-first")
+            }
+            .shared(),
+            FakeSource {
+                delay: Duration::from_secs(30),
+                ..FakeSource::new("slow-second")
+            }
+            .shared(),
+        ]),
+        ..Options::default()
+    });
+    let q = show_query(1, 2);
+    let err = resolver
+        .lookup_now(&Cancel::background(), &q)
+        .expect_err("a budget-expired lookup must be Err, got Ok");
+    assert!(
+        err.is_lookup_unavailable(),
+        "budget expiry must be unavailable, got {err:?}"
+    );
+}
+
+/// Defect 4 is REVERTED (2026-11-03, final stretch): the per-request budget
+/// change in `metadata-http/src/http.rs` broke seven contract tests in the
+/// `metadata-http` integration suite, so the file was restored to HEAD and
+/// this pin is ignored until that change gets its own pass.
+#[ignore = "http.rs retry-budget change reverted; contract tests win"]
+#[test]
+fn retry_after_capped_by_request_budget() {
+    use crate::testsupport::http_client;
+    use metadata_http::http::HttpClient;
+
+    let server = FakeServer::start(|_req: &Request| {
+        Response::error(429, "slow down").with_header("Retry-After", "3600")
+    });
+    let client = HttpClient::new(Duration::from_secs(2));
+    let cancel = Cancel::background();
+    let start = Instant::now();
+    let response = client
+        .get(&cancel, &server.url())
+        .expect("capped 429 fetch must hand back a response");
+    let elapsed = start.elapsed();
+    assert_eq!(
+        response.status().as_u16(),
+        429,
+        "the last 429 is handed back, never retried past budget"
+    );
+    metadata_http::http::drain_and_close(response);
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "one GET with Retry-After: 3600 must stay in budget, took {elapsed:?}"
+    );
+    let _ = http_client();
 }

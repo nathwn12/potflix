@@ -403,6 +403,10 @@ impl crate::resolver::Source for CinemetaSource {
         "cinemeta"
     }
 
+    fn path(&self) -> crate::resolver::SearchPath {
+        crate::resolver::SearchPath::Regular
+    }
+
     /// `Find`: movies via `/catalog/movie`, series via `/catalog/series`. An
     /// `UNKNOWN` query tries series first, then movie (a series answer can
     /// only match when the query carries an episode number).
@@ -420,5 +424,60 @@ impl crate::resolver::Source for CinemetaSource {
             return Ok(Some(media));
         }
         self.find_movie(cancel, q)
+    }
+
+    /// The manual search's rows: ONE `/catalog/{movie|series}/top/search=`
+    /// request, each catalog row as its own pickable entry (no `/meta` fetch,
+    /// so the poster and synopsis ride empty here and `Find` carries them).
+    /// The catalog the row came from decides the kind. An `UNKNOWN` want
+    /// searches the series catalog: the search legs only ever pass
+    /// [`Kind::SERIES`] or [`Kind::MOVIE`].
+    fn find_all(&self, cancel: &Cancel, q: &Query) -> Result<Vec<Media>, Error> {
+        if q.title.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (catalog, kind) = if q.kind == Kind::MOVIE {
+            ("movie", Kind::MOVIE)
+        } else {
+            ("series", Kind::SERIES)
+        };
+        let mut out: Vec<Media> = Vec::new();
+        for meta in self.catalog(cancel, q, catalog)? {
+            let cand = ShowCand {
+                name: meta.name.clone(),
+                weight: 0,
+                episode_count: 0,
+                aliases: Vec::new(),
+            };
+            // The same floor `Find` applies: a fuzzy row never becomes a pick.
+            if pick_best_show(&q.title, std::slice::from_ref(&cand)).is_none() {
+                continue;
+            }
+            out.push(catalog_media(&meta, kind));
+            if out.len() == crate::resolver::FIND_ALL_LIMIT {
+                break;
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The candidate-ready [`Media`] for one catalog row: identity, year and the
+/// IMDb page, with no poster, synopsis or episode table (those live behind the
+/// `/meta` request `Find` makes).
+fn catalog_media(meta: &CinemetaMeta, kind: Kind) -> Media {
+    let id = meta.id.trim();
+    let movie = kind == Kind::MOVIE;
+    Media {
+        source: "cinemeta".to_string(),
+        source_id: id.to_string(),
+        kind,
+        title: meta.name.trim().to_string(),
+        year: release_year(&meta.release_info),
+        show_url: if movie { String::new() } else { imdb_url(id) },
+        movie_url: if movie { imdb_url(id) } else { String::new() },
+        episodes: Vec::new(),
+        fetched_at: crate::timefmt::now_rfc3339(),
+        ..Media::default()
     }
 }

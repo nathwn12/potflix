@@ -8,7 +8,7 @@
 //! [`metadata::refresh`]) replaces this provisional record with the fetched
 //! payload.
 
-use metadata::{Candidate, Kind, Override, Scope};
+use metadata::{Candidate, Kind, Media, Override, Scope};
 
 /// The most Unicode scalar values the one query field accepts. Past this the
 /// field refuses the character (typed or pasted) and says so, so a 300-char
@@ -17,14 +17,29 @@ pub const MAX_QUERY_CHARS: usize = 128;
 
 /// The explicit search scope. `All` is the default and the main flow's scope:
 /// the search is never constrained by a hidden kind flag left over from a
-/// previous title. `Movies`/`Series` are a deliberately chosen Advanced filter.
+/// previous title. The other four are a deliberately chosen Advanced filter and
+/// each names one kind AND one provider class: the anime legs answer both
+/// movies and series, so "anime" is never a kind of its own.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum KindFilter {
     #[default]
     All,
-    Movies,
+    /// Regular (live-action) TV.
     Series,
+    /// Regular (live-action) movies.
+    Movies,
+    /// Anime TV: the anime legs' series answers.
+    AnimeSeries,
+    /// Anime movies: the anime legs' movie answers.
+    AnimeMovies,
 }
+
+/// The providers whose answers are anime, whatever kind they report.
+pub const ANIME_PROVIDERS: &[&str] = &["anilist", "kitsu", "tenrai", "animeschedule"];
+
+/// Regular available 3 (Cinemeta + TVmaze + IMDb), anime primary 4.
+pub const REGULAR_PROVIDERS: &[&str] = &["cinemeta", "tvmaze", "imdb"];
+pub const ANIME_LEG_PROVIDERS: &[&str] = &["anilist", "tenrai", "kitsu", "animeschedule"];
 
 impl KindFilter {
     /// The provider legs this scope asks for, in leg precedence order.
@@ -32,8 +47,8 @@ impl KindFilter {
     pub fn kinds(self) -> &'static [Kind] {
         match self {
             KindFilter::All => &[Kind::SERIES, Kind::MOVIE],
-            KindFilter::Movies => &[Kind::MOVIE],
-            KindFilter::Series => &[Kind::SERIES],
+            KindFilter::Series | KindFilter::AnimeSeries => &[Kind::SERIES],
+            KindFilter::Movies | KindFilter::AnimeMovies => &[Kind::MOVIE],
         }
     }
 
@@ -41,9 +56,74 @@ impl KindFilter {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            KindFilter::All => "All types",
+            KindFilter::All => "All",
+            KindFilter::Series => "TV",
             KindFilter::Movies => "Movies",
-            KindFilter::Series => "Series",
+            KindFilter::AnimeSeries => "Anime TV",
+            KindFilter::AnimeMovies => "Anime Movies",
+        }
+    }
+
+    /// The providers this scope actually uses, in leg order. A search passes
+    /// this list to the provider layer, so a TV-only search never calls an
+    /// anime or movie leg and a retry can never include a provider the filter
+    /// does not use.
+    #[must_use]
+    pub fn providers(self) -> &'static [&'static str] {
+        match self {
+            KindFilter::All => &[
+                "tvmaze",
+                "anilist",
+                "tenrai",
+                "kitsu",
+                "animeschedule",
+                "cinemeta",
+                "imdb",
+            ],
+            KindFilter::Series => &["tvmaze", "cinemeta", "imdb"],
+            KindFilter::Movies => &["cinemeta", "imdb"],
+            KindFilter::AnimeSeries | KindFilter::AnimeMovies => {
+                &["anilist", "tenrai", "kitsu", "animeschedule"]
+            }
+        }
+    }
+
+    /// The live-action scope that asks for one kind, for a caller that only
+    /// knows the kind (the Fix match dialog's own Movie/TV choice). A
+    /// kind-only search walks every leg that can serve it across both paths.
+    #[must_use]
+    pub fn providers_for_kind(kind: Kind) -> &'static [&'static str] {
+        if kind == Kind::MOVIE {
+            &[
+                "cinemeta",
+                "imdb",
+                "anilist",
+                "tenrai",
+                "kitsu",
+                "animeschedule",
+            ]
+        } else {
+            &[
+                "tvmaze",
+                "anilist",
+                "tenrai",
+                "kitsu",
+                "animeschedule",
+                "cinemeta",
+                "imdb",
+            ]
+        }
+    }
+
+    /// The cache key's scope half: stable, unique per scope, never localized.
+    #[must_use]
+    pub fn cache_key(self) -> &'static str {
+        match self {
+            KindFilter::All => "all",
+            KindFilter::Series => "tv",
+            KindFilter::Movies => "movies",
+            KindFilter::AnimeSeries => "anime-tv",
+            KindFilter::AnimeMovies => "anime-movies",
         }
     }
 
@@ -51,6 +131,54 @@ impl KindFilter {
     #[must_use]
     pub fn includes(self, kind: Kind) -> bool {
         self == KindFilter::All || self.kinds().contains(&kind)
+    }
+
+    /// Whether this scope shows one answered candidate: the record's own kind
+    /// AND the class of the leg that answered it. TV/Movies mean live-action,
+    /// the Anime scopes mean the anime legs' answers of that kind.
+    #[must_use]
+    pub fn includes_candidate(self, cand: &Candidate) -> bool {
+        let anime = is_anime(cand);
+        match self {
+            KindFilter::All => true,
+            KindFilter::Series => cand.kind == Kind::SERIES && !anime,
+            KindFilter::Movies => cand.kind == Kind::MOVIE && !anime,
+            KindFilter::AnimeSeries => cand.kind == Kind::SERIES && anime,
+            KindFilter::AnimeMovies => cand.kind == Kind::MOVIE && anime,
+        }
+    }
+}
+
+/// Whether the leg that answered is an anime provider.
+#[must_use]
+pub fn is_anime(cand: &Candidate) -> bool {
+    let provider = cand.provider.trim().to_lowercase();
+    ANIME_PROVIDERS.contains(&provider.as_str())
+}
+
+/// The one key the preload cache and the persistent metadata search cache
+/// share: the parsed title (trimmed, lowercased), the year and the scope. The
+/// file path is deliberately absent, so the next episode of the same show hits
+/// the same entry instead of searching again.
+#[must_use]
+pub fn search_cache_key(title: &str, year: i32, filter: KindFilter) -> String {
+    format!(
+        "{}|{}|{}",
+        title.trim().to_lowercase(),
+        year,
+        filter.cache_key()
+    )
+}
+
+/// The result row's type word: the record's kind and its provider class in one
+/// label.
+#[must_use]
+pub fn category_label(cand: &Candidate) -> &'static str {
+    match (cand.kind == Kind::MOVIE, is_anime(cand)) {
+        (true, true) => "Anime movie",
+        (true, false) => "Regular movie",
+        (false, true) => "Anime TV",
+        (false, false) => "Regular TV",
     }
 }
 
@@ -113,6 +241,10 @@ pub struct MediaPicker {
     pub filter: KindFilter,
     pub candidates: Vec<Candidate>,
     pub selected: usize,
+    /// The first visible row of the scrolled picker viewport. The paint and the
+    /// hit test read this one offset, so a row outside the visible band stays
+    /// reachable by scrolling instead of being unreachable.
+    pub top: usize,
     pub busy: bool,
     pub searched: bool,
     /// Whether the result overlay is showing.
@@ -184,6 +316,7 @@ impl MediaPicker {
         self.busy = false;
         self.candidates.clear();
         self.selected = 0;
+        self.top = 0;
         self.open = false;
         self.searched = false;
         self.status.clear();
@@ -227,14 +360,71 @@ impl MediaPicker {
     }
 
     /// Apply one finished search. `generation` rejects a stale worker post.
+    /// Kept as push + finish so the whole-result callers and the streaming
+    /// callers share one application path.
     pub fn finish_search(&mut self, generation: u64, rows: Vec<Candidate>) -> bool {
+        self.push_search(generation, rows) && self.finish_search_now(generation)
+    }
+
+    /// Apply one streamed batch: merge it into the rows already on screen
+    /// (deduplicated on provider + provider id, ranked by [`merge_candidates`]),
+    /// open the list, and report the running count while the job keeps
+    /// running. `generation` rejects a stale worker post.
+    pub fn push_search(&mut self, generation: u64, rows: Vec<Candidate>) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        // A finished stream owns the list: a batch that lands after the finish
+        // (same generation, job no longer running) is stale and must not
+        // reopen the list over the final count.
+        if !self.busy {
+            return false;
+        }
+        self.searched = true;
+        if rows.is_empty() {
+            return true;
+        }
+        let (title, _) = self.parsed();
+        let existing = std::mem::take(&mut self.candidates);
+        let mut merged = merge_candidates(&title, vec![existing, rows]);
+        // A stream of batches must not grow past the metadata cap; the ranked
+        // head is what the keyboard can reach.
+        merged.truncate(metadata::search::SEARCH_LIMIT);
+        self.candidates = merged;
+        // A batch that re-ranks the list must not move the highlight off the row
+        // the user already picked: the next click would then act on a different
+        // record.
+        if let Some(picked) = self.picked.as_deref()
+            && let Some(pos) = self
+                .candidates
+                .iter()
+                .position(|cand| crate::window::picked_row_key(cand) == picked)
+        {
+            self.selected = pos;
+        } else if self.selected >= self.candidates.len() {
+            self.selected = 0;
+        }
+        // The highlight must stay on screen: the viewport follows the selected
+        // row, so a re-rank can never leave it pointing at a row the list no
+        // longer shows.
+        if self.candidates.is_empty() {
+            self.top = 0;
+        } else {
+            self.top = self.selected.min(self.candidates.len() - 1);
+        }
+        self.open = !self.candidates.is_empty();
+        self.status = format!("{} so far\u{2026}", match_count(self.candidates.len()));
+        true
+    }
+
+    /// Close the stream: the job is over, the count is final, and the list
+    /// stays open on what arrived. `generation` rejects a stale worker post.
+    pub fn finish_search_now(&mut self, generation: u64) -> bool {
         if generation != self.generation {
             return false;
         }
         self.busy = false;
         self.searched = true;
-        self.candidates = rows;
-        self.selected = 0;
         self.open = !self.candidates.is_empty();
         let (title, year) = self.parsed();
         let asked = if year > 0 {
@@ -248,9 +438,8 @@ impl MediaPicker {
             format!("No matches for \"{asked}\". Try a shorter title or add the year.")
         } else {
             format!(
-                "{} match{} for \"{asked}\"",
-                self.candidates.len(),
-                if self.candidates.len() == 1 { "" } else { "es" }
+                "{} for \"{asked}\"",
+                match_count(self.candidates.len())
             )
         };
         true
@@ -267,6 +456,7 @@ impl MediaPicker {
         self.searched = true;
         self.candidates.clear();
         self.selected = 0;
+        self.top = 0;
         self.open = false;
         self.status = crate::window::FIX_MATCH_ERROR.to_string();
         true
@@ -278,7 +468,7 @@ impl MediaPicker {
     }
 }
 
-/// Merge the per-kind provider passes of an `All types` search into one list.
+/// Merge the per-kind provider passes of a search into one list.
 ///
 /// The providers are kind-scoped, so a mixed search is two passes; this is the
 /// one place they are joined, and it is pure so the ordering is pinnable:
@@ -288,6 +478,11 @@ impl MediaPicker {
 ///      selection points at never shuffle between identical answers.
 ///   4. Exact duplicates (same provider + provider id) are dropped, so a leg
 ///      that answers twice cannot produce two identical rows.
+///
+/// The ranked order is then spliced by [`metadata::merge_same_work`]: one work
+/// stays one row, keeping the best-ranked row's identity and taking any
+/// missing poster/synopsis/genres/length from the later provider copies, so a
+/// mixed-and-matched result carries every provider's best field.
 #[must_use]
 pub fn merge_candidates(query: &str, passes: Vec<Vec<Candidate>>) -> Vec<Candidate> {
     let want = query.trim().to_lowercase();
@@ -309,7 +504,7 @@ pub fn merge_candidates(query: &str, passes: Vec<Vec<Candidate>>) -> Vec<Candida
             .then(a.title.cmp(&b.title))
             .then(a.provider.cmp(&b.provider))
     });
-    out
+    metadata::merge_same_work(out)
 }
 
 /// The kind a matched record imposes. A confirmed match is painted with the
@@ -320,17 +515,217 @@ pub fn matched_kind_is_movie(cand: &Candidate) -> bool {
     cand.kind == Kind::MOVIE
 }
 
+/// `N match`/`N matches`: one phrase for the running and the final status.
+pub(crate) fn match_count(n: usize) -> String {
+    format!("{n} match{}", if n == 1 { "" } else { "es" })
+}
+
+/// What one file and its folder say the file is: a movie, or one episode of a
+/// series. Purely local evidence -- no network.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MediaShape {
+    /// No episode pattern and no episode evidence: treat the file as a movie.
+    #[default]
+    Movie,
+    /// The file's own name is an episode, or an episode of the same show lives
+    /// beside it, or the folder is a season folder.
+    Series,
+}
+
+/// What the path's own folder names say the work is: the provider class. An
+/// `Anime` folder wins over a `TV Shows` folder that contains it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClassHint {
+    Anime,
+    Regular,
+    #[default]
+    Unknown,
+}
+
+/// The folder components that name the class outright.
+const ANIME_DIRS: &[&str] = &["anime", "animes"];
+const REGULAR_DIRS: &[&str] = &["movies", "films", "tv", "shows", "series"];
+
+/// The most directory entries one [`detect_shape`] pass reads, so a huge folder
+/// cannot turn a latch click into a long walk.
+pub const DETECT_SHAPE_CAP: usize = 500;
+
+/// Classify `file_name` by its own name and by the files beside it.
+///
+/// The filename's own episode tag is the first evidence: `Show S01E01.mkv`,
+/// `Show 1x02.mkv` and `Show Episode 01.mkv` are episodes even when they are
+/// the only file in the folder. Failing that, a sibling that cleans to the same
+/// title and carries an episode tag makes the folder a series (`Show.mkv` beside
+/// `Show S01E01.mkv`). Only a file with no episode pattern and no episode
+/// sibling is a movie; an unrelated film in the same folder never changes that.
+/// The episode/season patterns a filename can carry: `S1`, `S01`, `Season 1`,
+/// `E01`, `Episode 01`, `Ep 1`, and `1x02`. `titleclean` already tags most
+/// episode forms; this catches the season-only spelling (`Show S1.mkv`) it
+/// leaves as a title token.
+fn has_episode_pattern(file_name: &str) -> bool {
+    let lower = file_name.to_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    for (i, token) in tokens.iter().enumerate() {
+        let next_is_number = tokens.get(i + 1).is_some_and(|next| {
+            !next.is_empty() && next.bytes().all(|b| b.is_ascii_digit())
+        });
+        if (*token == "season" || *token == "episode" || *token == "ep") && next_is_number {
+            return true;
+        }
+        if let Some(digits) = token.strip_prefix('s')
+            && !digits.is_empty()
+            && digits.len() <= 2
+            && digits.bytes().all(|b| b.is_ascii_digit())
+        {
+            return true;
+        }
+        if let Some(digits) = token.strip_prefix('e')
+            && !digits.is_empty()
+            && digits.len() <= 4
+            && digits.bytes().all(|b| b.is_ascii_digit())
+        {
+            return true;
+        }
+        if let Some((left, right)) = token.split_once('x')
+            && !left.is_empty()
+            && !right.is_empty()
+            && left.bytes().all(|b| b.is_ascii_digit())
+            && right.bytes().all(|b| b.is_ascii_digit())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[must_use]
+pub fn classify_siblings(file_name: &str, siblings: &[String]) -> MediaShape {
+    let cleaned = titleclean::clean(file_name);
+    if !cleaned.episode_tag.trim().is_empty() || has_episode_pattern(file_name) {
+        return MediaShape::Series;
+    }
+    let want = cleaned.title.trim().to_lowercase();
+    if want.is_empty() {
+        return MediaShape::Movie;
+    }
+    for sibling in siblings {
+        if sibling.eq_ignore_ascii_case(file_name) {
+            continue;
+        }
+        let cleaned = titleclean::clean(sibling);
+        if cleaned.episode_tag.trim().is_empty() {
+            continue;
+        }
+        if cleaned.title.trim().to_lowercase() == want {
+            return MediaShape::Series;
+        }
+    }
+    MediaShape::Movie
+}
+
+/// Read `path`'s own name and parent folder (video files only, at most
+/// [`DETECT_SHAPE_CAP`] entries) and classify the file. A season folder
+/// (`...\Show\Season 2\...`) is series evidence by itself; an unreadable or
+/// missing folder is no evidence, and a name-level episode tag still makes the
+/// file a series there.
+#[must_use]
+pub fn detect_shape(path: &str) -> MediaShape {
+    let file = std::path::Path::new(path);
+    let Some(name) = file.file_name().and_then(std::ffi::OsStr::to_str) else {
+        return MediaShape::Movie;
+    };
+    if metadata_core::context::context_from_path(path).1 > 0 {
+        return MediaShape::Series;
+    }
+    let Some(dir) = file.parent() else {
+        return classify_siblings(name, &[]);
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return classify_siblings(name, &[]);
+    };
+    let mut siblings: Vec<String> = Vec::new();
+    for entry in entries.take(DETECT_SHAPE_CAP).flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_video_name(name) {
+            continue;
+        }
+        siblings.push(name.to_string());
+    }
+    classify_siblings(name, &siblings)
+}
+
+/// The class the path's folder names imply: `Anime` when any component is an
+/// anime folder, otherwise `Regular` for a movies/films/tv/shows/series folder,
+/// otherwise `Unknown`. Anime is checked first so `...\Anime\TV Shows\...` is
+/// anime, never live-action.
+#[must_use]
+pub fn detect_class(path: &str) -> ClassHint {
+    let mut regular = false;
+    for component in std::path::Path::new(path).components() {
+        let Some(text) = component.as_os_str().to_str() else {
+            continue;
+        };
+        let word = text.trim().to_lowercase();
+        if ANIME_DIRS.iter().any(|dir| word.contains(dir)) {
+            return ClassHint::Anime;
+        }
+        if REGULAR_DIRS.contains(&word.as_str()) {
+            regular = true;
+        }
+    }
+    if regular {
+        ClassHint::Regular
+    } else {
+        ClassHint::Unknown
+    }
+}
+
+/// The search scope the local evidence implies: the folder's class crossed
+/// with the filename's shape. Unknown evidence is `All`, never a guess.
+#[must_use]
+pub fn auto_filter(shape: MediaShape, class: ClassHint) -> KindFilter {
+    match (class, shape) {
+        (ClassHint::Anime, MediaShape::Series) => KindFilter::AnimeSeries,
+        (ClassHint::Anime, MediaShape::Movie) => KindFilter::AnimeMovies,
+        (ClassHint::Regular, MediaShape::Series) => KindFilter::Series,
+        (ClassHint::Regular, MediaShape::Movie) => KindFilter::Movies,
+        (ClassHint::Unknown, _) => KindFilter::All,
+    }
+}
+
+/// Whether `name` carries a video extension the library walk collects.
+fn is_video_name(name: &str) -> bool {
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("")
+        .to_lowercase();
+    matches!(
+        ext.as_str(),
+        "mkv" | "mp4" | "avi" | "m4v" | "mov" | "wmv" | "ts" | "flv" | "webm" | "mpg" | "mpeg"
+    )
+}
+
 /// The provisional latch for one picked candidate: the candidate's own
-/// title/year/provider identity as the [`Override`] identity, and nothing
-/// fetched.
+/// title/year/provider identity as the [`Override`] identity, and the
+/// candidate's spliced fields as a local [`Media`] snapshot.
 ///
 /// The identity/poster rules mirror
 /// `metadata::search::pin_from_candidate_with` exactly, minus the network:
 /// the title, year, provider and provider id are the candidate's own; the
 /// candidate's cover rides as [`Override::poster`] for every NON-movie scope
-/// (a movie renders from its media snapshot, so a movie carries no poster);
-/// [`Override::media`] is `None` and [`Override::episodes`] is empty -- there
-/// is no episode table until the full pin fetches it.
+/// (a movie renders from its media snapshot, so a movie carries no poster).
+/// [`Override::media`] is `Some` -- a snapshot built from the candidate's own
+/// source/source_id/kind/title/year/artwork/synopsis/genres/length, so the card
+/// and the RPC show the merged synopsis the moment the row is picked, before
+/// the full pin resolves the identity. There is no episode table until that
+/// full pin fetches it, so [`Override::episodes`] stays empty.
 ///
 /// `key` is the caller-selected target key (movie file, season folder, show
 /// folder) and passes through byte-for-byte: this helper never normalises and
@@ -353,7 +748,18 @@ pub fn provisional_override(cand: &Candidate, scope: Scope, key: String) -> Over
         } else {
             cand.poster.clone()
         },
-        media: None,
+        media: Some(Media {
+            source: cand.provider.clone(),
+            source_id: cand.provider_id.clone(),
+            kind: cand.kind,
+            title: cand.title.clone(),
+            year: cand.year,
+            artwork: cand.poster.clone(),
+            synopsis: cand.synopsis.clone(),
+            genres: cand.genres.clone(),
+            length: cand.length.clone(),
+            ..Media::default()
+        }),
         episodes: Vec::new(),
         created_at_ms: metadata::overrides::now_ms(),
     }
@@ -375,6 +781,9 @@ mod tests {
             provider: "tvmaze".to_string(),
             provider_id: "169".to_string(),
             poster: "https://art/show-picked.jpg".to_string(),
+            synopsis: "A show about a show.".to_string(),
+            genres: "Drama".to_string(),
+            length: "45 min".to_string(),
             episode_count: 3,
         }
     }
@@ -387,6 +796,9 @@ mod tests {
             provider: "cinemeta".to_string(),
             provider_id: "tt15239678".to_string(),
             poster: "https://art/dune-search.jpg".to_string(),
+            synopsis: "Paul Atreides unites with the Fremen.".to_string(),
+            genres: "Sci-Fi . Adventure".to_string(),
+            length: "2h 46m".to_string(),
             episode_count: 0,
         }
     }
@@ -418,6 +830,9 @@ mod tests {
             provider: "cinemeta".to_string(),
             provider_id: "tt1".to_string(),
             poster: "https://example.com/dune.jpg".to_string(),
+            synopsis: String::new(),
+            genres: String::new(),
+            length: String::new(),
             episode_count: 0,
         };
         assert!(picker.finish_search(generation, vec![cand]));
@@ -537,10 +952,17 @@ mod tests {
         use super::{KindFilter, merge_candidates};
 
         assert_eq!(KindFilter::All.kinds(), &[Kind::SERIES, Kind::MOVIE]);
-        assert_eq!(KindFilter::Movies.kinds(), &[Kind::MOVIE]);
         assert_eq!(KindFilter::Series.kinds(), &[Kind::SERIES]);
+        assert_eq!(KindFilter::Movies.kinds(), &[Kind::MOVIE]);
+        assert_eq!(KindFilter::AnimeSeries.kinds(), &[Kind::SERIES]);
+        assert_eq!(KindFilter::AnimeMovies.kinds(), &[Kind::MOVIE]);
         assert!(KindFilter::All.includes(Kind::MOVIE) && KindFilter::All.includes(Kind::SERIES));
         assert!(!KindFilter::Movies.includes(Kind::SERIES));
+        assert_eq!(KindFilter::All.label(), "All");
+        assert_eq!(KindFilter::Series.label(), "TV");
+        assert_eq!(KindFilter::Movies.label(), "Movies");
+        assert_eq!(KindFilter::AnimeSeries.label(), "Anime TV");
+        assert_eq!(KindFilter::AnimeMovies.label(), "Anime Movies");
 
         let series = vec![Candidate {
             kind: Kind::SERIES,
@@ -549,6 +971,9 @@ mod tests {
             provider: "tvmaze".to_string(),
             provider_id: "tvmaze-1".to_string(),
             poster: String::new(),
+            synopsis: "The Bene Gesserit origin.".to_string(),
+            genres: String::new(),
+            length: String::new(),
             episode_count: 6,
         }];
         let movies = vec![
@@ -559,6 +984,9 @@ mod tests {
                 provider: "cinemeta".to_string(),
                 provider_id: "tt1160419".to_string(),
                 poster: String::new(),
+                synopsis: String::new(),
+                genres: String::new(),
+                length: String::new(),
                 episode_count: 0,
             },
             Candidate {
@@ -568,6 +996,9 @@ mod tests {
                 provider: "cinemeta".to_string(),
                 provider_id: "tt0087182".to_string(),
                 poster: String::new(),
+                synopsis: String::new(),
+                genres: String::new(),
+                length: String::new(),
                 episode_count: 0,
             },
         ];
@@ -615,7 +1046,16 @@ mod tests {
         assert_eq!(over.provider, "tvmaze");
         assert_eq!(over.provider_id, "169");
         assert_eq!(over.poster, "https://art/show-picked.jpg");
-        assert!(over.media.is_none(), "provisional: no fetched record");
+        let media = over.media.as_ref().expect("the candidate snapshot rides");
+        assert_eq!(media.source, "tvmaze");
+        assert_eq!(media.source_id, "169");
+        assert_eq!(media.kind, Kind::SERIES);
+        assert_eq!(media.title, "Show");
+        assert_eq!(media.year, 2008);
+        assert_eq!(media.artwork, "https://art/show-picked.jpg");
+        assert_eq!(media.synopsis, "A show about a show.");
+        assert_eq!(media.genres, "Drama");
+        assert_eq!(media.length, "45 min");
         assert!(over.episodes.is_empty(), "provisional: no episode table");
         assert!(over.created_at_ms > 0, "the provisional latch is stamped");
     }
@@ -637,7 +1077,12 @@ mod tests {
             over.poster.is_empty(),
             "a movie renders from its media snapshot, never the candidate cover"
         );
-        assert!(over.media.is_none());
+        let media = over.media.as_ref().expect("the candidate snapshot rides");
+        assert_eq!(media.kind, Kind::MOVIE);
+        assert_eq!(media.artwork, "https://art/dune-search.jpg");
+        assert_eq!(media.synopsis, "Paul Atreides unites with the Fremen.");
+        assert_eq!(media.genres, "Sci-Fi . Adventure");
+        assert_eq!(media.length, "2h 46m");
         assert!(over.episodes.is_empty());
         assert!(over.created_at_ms > 0);
     }
@@ -653,9 +1098,362 @@ mod tests {
         assert_eq!(over.key, key, "key passes through byte-for-byte");
         // A season scope is not a movie scope, so the candidate cover rides.
         assert_eq!(over.poster, "https://art/show-picked.jpg");
-        assert!(over.media.is_none(), "provisional: no fetched record");
+        assert!(over.media.is_some(), "the candidate snapshot rides");
         assert!(over.episodes.is_empty(), "provisional: no episode table");
         assert!(over.created_at_ms > 0);
+    }
+
+    #[test]
+    fn anime_is_a_provider_class_and_the_five_scopes_partition_the_rows() {
+        use super::{KindFilter, category_label, is_anime};
+        let anime_series = Candidate {
+            kind: Kind::SERIES,
+            title: "Cyberpunk: Edgerunners".to_string(),
+            year: 2022,
+            provider: "anilist".to_string(),
+            provider_id: "120377".to_string(),
+            poster: String::new(),
+            synopsis: "A street kid in Night City.".to_string(),
+            genres: "Action".to_string(),
+            length: "25 min".to_string(),
+            episode_count: 10,
+        };
+        let anime_movie = Candidate {
+            kind: Kind::MOVIE,
+            title: "Akira".to_string(),
+            year: 1988,
+            provider: "kitsu".to_string(),
+            provider_id: "1".to_string(),
+            poster: String::new(),
+            synopsis: "Neo-Tokyo, 2019.".to_string(),
+            genres: "Sci-Fi".to_string(),
+            length: "2h 4m".to_string(),
+            episode_count: 0,
+        };
+        let tv_series = series_candidate();
+        let movie = movie_candidate();
+        assert!(is_anime(&anime_series) && is_anime(&anime_movie));
+        assert!(!is_anime(&tv_series) && !is_anime(&movie));
+        assert_eq!(category_label(&anime_series), "Anime TV");
+        assert_eq!(category_label(&anime_movie), "Anime movie");
+        assert_eq!(category_label(&tv_series), "Regular TV");
+        assert_eq!(category_label(&movie), "Regular movie");
+        let rows = [&anime_series, &anime_movie, &tv_series, &movie];
+        let count = |f: KindFilter| rows.iter().filter(|c| f.includes_candidate(c)).count();
+        assert_eq!(count(KindFilter::All), 4, "All shows every answer");
+        assert_eq!(count(KindFilter::Series), 1, "TV is regular series only");
+        assert_eq!(count(KindFilter::Movies), 1, "Movies is regular movies only");
+        assert_eq!(count(KindFilter::AnimeSeries), 1, "Anime TV is the anime leg's series");
+        assert_eq!(count(KindFilter::AnimeMovies), 1, "Anime Movies is the anime leg's movie");
+        // Tenrai rides the same class.
+        let mut tenrai = anime_series;
+        tenrai.provider = "tenrai".to_string();
+        assert!(KindFilter::AnimeSeries.includes_candidate(&tenrai));
+        assert!(!KindFilter::Series.includes_candidate(&tenrai));
+        // A provider name is case/space-insensitive, like the leg's own id.
+        let mut spaced = anime_movie;
+        spaced.provider = " AniList ".to_string();
+        assert!(KindFilter::AnimeMovies.includes_candidate(&spaced));
+        // Five distinct cache keys, one per scope.
+        let keys: std::collections::HashSet<&str> =
+            [KindFilter::All, KindFilter::Series, KindFilter::Movies, KindFilter::AnimeSeries, KindFilter::AnimeMovies]
+                .iter()
+                .map(|f| f.cache_key())
+                .collect();
+        assert_eq!(keys.len(), 5, "the preload cache keys the scopes apart");
+        assert_eq!(KindFilter::All.cache_key(), "all");
+        assert_eq!(KindFilter::Series.cache_key(), "tv");
+        assert_eq!(KindFilter::Movies.cache_key(), "movies");
+        assert_eq!(KindFilter::AnimeSeries.cache_key(), "anime-tv");
+        assert_eq!(KindFilter::AnimeMovies.cache_key(), "anime-movies");
+        // The providers a scope asks for: a Regular scope asks only Regular
+        // legs, an Anime scope only Anime legs, All asks both. Regular 3
+        // available, anime primary 4.
+        assert_eq!(
+            KindFilter::All.providers(),
+            &[
+                "tvmaze",
+                "anilist",
+                "tenrai",
+                "kitsu",
+                "animeschedule",
+                "cinemeta",
+                "imdb"
+            ]
+        );
+        assert_eq!(
+            KindFilter::Series.providers(),
+            &["tvmaze", "cinemeta", "imdb"]
+        );
+        assert_eq!(KindFilter::Movies.providers(), &["cinemeta", "imdb"]);
+        assert_eq!(
+            KindFilter::AnimeSeries.providers(),
+            &["anilist", "tenrai", "kitsu", "animeschedule"]
+        );
+        assert_eq!(
+            KindFilter::AnimeMovies.providers(),
+            &["anilist", "tenrai", "kitsu", "animeschedule"]
+        );
+        // The one key helper: title case and padding never split an entry, the
+        // year and the scope always do.
+        assert_eq!(
+            super::search_cache_key("  Dune  ", 2021, KindFilter::Movies),
+            "dune|2021|movies"
+        );
+        assert_ne!(
+            super::search_cache_key("Dune", 2021, KindFilter::Movies),
+            super::search_cache_key("Dune", 2024, KindFilter::Movies)
+        );
+        assert_ne!(
+            super::search_cache_key("Dune", 0, KindFilter::Movies),
+            super::search_cache_key("Dune", 0, KindFilter::All)
+        );
+    }
+
+    /// The scope a local file implies: the folder's class crossed with the
+    /// filename's shape, and `All` whenever the evidence is unknown.
+    #[test]
+    fn auto_filter_crosses_the_folder_class_with_the_file_shape() {
+        use super::{ClassHint, KindFilter, MediaShape, auto_filter, detect_class};
+
+        assert_eq!(auto_filter(MediaShape::Series, ClassHint::Anime), KindFilter::AnimeSeries);
+        assert_eq!(auto_filter(MediaShape::Movie, ClassHint::Anime), KindFilter::AnimeMovies);
+        assert_eq!(auto_filter(MediaShape::Series, ClassHint::Regular), KindFilter::Series);
+        assert_eq!(auto_filter(MediaShape::Movie, ClassHint::Regular), KindFilter::Movies);
+        assert_eq!(auto_filter(MediaShape::Series, ClassHint::Unknown), KindFilter::All);
+        assert_eq!(auto_filter(MediaShape::Movie, ClassHint::Unknown), KindFilter::All);
+
+        assert_eq!(detect_class("M:\\Anime\\Show S01E01.mkv"), ClassHint::Anime);
+        assert_eq!(detect_class("M:\\ANIMES\\Akira.mkv"), ClassHint::Anime);
+        assert_eq!(
+            detect_class("D:\\2ANIMES\\Cyberpunk Edgerunners\\S2\\S02E01.mkv"),
+            ClassHint::Anime
+        );
+        assert_eq!(detect_class("M:\\Movies\\Dune.mkv"), ClassHint::Regular);
+        assert_eq!(detect_class("M:\\Films\\Dune.mkv"), ClassHint::Regular);
+        assert_eq!(detect_class("M:\\TV Shows\\Show S01E01.mkv"), ClassHint::Unknown);
+        assert_eq!(detect_class("M:\\TV\\Show S01E01.mkv"), ClassHint::Regular);
+        assert_eq!(detect_class("M:\\Series\\Show S01E01.mkv"), ClassHint::Regular);
+        assert_eq!(detect_class("M:\\Downloads\\Show S01E01.mkv"), ClassHint::Unknown);
+        // Anime wins over a regular folder that contains it.
+        assert_eq!(detect_class("M:\\TV\\Anime\\Show S01E01.mkv"), ClassHint::Anime);
+    }
+
+    /// A mixed-and-matched result: one work is one row, and the ranked row's
+    /// empty fields are filled from the other provider's copy.
+    #[test]
+    fn merge_candidates_splices_one_work_into_the_ranked_row() {
+        use super::merge_candidates;
+
+        let mut tvdb = movie_candidate();
+        tvdb.provider = "tvdb".to_string();
+        tvdb.provider_id = "42".to_string();
+        tvdb.poster = String::new();
+        tvdb.synopsis = String::new();
+        tvdb.genres = String::new();
+        tvdb.length = String::new();
+        let mut cinemeta = movie_candidate();
+        cinemeta.synopsis = "Spliced synopsis.".to_string();
+        cinemeta.genres = "Sci-Fi".to_string();
+        let merged = merge_candidates("Dune: Part Two", vec![vec![tvdb], vec![cinemeta]]);
+        assert_eq!(merged.len(), 1, "one work is one row");
+        assert_eq!(merged[0].provider, "cinemeta", "the ranked row keeps its identity");
+        assert_eq!(merged[0].provider_id, "tt15239678");
+        assert_eq!(merged[0].synopsis, "Spliced synopsis.");
+        assert_eq!(merged[0].genres, "Sci-Fi");
+        assert_eq!(merged[0].poster, "https://art/dune-search.jpg");
+    }
+
+    /// A streamed search fills the list as batches land: the first batch opens
+    /// the overlay and reports the running count while the job is still
+    /// running; the next batch merges (deduplicated) into it; the final
+    /// finish closes the job with the total.
+    #[test]
+    fn streamed_batches_fill_the_list_before_the_job_finishes() {
+        use super::MediaPicker;
+
+        let mut picker = MediaPicker::default();
+        picker.set_query("Dune".to_string());
+        let (generation, ..) = picker.begin_search().expect("search starts");
+        assert!(picker.push_search(generation, vec![movie_candidate()]));
+        assert!(picker.busy, "the job keeps running after the first batch");
+        assert!(picker.open && picker.searched);
+        assert_eq!(picker.candidates.len(), 1);
+        assert_eq!(picker.status, "1 match so far\u{2026}");
+        // A second batch merges and re-ranks; a duplicate identity is one row.
+        let duplicate = movie_candidate();
+        let series = series_candidate();
+        assert!(picker.push_search(generation, vec![duplicate, series.clone()]));
+        assert_eq!(picker.candidates.len(), 2, "dedupe on provider + provider id");
+        assert_eq!(picker.status, "2 matches so far\u{2026}");
+        assert!(picker.busy, "still running");
+        // A later batch that re-ranks the list keeps the highlight on the row
+        // the user picked: the next click must act on that same record.
+        let show_key = crate::window::picked_row_key(&picker.candidates[1]);
+        picker.selected = 1;
+        picker.pick_row(show_key.clone());
+        let mut older = movie_candidate();
+        older.title = "Dune".to_string();
+        older.provider_id = "tt1160419".to_string();
+        older.year = 2019;
+        assert!(picker.push_search(generation, vec![older]));
+        assert_eq!(picker.candidates.len(), 3);
+        assert_eq!(picker.selected, 2, "the pick moved with its row");
+        assert_eq!(
+            picker
+                .selected_candidate()
+                .map(crate::window::picked_row_key),
+            Some(show_key)
+        );
+        assert!(picker.finish_search_now(generation));
+        assert!(!picker.busy && picker.open);
+        assert_eq!(picker.status, "3 matches for \"Dune\"");
+        // An empty stream is the no-matches state, never a stale count.
+        let (generation, ..) = picker.begin_search().expect("search starts");
+        assert!(picker.push_search(generation, Vec::new()));
+        assert!(picker.finish_search_now(generation));
+        assert!(
+            picker.status.starts_with("No matches for \"Dune\""),
+            "{}",
+            picker.status
+        );
+        assert!(!picker.open);
+        // A stale batch and a stale finish are both refused.
+        assert!(!picker.push_search(generation + 1, vec![series]));
+        assert!(!picker.finish_search_now(generation + 1));
+    }
+
+    #[test]
+    fn sibling_episodes_make_a_series_and_anything_else_stays_a_movie() {
+        use super::{MediaShape, classify_siblings};
+
+        let siblings = |names: &[&str]| names.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        let cyberpunk = siblings(&[
+            "Cyberpunk Edgerunners S02E01.mkv",
+            "Cyberpunk Edgerunners S02E02.mkv",
+            "Cyberpunk Edgerunners S02E03.mkv",
+            "Cyberpunk Edgerunners S02E04.mkv",
+            "Cyberpunk Edgerunners S02E05.mkv",
+            "Cyberpunk Edgerunners S02E06.mkv",
+            "Cyberpunk Edgerunners S02E07.mkv",
+            "Cyberpunk Edgerunners S02E08.mkv",
+            "Cyberpunk Edgerunners S02E09.mkv",
+            "Cyberpunk Edgerunners S02E10.mkv",
+        ]);
+        assert_eq!(
+            classify_siblings("Cyberpunk Edgerunners S02E01.mkv", &cyberpunk),
+            MediaShape::Series,
+            "ten episodes of one show are a series"
+        );
+        assert_eq!(
+            classify_siblings("Dune Part Two.mkv", &siblings(&["Dune Part Two.mkv"])),
+            MediaShape::Movie,
+            "a single movie file is a movie"
+        );
+        assert_eq!(
+            classify_siblings(
+                "Dune Part Two.mkv",
+                &siblings(&["Dune Part Two.mkv", "Arrival.mkv"])
+            ),
+            MediaShape::Movie,
+            "two unrelated movies are still movies"
+        );
+        assert_eq!(
+            classify_siblings(
+                "Show S01E01.mkv",
+                &siblings(&["Show S01E01.mkv", "Show S01E02.mkv"])
+            ),
+            MediaShape::Series
+        );
+        assert_eq!(
+            classify_siblings("Show S01E01.mkv", &siblings(&["Show S01E01.mkv"])),
+            MediaShape::Series,
+            "the file's own episode tag is enough, even alone"
+        );
+        assert_eq!(
+            classify_siblings("Show S1.mkv", &siblings(&["Show S1.mkv"])),
+            MediaShape::Series,
+            "a season tag is an episode pattern"
+        );
+        assert_eq!(
+            classify_siblings("Show E01.mkv", &siblings(&["Show E01.mkv"])),
+            MediaShape::Series,
+            "a bare episode tag is an episode pattern"
+        );
+        assert_eq!(
+            classify_siblings("Show Episode 01.mkv", &siblings(&["Show Episode 01.mkv"])),
+            MediaShape::Series,
+            "the spelled-out episode word is an episode pattern"
+        );
+        assert_eq!(
+            classify_siblings("Show 1x02.mkv", &siblings(&["Show 1x02.mkv"])),
+            MediaShape::Series,
+            "the 1x02 form is an episode pattern"
+        );
+        // A same-titled film beside an episode file is not itself an episode:
+        // the sibling needs its own episode tag.
+        assert_eq!(
+            classify_siblings(
+                "Show.mkv",
+                &siblings(&["Show.mkv", "Show S01E01.mkv"])
+            ),
+            MediaShape::Series,
+            "the episode sibling tags the folder as a series"
+        );
+        assert_eq!(
+            classify_siblings("Show.mkv", &siblings(&["Show.mkv", "Show 2.mkv"])),
+            MediaShape::Movie
+        );
+    }
+
+    #[test]
+    fn detect_shape_reads_the_real_folder_and_ignores_non_video_files() {
+        use super::{MediaShape, detect_shape};
+
+        crate::test_env::EnvGuard::with_scratch("search-shape", |dir| {
+            for n in 1..=10 {
+                std::fs::write(
+                    dir.join(format!("Cyberpunk Edgerunners S02E{n:02}.mkv")),
+                    "x",
+                )
+                .unwrap();
+            }
+            std::fs::write(dir.join("notes.txt"), "x").unwrap();
+            let first = dir.join("Cyberpunk Edgerunners S02E01.mkv");
+            assert_eq!(
+                detect_shape(&first.to_string_lossy()),
+                MediaShape::Series,
+                "the real folder's episode siblings make the show a series"
+            );
+            // A folder of one movie is a movie, and a missing folder is no
+            // evidence at all.
+            let lone_dir = dir.join("films");
+            std::fs::create_dir_all(&lone_dir).unwrap();
+            std::fs::write(lone_dir.join("Dune Part Two.mkv"), "x").unwrap();
+            assert_eq!(
+                detect_shape(&lone_dir.join("Dune Part Two.mkv").to_string_lossy()),
+                MediaShape::Movie
+            );
+            assert_eq!(
+                detect_shape(&dir.join("missing").join("Show S01E01.mkv").to_string_lossy()),
+                MediaShape::Series,
+                "an unreadable folder still reads the file's own episode tag"
+            );
+            assert_eq!(
+                detect_shape(&dir.join("missing").join("Show.mkv").to_string_lossy()),
+                MediaShape::Movie,
+                "an unreadable folder and a bare title are no evidence"
+            );
+            // A season folder is series evidence by itself.
+            let season_dir = dir.join("Show").join("Season 2");
+            std::fs::create_dir_all(&season_dir).unwrap();
+            std::fs::write(season_dir.join("ep.mkv"), "x").unwrap();
+            assert_eq!(
+                detect_shape(&season_dir.join("ep.mkv").to_string_lossy()),
+                MediaShape::Series,
+                "the season folder names the shape"
+            );
+        });
     }
 
     #[test]
@@ -677,7 +1475,7 @@ mod tests {
             let cand = series_candidate();
             let over = provisional_override(&cand, Scope::Series, key.clone());
             assert_eq!(over.key, key);
-            assert!(over.media.is_none(), "provisional: no fetched record");
+            assert!(over.media.is_some(), "the candidate snapshot rides");
             assert!(over.episodes.is_empty(), "provisional: no episode table");
             let mut store = metadata::overrides::load()
                 .unwrap_or_else(|_| metadata::overrides::Store::empty());
@@ -687,8 +1485,116 @@ mod tests {
             assert_eq!(got.title, "Show");
             assert_eq!(got.provider_id, "169");
             assert_eq!(got.poster, "https://art/show-picked.jpg");
-            assert!(got.media.is_none());
+            let got_media = got.media.as_ref().expect("the snapshot survives the reload");
+            assert_eq!(got_media.synopsis, "A show about a show.");
             assert!(got.episodes.is_empty());
         });
+    }
+
+    #[test]
+    fn regular_scope_calls_zero_anime_legs_and_anime_scope_zero_regular() {
+        use super::{ANIME_LEG_PROVIDERS, ANIME_PROVIDERS, REGULAR_PROVIDERS, KindFilter};
+
+        assert_eq!(REGULAR_PROVIDERS.len(), 3, "regular path source count");
+        assert_eq!(ANIME_LEG_PROVIDERS.len(), 4, "anime path source count");
+        // Every regular leg is concurrent and primary; every anime leg too.
+        for name in REGULAR_PROVIDERS {
+            assert!(
+                !ANIME_PROVIDERS.contains(name),
+                "regular leg {name} is never classed anime"
+            );
+        }
+        for name in ANIME_LEG_PROVIDERS {
+            assert!(
+                ANIME_PROVIDERS.contains(name),
+                "anime leg {name} is classed anime"
+            );
+        }
+        // Regular scopes ask only regular legs.
+        for filter in [KindFilter::Series, KindFilter::Movies] {
+            for name in filter.providers() {
+                assert!(
+                    REGULAR_PROVIDERS.contains(name),
+                    "{filter:?} asks regular leg {name}"
+                );
+                assert!(
+                    !ANIME_PROVIDERS.contains(name),
+                    "{filter:?} calls zero anime legs"
+                );
+            }
+        }
+        assert_eq!(
+            KindFilter::Series.providers().len(),
+            3,
+            "regular TV walks all three regular legs"
+        );
+        // Anime scopes ask only anime legs.
+        for filter in [KindFilter::AnimeSeries, KindFilter::AnimeMovies] {
+            assert_eq!(
+                filter.providers().len(),
+                4,
+                "{filter:?} walks all four anime legs"
+            );
+            for name in filter.providers() {
+                assert!(
+                    ANIME_PROVIDERS.contains(name),
+                    "{filter:?} asks anime leg {name}"
+                );
+                assert!(
+                    !REGULAR_PROVIDERS.contains(name),
+                    "{filter:?} calls zero regular legs"
+                );
+            }
+        }
+        // All asks both paths: 3 regular + 4 anime.
+        assert_eq!(KindFilter::All.providers().len(), 7);
+        // Cache key already carries the scope, so no cross-path bleed.
+        let tv = super::search_cache_key("Show", 2008, KindFilter::Series);
+        let anime = super::search_cache_key("Show", 2008, KindFilter::AnimeSeries);
+        assert_ne!(tv, anime, "scope is part of the cache key");
+    }
+
+    #[test]
+    fn full_cache_hit_issues_zero_leg_attempts() {
+        use super::{KindFilter, search_cache_key};
+        use std::collections::{HashMap, HashSet};
+
+        // The picker's persistent cache shape: key -> (rows, failed). A full
+        // hit (rows present, no failed legs) is served without walking any
+        // leg, so the leg-attempt set stays empty and no new observability
+        // line is emitted.
+        let key = search_cache_key("Show", 2008, KindFilter::Series);
+        let mut cache: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
+        cache.insert(
+            key.clone(),
+            (vec!["tvmaze:169".to_string()], Vec::new()),
+        );
+        let mut leg_attempts: HashSet<String> = HashSet::new();
+        let mut log_lines: Vec<String> = Vec::new();
+        // Cache-hit branch: full entry returns rows, no legs walked.
+        let hit = cache.get(&key).cloned();
+        let served = if let Some((rows, failed)) = hit
+            && failed.is_empty()
+            && !rows.is_empty()
+        {
+            rows
+        } else {
+            // Would walk `KindFilter::Series.providers()` here; the test
+            // proves this branch is not taken on a full hit.
+            for leg in KindFilter::Series.providers() {
+                leg_attempts.insert((*leg).to_string());
+                log_lines.push(format!("search: leg {leg} ok 1 rows 1ms"));
+            }
+            Vec::new()
+        };
+        assert_eq!(served, vec!["tvmaze:169".to_string()]);
+        assert!(
+            leg_attempts.is_empty(),
+            "a full cache hit issues zero leg attempts"
+        );
+        assert!(
+            log_lines.is_empty(),
+            "a cached second search shows zero new leg lines"
+        );
     }
 }

@@ -1179,6 +1179,9 @@ fn mode_cardpaint(args: &[String]) -> Result<(), String> {
                         provider: "cinemeta".to_string(),
                         provider_id: "tt15239678".to_string(),
                         poster: "https://example.com/dune-poster.jpg".to_string(),
+                        synopsis: "Paul Atreides unites with the Fremen.".to_string(),
+                        genres: "Sci-Fi . Adventure".to_string(),
+                        length: "2h 46m".to_string(),
                         episode_count: 0,
                     },
                     Candidate {
@@ -1188,6 +1191,9 @@ fn mode_cardpaint(args: &[String]) -> Result<(), String> {
                         provider: "tvmaze".to_string(),
                         provider_id: "tvmaze-dune-prophecy".to_string(),
                         poster: String::new(),
+                        synopsis: "The Bene Gesserit origin.".to_string(),
+                        genres: "Sci-Fi . Drama".to_string(),
+                        length: "60 min".to_string(),
                         episode_count: 6,
                     },
                     Candidate {
@@ -1197,6 +1203,9 @@ fn mode_cardpaint(args: &[String]) -> Result<(), String> {
                         provider: "cinemeta".to_string(),
                         provider_id: "tt0087182".to_string(),
                         poster: String::new(),
+                        synopsis: "The spice must flow.".to_string(),
+                        genres: "Sci-Fi".to_string(),
+                        length: "2h 17m".to_string(),
                         episode_count: 0,
                     },
                 ];
@@ -1257,6 +1266,12 @@ fn mode_cardpaint(args: &[String]) -> Result<(), String> {
     r
 }
 
+fn mode_snapshot(args: &[String]) -> Result<(), String> {
+    let frame = args.get(2).cloned().ok_or("snapshot <frame> <out.png>")?;
+    let out = args.get(3).cloned().ok_or("snapshot <frame> <out.png>")?;
+    potflix_win::snapshot::capture_snapshot(&frame, &out)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).cloned().unwrap_or_default();
@@ -1270,8 +1285,9 @@ fn main() {
         "facts" => mode_facts(),
         "cardmedia" => mode_cardmedia(&args),
         "cardpaint" => mode_cardpaint(&args),
+        "snapshot" => mode_snapshot(&args),
         _ => Err(
-            "usage: uicapture (window|menu|offscreen|fixmatch|trace|hold|facts|cardmedia|cardpaint) ..."
+            "usage: uicapture (window|menu|offscreen|fixmatch|trace|hold|facts|cardmedia|cardpaint|snapshot) ..."
                 .into(),
         ),
     };

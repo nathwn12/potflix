@@ -60,9 +60,10 @@
 //! store survives the schema change and upgrades on its first save. An absent
 //! file is an empty store, and an unknown JSON field is ignored, so a future
 //! writer can add fields without breaking this reader. A malformed file is
-//! REPORTED, not fatal: [`load`] returns `Err`, never panics, and never
-//! rewrites the file; the caller carries on with [`Store::empty`], and only
-//! the next successful [`Store::save`] replaces the bad file. A file whose
+//! REPORTED, not fatal: [`load`] returns `Err`, never panics, and quarantines
+//! the bad file beside the store; the caller carries on with [`Store::empty`],
+//! and a save over still-corrupt bytes is refused instead of writing a
+//! one-entry file over every manual match. A file whose
 //! `version` is neither [`STORE_VERSION`] nor 1 is refused the same way:
 //! well-formed, but not ours to interpret.
 //!
@@ -385,7 +386,9 @@ pub fn load() -> Result<Store, Error> {
 }
 
 /// The explicit-path core of [`load`], so a caller with a custom location --
-/// and every test -- never touches the real store.
+/// and every test -- never touches the real store. An unreadable, malformed,
+/// or wrong-version file is quarantined beside the store
+/// (`<name>.corrupt-<ms>`, once) and reported as `Err`.
 pub fn load_from(path: &Path) -> Result<Store, Error> {
     let data = match std::fs::read(path) {
         Ok(data) => data,
@@ -393,19 +396,25 @@ pub fn load_from(path: &Path) -> Result<Store, Error> {
             return Ok(Store::empty_at(path.to_path_buf()));
         }
         Err(err) => {
+            let _ = quarantine_corrupt_file(path);
             return Err(Error::other(format!(
                 "metadata: overrides read {}: {err}",
                 path.display()
             )));
         }
     };
-    let file: StoreFile = serde_json::from_slice(&data).map_err(|err| {
-        Error::other(format!(
-            "metadata: overrides decode {}: {err}",
-            path.display()
-        ))
-    })?;
+    let file: StoreFile = match serde_json::from_slice(&data) {
+        Ok(file) => file,
+        Err(err) => {
+            let _ = quarantine_corrupt_file(path);
+            return Err(Error::other(format!(
+                "metadata: overrides decode {}: {err}",
+                path.display()
+            )));
+        }
+    };
     if file.version != STORE_VERSION_V1 && file.version != STORE_VERSION {
+        let _ = quarantine_corrupt_file(path);
         return Err(Error::other(format!(
             "metadata: overrides {}: version {} is not {STORE_VERSION} or {STORE_VERSION_V1}",
             path.display(),
@@ -443,10 +452,31 @@ impl Store {
     }
 
     /// Writes the store to its path, atomically: marshal, stage a
-    /// uniquely-named temp file beside the target, rename over it. A failed
-    /// write or rename removes the temp file and leaves the previous file
-    /// exactly as it was.
+    /// uniquely-named temp file beside the target, rename over it. A present
+    /// but unparsable file is quarantined and the write is refused, so a latch
+    /// can never replace real matches with a one-entry file. A failed write
+    /// or rename removes the temp file and leaves the previous file exactly
+    /// as it was.
     pub fn save(&self) -> Result<(), Error> {
+        if std::fs::metadata(&self.path).is_ok_and(|meta| meta.is_file()) {
+            let refused = match std::fs::read(&self.path) {
+                Ok(data) => !matches!(
+                    serde_json::from_slice::<StoreFile>(&data).map(|file| {
+                        file.version == STORE_VERSION || file.version == STORE_VERSION_V1
+                    }),
+                    Ok(true)
+                ),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+                Err(_) => true,
+            };
+            if refused {
+                let _ = quarantine_corrupt_file(&self.path);
+                return Err(Error::other(format!(
+                    "metadata: refusing to overwrite corrupt overrides {}",
+                    self.path.display()
+                )));
+            }
+        }
         let dir = match self.path.parent() {
             Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
             _ => PathBuf::from("."),
@@ -463,11 +493,19 @@ impl Store {
             let _ = std::fs::remove_file(&temp_path);
             return Err(err.into());
         }
+        // Flush to stable storage BEFORE the rename: a power cut must not
+        // commit a zero-length file the next load treats as an empty store.
+        if let Err(err) = temp.sync_all() {
+            drop(temp);
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(err.into());
+        }
         drop(temp);
         if let Err(err) = std::fs::rename(&temp_path, &self.path) {
             let _ = std::fs::remove_file(&temp_path);
             return Err(err.into());
         }
+        fsync_dir(&dir);
         Ok(())
     }
 
@@ -521,11 +559,13 @@ impl Store {
     /// ([`season_key_for`]) -- and never the show-wide series latch
     /// ([`series_key_for`]), which survives with its cover and episode pins
     /// and keeps serving every other episode under the show folder -- while
-    /// a [`Scope::Season`] or [`Scope::Series`] correction removes the movie
-    /// key ([`movie_key`]`(path)`). Only keys derived from `path` are touched;
-    /// latches on other paths/shows are left alone. A failed save rolls every
-    /// in-memory change back, so memory still matches the last successful
-    /// save.
+    /// a [`Scope::Season`] correction removes the movie key
+    /// ([`movie_key`]`(path)`) and the covering series latch for that season,
+    /// and a [`Scope::Series`] correction removes the movie key plus every
+    /// season latch under that show. Only latches for that file/show are
+    /// touched; latches on other paths/shows are left alone. A failed save
+    /// rolls every in-memory change back, so memory still matches the last
+    /// successful save.
     ///
     /// This is the explicit-correction path the match UI calls: ordinary
     /// [`Store::put`] semantics are unchanged (coexisting movie/season/series
@@ -545,8 +585,31 @@ impl Store {
                     conflicting.push((Scope::Season, key));
                 }
             }
-            Scope::Season | Scope::Series => {
+            Scope::Season => {
                 conflicting.push((Scope::Movie, movie_key(path)));
+                let season_key = over.key.clone();
+                let covered: Vec<(Scope, String)> = self
+                    .entries
+                    .keys()
+                    .filter(|(scope, key)| {
+                        *scope == Scope::Series && season_belongs_to(&season_key, key)
+                    })
+                    .cloned()
+                    .collect();
+                conflicting.extend(covered);
+            }
+            Scope::Series => {
+                conflicting.push((Scope::Movie, movie_key(path)));
+                let series_key = over.key.clone();
+                let shadowed: Vec<(Scope, String)> = self
+                    .entries
+                    .keys()
+                    .filter(|(scope, key)| {
+                        *scope == Scope::Season && season_belongs_to(key, &series_key)
+                    })
+                    .cloned()
+                    .collect();
+                conflicting.extend(shadowed);
             }
         }
         let target = (over.scope, over.key.clone());
@@ -670,6 +733,54 @@ fn create_temp(dir: &Path) -> std::io::Result<(PathBuf, File)> {
         std::io::ErrorKind::AlreadyExists,
         "could not create a unique temp file for the atomic write",
     ))
+}
+
+/// Best-effort directory fsync: persists the rename. Failures are ignored;
+/// the file sync is the load-bearing half.
+fn fsync_dir(dir: &Path) {
+    if let Ok(file) = File::open(dir) {
+        let _ = file.sync_all();
+    }
+}
+
+/// The quarantine backup beside `path`, if one was already taken:
+/// `<file-name>.corrupt-<ms>`.
+pub fn corrupt_backup_for(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty())?;
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let prefix = format!("{name}.corrupt-");
+    let mut hits: Vec<PathBuf> = std::fs::read_dir(parent)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|candidate| {
+            candidate
+                .file_name()
+                .is_some_and(|file| file.to_string_lossy().starts_with(&prefix))
+        })
+        .collect();
+    hits.sort();
+    hits.into_iter().next()
+}
+
+/// Moves an unparsable/unreadable latch store aside once, returning the backup
+/// path. A missing file is not corrupt (`None`); when a backup already exists
+/// the first one is kept and returned, so repeated loads never stack renames.
+pub fn quarantine_corrupt_file(path: &Path) -> Option<PathBuf> {
+    if let Some(existing) = corrupt_backup_for(path) {
+        return Some(existing);
+    }
+    if !std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
+        return None;
+    }
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty())?;
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis())
+        .unwrap_or(0);
+    let backup = parent.join(format!("{name}.corrupt-{millis}"));
+    std::fs::rename(path, &backup).ok()?;
+    Some(backup)
 }
 
 #[cfg(test)]
@@ -974,16 +1085,44 @@ mod tests {
             err.to_string().contains("overrides"),
             "the error names the store: {err}"
         );
+        // Quarantined once, never rewritten in place and never stacked: the
+        // user's bytes survive in the backup beside the store.
+        let backup = corrupt_backup_for(&path).expect("quarantine backup");
+        assert_eq!(
+            std::fs::read(&backup).expect("read backup"),
+            junk.as_slice(),
+            "the user's bytes survive in the backup"
+        );
+        assert!(!path.exists(), "the bad file is moved aside");
+        std::fs::write(&path, junk).expect("seed malformed store again");
+        assert!(load_from(&path).is_err());
+        let backups: Vec<String> = dir_names(&base)
+            .into_iter()
+            .filter(|name| name.starts_with(&format!("{STORE_FILE_NAME}.corrupt-")))
+            .collect();
+        assert_eq!(backups.len(), 1, "one quarantine, never stacked");
+
+        // The recovery store refuses to clobber while corrupt bytes sit at the
+        // target: a latch over a bad file fails instead of writing a one-entry
+        // file over every manual match.
+        let mut store = Store::empty_at(path.clone());
+        let latch_err = store
+            .put(movie_override(&win('D', r"\Films\Dune Part Two.mkv")))
+            .expect_err("a put over corrupt bytes must refuse");
+        assert!(
+            latch_err.to_string().contains("corrupt"),
+            "the refusal names the cause: {latch_err}"
+        );
         assert_eq!(
             std::fs::read(&path).expect("read"),
             junk.as_slice(),
-            "a failed load rewrote the file"
+            "refusal leaves the corrupt bytes untouched"
         );
+        assert!(store.entries().is_empty(), "refusal rolls the latch back");
 
-        // Not fatal: the caller carries on with an empty store...
-        let mut store = Store::empty_at(path.clone());
-        assert!(store.lookup_movie(&win('D', r"\Films\anything.mkv")).is_none());
-        // ...and the next SUCCESSFUL save is what replaces the bad file.
+        // ...while a store quarantined by a load recovers with an explicit
+        // fresh write once the target is gone (the backup keeps the evidence).
+        std::fs::remove_file(&path).expect("clear the corrupt target");
         store
             .put(movie_override(&win('D', r"\Films\Dune Part Two.mkv")))
             .expect("recovery save");
@@ -1017,10 +1156,11 @@ mod tests {
             err.to_string().contains("version 3"),
             "the refusal names the version: {err}"
         );
+        let v3_backup = corrupt_backup_for(&wrong_version).expect("v3 quarantine");
         assert_eq!(
-            std::fs::read(&wrong_version).expect("read"),
+            std::fs::read(&v3_backup).expect("read"),
             v3.as_slice(),
-            "a refused load rewrote the file"
+            "a refused load quarantines the file"
         );
         // An entry missing its scope is malformed too (scope is required).
         let missing = base.join("missing.json");
@@ -1630,6 +1770,42 @@ mod tests {
         assert_eq!(
             store.resolve_for(&file).expect("series latch").scope,
             Scope::Series
+        );
+    }
+
+    #[test]
+    fn put_correction_series_and_season_retire_each_other() {
+        let dir = TempDir::new();
+        let mut store = Store::empty_at(PathBuf::from(dir.child(STORE_FILE_NAME)));
+        let season_key = win('D', r"\Shows\Show\Season 1");
+        let show_key = win('D', r"\Shows\Show");
+        let file = win('D', r"\Shows\Show\Season 1\S01E01.mkv");
+        store
+            .put(season_override(&season_key))
+            .expect("season latch");
+        store
+            .put_correction(&file, series_override(&show_key))
+            .expect("series correction");
+        assert!(
+            store.lookup_season(&file).is_none(),
+            "a series correction retires the season latch"
+        );
+        assert_eq!(
+            store.resolve_for(&file).expect("series latch").scope,
+            Scope::Series,
+            "the whole show wins after its correction"
+        );
+        store
+            .put_correction(&file, season_override(&season_key))
+            .expect("season correction");
+        assert!(
+            store.lookup_series(&file).is_none(),
+            "a season correction retires the series latch"
+        );
+        assert_eq!(
+            store.resolve_for(&file).expect("season latch").scope,
+            Scope::Season,
+            "the season wins after its correction"
         );
     }
 }

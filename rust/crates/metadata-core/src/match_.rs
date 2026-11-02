@@ -81,7 +81,8 @@ fn folded_accent(r: char) -> Option<&'static str> {
 }
 
 /// `normalizeTitle` lowercases, folds punctuation to spaces and diacritics to
-/// ASCII, and collapses whitespace, so "Re:ZERO", "Mr. Robot" and "Café"
+/// ASCII, folds a trailing sequel numeral (`ii`→`2`) so `Rocky II` and
+/// `Rocky 2` compare equal, and collapses whitespace, so "Re:ZERO", "Mr. Robot" and "Café"
 /// compare as "re zero", "mr robot" and "cafe".
 ///
 /// Two deliberate readings of the Go text: `strings.ToLower` is a per-rune
@@ -90,7 +91,7 @@ fn folded_accent(r: char) -> Option<&'static str> {
 /// the Mn strip immediately below; and Go's `IsLetter || IsNumber` is read as
 /// Rust's `is_alphabetic() || is_numeric()`, which differs only for the
 /// Other_Alphabetic spacing marks (Mc) no real title carries.
-pub(crate) fn normalize_title(s: &str) -> String {
+pub fn normalize_title(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for r in s.to_lowercase().chars() {
         if jdk_is_mn(r) {
@@ -106,13 +107,41 @@ pub(crate) fn normalize_title(s: &str) -> String {
         }
         out.push(' ');
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut tokens: Vec<String> = out.split_whitespace().map(str::to_string).collect();
+    if let Some(last) = tokens.last_mut()
+        && let Some(digit) = sequel_numeral(last)
+    {
+        *last = digit.to_string();
+    }
+    tokens.join(" ")
+}
+
+/// The digit a trailing sequel numeral stands for: `i`→`1`, `ii`→`2`,
+/// `iii`→`3`, `iv`→`4`, `v`→`5` (plus `vi`–`x` for the longer series), so a
+/// digit spelling and the roman spelling compare equal.
+fn sequel_numeral(token: &str) -> Option<u32> {
+    match token {
+        "i" => Some(1),
+        "ii" => Some(2),
+        "iii" => Some(3),
+        "iv" => Some(4),
+        "v" => Some(5),
+        "vi" => Some(6),
+        "vii" => Some(7),
+        "viii" => Some(8),
+        "ix" => Some(9),
+        "x" => Some(10),
+        _ => None,
+    }
 }
 
 /// `titleSimilarity` scores query against candidate in [0,1]. Exact normalized
 /// equality is 1; otherwise 0.7*coverage (fraction of query tokens found in the
 /// candidate) + 0.3*Jaccard, where the Jaccard term supplies the length penalty
-/// for much-longer candidates. No query token in the candidate is 0. Both
+/// for much-longer candidates. No query token in the candidate is 0, except
+/// that unspaced scripts (CJK, where a comma becomes a space on one side only)
+/// fall back to a character-level score so `你好，李焕英` and `你好李焕英`
+/// still clear the floor. Both
 /// denominators are DEDUPED token sets.
 pub(crate) fn title_similarity(query: &str, candidate: &str) -> f64 {
     let nq = normalize_title(query);
@@ -127,12 +156,45 @@ pub(crate) fn title_similarity(query: &str, candidate: &str) -> f64 {
     let cset: HashSet<&str> = nc.split_whitespace().collect();
     let inter = qset.iter().filter(|t| cset.contains(*t)).count();
     if inter == 0 {
-        return 0.0;
+        return unspaced_fallback(&nq, &nc);
     }
     let union = qset.len() + cset.len() - inter;
     let inter = inter as f64;
     let sim = 0.7 * inter / qset.len() as f64 + 0.3 * inter / union as f64;
     sim.clamp(0.0, 1.0)
+}
+
+/// Character-level fallback for unspaced scripts: when token overlap is empty
+/// but either side carries CJK (Han, Hiragana, Katakana, Hangul), score the
+/// spaceless character sets with the same 0.7/0.3 shape so a spacing-only
+/// difference still clears the floor while unrelated pairs stay at 0.
+fn unspaced_fallback(nq: &str, nc: &str) -> f64 {
+    if !nq.chars().any(is_cjk) && !nc.chars().any(is_cjk) {
+        return 0.0;
+    }
+    let qchars: HashSet<char> = nq.chars().filter(|c| *c != ' ').collect();
+    let cchars: HashSet<char> = nc.chars().filter(|c| *c != ' ').collect();
+    if qchars.is_empty() || cchars.is_empty() {
+        return 0.0;
+    }
+    let inter = qchars.intersection(&cchars).count();
+    if inter == 0 {
+        return 0.0;
+    }
+    let union = qchars.len() + cchars.len() - inter;
+    let inter = inter as f64;
+    let sim = 0.7 * inter / qchars.len() as f64 + 0.3 * inter / union as f64;
+    sim.clamp(0.0, 1.0)
+}
+
+/// Whether `c` sits in a CJK script block (Han, Hiragana, Katakana, Hangul,
+/// Bopomofo): scripts without word spaces, where token overlap is the wrong
+/// measure and characters carry the identity.
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}'
+        | '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}'
+        | '\u{AC00}'..='\u{D7AF}' | '\u{1100}'..='\u{11FF}' | '\u{3100}'..='\u{312F}')
 }
 
 /// `pickBestShow` picks the candidate best matching query. Each candidate

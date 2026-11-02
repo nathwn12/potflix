@@ -7,9 +7,11 @@
 //! This is the app's own seam, and the last one: the single-instance lock, the
 //! debug log, the tray window and message loop, the Discord transport, the poll
 //! loop and the settings window all exist in one process here. The four frozen
-//! orderings are reproduced exactly:
+//! orderings are reproduced exactly, with two recorded repairs:
 //!
-//! 1. the instance lock is taken BEFORE the logger, so a loser touches no log;
+//! 1. the logger is created BEFORE the instance lock, so a lock loser can log
+//!    its verdict to the debug log (the old "lock before log" order made a
+//!    squatted port a silent no-op under `windows_subsystem`);
 //! 2. the logger, then the client-id SOURCE only -- never the value;
 //! 3. `--selftest` (via [`potflix::selftest`]) bypasses [`run_ui`] wholly;
 //! 4. the tray window is created and pumped on one OS thread.
@@ -35,6 +37,8 @@
 
 #![windows_subsystem = "windows"]
 
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -712,6 +716,11 @@ fn poll_step<P: PlayerProbe>(
                         raw_title: title.clone(),
                         path: playing_file_path(&title),
                     }));
+                    // Warm the Fix match list for what is playing now: the
+                    // poll thread only starts a search when the title/year/scope
+                    // changed, so a repeated tick is free and the next episode
+                    // of the same show is a cache hit.
+                    potflix_win::window::prefetch_now_playing();
                 }
                 // C: a live window whose action stays Stop past the grace is a
                 // stopped player (or one closed to the tray), not a playing one,
@@ -811,13 +820,20 @@ fn poll_steps<P: PlayerProbe>(
     }
 }
 
-/// `pollLoop` (`go\main.go:241-325`): run [`poll_step`] forever on the real
-/// player probe, the real wall clock and the loop's real sleeps.
-fn poll_loop(log: &Logger, dc: &discord::Client) -> ! {
+/// `pollLoop` (`go\main.go:241-325`): run [`poll_step`] on the real player
+/// probe, the real wall clock and the loop's real sleeps, until the tray Exit
+/// path asks for quit. The Exit dispatch no longer calls `process::exit`: it
+/// marks [`tray::quit_requested`] and posts quit, the message loop returns,
+/// and the app tail joins this thread before clearing -- so no in-flight
+/// `set_activity` races the exit clear.
+fn poll_loop(log: &Logger, dc: &discord::Client) {
     let probe = SystemProbe;
     let mut state = PollState::new();
     let sleep = |d: Duration| std::thread::sleep(d);
     loop {
+        if tray::quit_requested() {
+            break;
+        }
         poll_step(log, dc, &probe, &now_ms, &mut state, &sleep);
     }
 }
@@ -835,6 +851,111 @@ fn startup_catch_up_config(cfg: &config::Config) -> library::catchup::CatchUpCon
         index_path: config::scan_index_path().to_string_lossy().into_owned(),
         app_version: potflix_win::settings::APP_VERSION.to_string(),
         ..Default::default()
+    }
+}
+
+/// The single-instance handshake magic the primary writes to every lock-port
+/// connection. A second instance that reads these exact bytes knows the holder
+/// is a live Potflix; anything else (timeout, EOF, wrong bytes, refused) is a
+/// foreign listener or a predecessor still tearing down.
+const SINGLE_INSTANCE_MAGIC: &[u8] = b"potflix-single-instance-v1\n";
+
+/// How long the lock probe waits for connect and for the magic.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// The lock-loser exit when no live Potflix answered (a real failure, never 0).
+const FOREIGN_LOCK_EXIT_CODE: i32 = 1;
+
+/// What the lock-port probe found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstanceProbe {
+    Live,
+    Foreign,
+}
+
+/// Maps a probe to the loser exit code: a live holder exits 0 (already
+/// running, cleanly, with a log line); a foreign holder exits non-zero.
+fn lock_failure_exit_code(probe: InstanceProbe) -> i32 {
+    match probe {
+        InstanceProbe::Live => instance::ALREADY_RUNNING_EXIT_CODE,
+        InstanceProbe::Foreign => FOREIGN_LOCK_EXIT_CODE,
+    }
+}
+
+/// Probes `port`: connects, reads the handshake magic, and reports whether a
+/// live Potflix answered. Never binds the live lock port in tests -- callers
+/// pass an ephemeral port they staged.
+fn probe_instance_port(port: u16) -> InstanceProbe {
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let Ok(stream) = TcpStream::connect_timeout(&addr, PROBE_TIMEOUT) else {
+        return InstanceProbe::Foreign;
+    };
+    let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
+    let mut buf = vec![0u8; SINGLE_INSTANCE_MAGIC.len()];
+    let mut filled = 0;
+    let mut stream = stream;
+    while filled < buf.len() {
+        match stream.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(_) => break,
+        }
+    }
+    if filled == SINGLE_INSTANCE_MAGIC.len() && buf[..] == *SINGLE_INSTANCE_MAGIC {
+        InstanceProbe::Live
+    } else {
+        InstanceProbe::Foreign
+    }
+}
+
+/// Answers every lock-port connection with the handshake magic, so a second
+/// instance can tell a live Potflix from a foreign squatter. Runs detached;
+/// the listener itself is held for life by the caller.
+fn spawn_instance_responder(listener: &TcpListener) {
+    if let Ok(clone) = listener.try_clone() {
+        std::thread::spawn(move || {
+            for incoming in clone.incoming() {
+                match incoming {
+                    Ok(mut stream) => {
+                        let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
+                        let _ = stream.write_all(SINGLE_INSTANCE_MAGIC);
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(50)),
+                }
+            }
+        });
+    }
+}
+
+/// The lock-loser path: a bind failure is probed, logged to the debug log,
+/// and surfaced with the matching exit -- 0 for a live Potflix (cleanly, with
+/// a log line), non-zero for a foreign listener (a real failure). Never
+/// returns.
+fn handle_lock_bind_failure(log: &'static Logger, err: std::io::Error) -> ! {
+    let probe = probe_instance_port(instance::LOCK_PORT);
+    let code = lock_failure_exit_code(probe);
+    match probe {
+        InstanceProbe::Live => {
+            log.log(&format!(
+                "instance lock {}:{} busy: live Potflix answered the probe; exiting ({})",
+                instance::LOCK_HOST,
+                instance::LOCK_PORT,
+                instance::ALREADY_RUNNING_MSG
+            ));
+            log.close();
+            std::process::exit(code);
+        }
+        InstanceProbe::Foreign => {
+            let msg = format!(
+                "single-instance bind {}:{} failed: {err} (no live Potflix answered; refusing a foreign listener)",
+                instance::LOCK_HOST,
+                instance::LOCK_PORT
+            );
+            log.log(&msg);
+            log.close();
+            eprintln!("{msg}");
+            std::process::exit(code);
+        }
     }
 }
 
@@ -916,12 +1037,15 @@ fn run_ui(log: &'static Logger) {
 
     let dc = Arc::new(dc);
     let poll_dc = Arc::clone(&dc);
-    std::thread::spawn(move || poll_loop(log, &poll_dc));
+    tray::reset_quit();
+    let poll_handle = std::thread::spawn(move || poll_loop(log, &poll_dc));
 
     // Fleet decision 6 (deviation): clear the Discord card before exiting. Go
     // installs the dc-bound override at `go\main.go:197-200`, replacing the tray
     // stub; the poll loop's own clears are already live, so this repairs only
-    // the tray Exit path.
+    // the tray Exit path. The Exit dispatch itself no longer clears: the quit
+    // tail below clears after the poll thread stops, so no in-flight
+    // `set_activity` races it.
     let clear_dc = Arc::clone(&dc);
     let _ = tray::set_clear_activity(Box::new(move || {
         let _ = clear_dc.clear_activity();
@@ -948,29 +1072,82 @@ fn run_ui(log: &'static Logger) {
     }
 
     tray::message_loop();
+    // Ordered quit tail (the old `process::exit` in the menu dispatch skipped
+    // all of this): stop the poll thread first so no new `set_activity` can
+    // start, then clear with ordering, delete the icon, and close Discord.
+    // A window-close (X) that bypassed Exit still lands here, so force the
+    // quit flag before joining.
+    if !tray::quit_requested() {
+        tray::request_quit();
+    }
+    let _ = poll_handle.join();
+    let _ = dc.clear_activity();
+    log.log("cleared (exit)");
+    tray::tray_delete(tray_window.hwnd);
     let _ = dc.close();
+}
+
+fn snapshot_request(args: &[String]) -> Option<Result<(String, String), String>> {
+    let pos = args.iter().position(|a| a == "--snapshot")?;
+    let frame = match args.get(pos + 1) {
+        Some(f) => f.clone(),
+        None => return Some(Err("snapshot: --snapshot <frame> --out <path.png>".into())),
+    };
+    let out_pos = args.iter().position(|a| a == "--out");
+    let out = match out_pos.and_then(|i| args.get(i + 1)) {
+        Some(o) => o.clone(),
+        None => return Some(Err("snapshot: --snapshot <frame> --out <path.png>".into())),
+    };
+    Some(Ok((frame, out)))
 }
 
 fn main() {
     // argv is ignored except for the M1 test switch.
     let args: Vec<String> = std::env::args().collect();
+    if let Some(req) = snapshot_request(&args) {
+        selftest::attach_console();
+        let code = match req {
+            Ok((frame, out)) => match potflix_win::snapshot::capture_snapshot(&frame, &out) {
+                Ok(()) => {
+                    println!("SNAPSHOT-OK {frame} {out}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("SNAPSHOT-FAIL: {e}");
+                    1
+                }
+            },
+            Err(e) => {
+                eprintln!("SNAPSHOT-FAIL: {e}");
+                1
+            }
+        };
+        std::process::exit(code);
+    }
     let selftest_run = potflix_win::settings::has_arg(&args, "--selftest");
     if selftest_run {
         selftest::attach_console(); // make --selftest output visible from the parent console
     }
 
-    // (1) Single-instance lock: 127.0.0.1:17843, held for life. Taken before
-    // anything else (Java :61), so a second instance touches no log.
-    if instance::acquire_instance_lock().is_err() {
-        instance::exit_already_running();
-    }
-
-    // (2) Debug log beside the executable.
+    // (1) Debug log beside the executable, FIRST: a lock loser must log its
+    // verdict to the debug log (the old lock-before-log order plus `eprintln`
+    // under `windows_subsystem` made a squatted port a silent no-op).
     let log: &'static Logger = Box::leak(Box::new(Logger::new(
         debuglog::default_log_path(),
         debuglog::DEFAULT_LOG_CAP_BYTES,
         debuglog::DEFAULT_LOG_MAX_FILES,
     )));
+
+    // (2) Single-instance lock: 127.0.0.1:17843, held for life. A bind failure
+    // is probed: a live Potflix answers the handshake and the loser exits 0
+    // cleanly with a log line; a foreign listener (or a teardown race with no
+    // answer) is a logged failure with a non-zero exit.
+    let held_listener = match instance::acquire_instance_lock_on(instance::LOCK_PORT) {
+        Ok(listener) => listener,
+        Err(err) => handle_lock_bind_failure(log, err),
+    };
+    spawn_instance_responder(&held_listener);
+    std::mem::forget(held_listener);
     log.log(&format!(
         "instance lock acquired {}:{} backlog={}",
         instance::LOCK_HOST,
@@ -4113,5 +4290,79 @@ mod tests {
         let _ = dc.close();
         let _ = reader.join();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The lock probe tells a live Potflix from a foreign squatter: a holder
+    /// that answers the handshake magic probes Live; a silent holder (or a
+    /// free port) probes Foreign. Staged on ephemeral ports -- the live lock
+    /// port 17843 is never bound by a test.
+    #[test]
+    fn single_instance_probe_distinguishes_live_from_foreign() {
+        let live = app_support::instance::acquire_instance_lock_on(0)
+            .expect("ephemeral live holder");
+        let live_port = live.local_addr().expect("live port").port();
+        assert_ne!(
+            live_port,
+            app_support::instance::LOCK_PORT,
+            "a test must never stage the live lock port"
+        );
+        spawn_instance_responder(&live);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            probe_instance_port(live_port),
+            InstanceProbe::Live,
+            "live responder must probe Live"
+        );
+
+        let foreign = app_support::instance::acquire_instance_lock_on(0)
+            .expect("ephemeral foreign holder");
+        let foreign_port = foreign.local_addr().expect("foreign port").port();
+        assert_ne!(
+            foreign_port,
+            app_support::instance::LOCK_PORT,
+            "a test must never stage the live lock port"
+        );
+        assert_ne!(foreign_port, live_port, "staged ports collided");
+        assert_eq!(
+            probe_instance_port(foreign_port),
+            InstanceProbe::Foreign,
+            "silent holder must probe Foreign"
+        );
+    }
+
+    /// The loser exit codes: a live holder exits 0 (already running, cleanly,
+    /// with a log line); a foreign holder exits non-zero (a real failure).
+    #[test]
+    fn lock_failure_exit_codes_are_0_for_live_1_for_foreign() {
+        assert_eq!(
+            lock_failure_exit_code(InstanceProbe::Live),
+            app_support::instance::ALREADY_RUNNING_EXIT_CODE
+        );
+        assert_eq!(app_support::instance::ALREADY_RUNNING_EXIT_CODE, 0);
+        assert_eq!(
+            lock_failure_exit_code(InstanceProbe::Foreign),
+            FOREIGN_LOCK_EXIT_CODE
+        );
+        assert_ne!(FOREIGN_LOCK_EXIT_CODE, 0);
+    }
+
+    /// With no holder at all the probe is Foreign too: a teardown race is a
+    /// failure with a non-zero exit, never a silent no-op.
+    #[test]
+    fn probe_unreachable_port_is_foreign() {
+        let stage = app_support::instance::acquire_instance_lock_on(0).expect("stage free port");
+        let port = stage.local_addr().expect("port").port();
+        assert_ne!(
+            port,
+            app_support::instance::LOCK_PORT,
+            "a test must never stage the live lock port"
+        );
+        drop(stage);
+        let probe = probe_instance_port(port);
+        assert_eq!(
+            probe,
+            InstanceProbe::Foreign,
+            "free port {port} must probe Foreign"
+        );
     }
 }

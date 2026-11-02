@@ -34,6 +34,7 @@ fn ann_finds_anime_by_validated_title() {
             status: 200,
             content_type: "text/xml".to_string(),
             body: ANN_BEBOP.as_bytes().to_vec(),
+            headers: Vec::new(),
         }
     });
     let source = AnnSource::new(server.url(), http_client());
@@ -71,6 +72,7 @@ fn ann_warning_and_low_confidence_are_miss() {
         status: 200,
         content_type: "text/xml".to_string(),
         body: ANN_EMPTY.as_bytes().to_vec(),
+        headers: Vec::new(),
     });
     let source = AnnSource::new(server.url(), http_client());
     let got = source
@@ -82,6 +84,7 @@ fn ann_warning_and_low_confidence_are_miss() {
         status: 200,
         content_type: "text/xml".to_string(),
         body: ANN_BEBOP.as_bytes().to_vec(),
+        headers: Vec::new(),
     });
     let source = AnnSource::new(server.url(), http_client());
     let q = Query {

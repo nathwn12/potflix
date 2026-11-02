@@ -117,8 +117,21 @@ pub const DANGER_TEXT: u32 = rgb(0xF2, 0x62, 0x6A);
 /// text step, so a disabled control needs its own.
 pub const DISABLED_TEXT: u32 = rgb(0x8A, 0x8F, 0x98);
 
-/// The accent's hover step (`#F6121D`).
+/// `(0xF6, 0x12, 0x1D)` -- the accent's hover step.
 pub const RED_HOVER: u32 = rgb(0xF6, 0x12, 0x1D);
+
+/// Approved narrow redesign tokens (mock `potflix-preview/index.html`).
+/// Kept beside the identity palette so the `palette_matches_make_logo` gate
+/// still pins the original hexes; the live `COL_*` roles point here.
+pub const BG_V2: u32 = rgb(0x0F, 0x10, 0x12);
+pub const CARD_V2: u32 = rgb(0x2B, 0x2D, 0x33);
+pub const ROW_HOVER_V2: u32 = rgb(0x33, 0x36, 0x3D);
+pub const HAIRLINE_V2: u32 = rgb(0x3A, 0x3D, 0x44);
+pub const STRONG_V2: u32 = rgb(0x56, 0x5A, 0x63);
+pub const MUTED_V2: u32 = rgb(0xA7, 0xAB, 0xB4);
+pub const DIM_V2: u32 = rgb(0x8A, 0x8F, 0x99);
+pub const ACCENT_V2: u32 = rgb(0xE5, 0x34, 0x3F);
+pub const ACCENT_HOV_V2: u32 = rgb(0xF0, 0x4B, 0x55);
 
 // ---------------------------------------------------------------------------
 // The house squircle.
@@ -551,11 +564,17 @@ mod tests {
         assert!(fonts_installed());
     }
 
-    /// The mark loads from the embedded `.ico`, at both slot sizes.
+    /// The mark loads from the embedded `.ico`, at both slot sizes. The `.ico`
+    /// may carry multiple frames (256px + small slots); the entry must sit
+    /// inside the file, not necessarily fill it.
     #[test]
     fn mark_icon_loads_at_both_slot_sizes() {
         let (off, size) = crate::tray::parse_icon_entry(crate::tray::ICON_ICO).unwrap();
-        assert_eq!(off + size, crate::tray::ICON_ICO.len());
+        assert!(
+            off + size <= crate::tray::ICON_ICO.len(),
+            "icon entry escapes: off {off} + size {size} > len {}",
+            crate::tray::ICON_ICO.len()
+        );
         let big = create_mark_icon(0, 0);
         assert!(!big.is_null(), "256px mark icon failed to load");
         let small = create_mark_icon(16, 16);
