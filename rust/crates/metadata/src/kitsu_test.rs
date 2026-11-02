@@ -160,6 +160,7 @@ fn kitsu_gates_movies_without_network() {
 /// absolute episode-1 entry. Real network, real input; a mock proves nothing
 /// here.
 #[test]
+#[ignore = "live network; run with --ignored"]
 fn kitsu_live_naruto_round_trip() {
     let source = KitsuSource::new("", http_client());
     let cancel = Cancel::with_deadline(Duration::from_secs(25));

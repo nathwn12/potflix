@@ -1179,10 +1179,10 @@ fn lookup_now_total_budget_bounds_a_total_miss() {
 /// ann) stops at the first COMPLETE answer -- a number-exact episode match
 /// carrying a synopsis -- so whichever leg answers Beerus-2026-complete
 /// first wins; this asserts the settled record, not the leg, and prints the
-/// winner. Real network, real input; a mock proves nothing here. No
-/// `#[ignore]`: an unreachable network errors the lookup and fails loudly,
-/// never passes silently.
+/// winner. Real network, real input; a mock proves nothing here. Ignored by
+/// default because it needs the real network; run it with `--ignored`.
 #[test]
+#[ignore = "live network; run with --ignored"]
 fn chain_live_dbs_selects_beerus_2026_not_the_2015_series() {
     let dir = TempDir::new();
     let resolver = Resolver::new(Options {

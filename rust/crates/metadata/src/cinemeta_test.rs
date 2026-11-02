@@ -249,6 +249,7 @@ fn cinemeta_meta_year_disagreement_still_answers() {
 /// iTunes leg mismatched -- with year, runtime, genres, synopsis and poster.
 /// Real network, real input; a mock proves nothing here.
 #[test]
+#[ignore = "live network; run with --ignored"]
 fn cinemeta_live_inception_round_trip() {
     let source = CinemetaSource::new("", http_client());
     let cancel = Cancel::with_deadline(Duration::from_secs(25));

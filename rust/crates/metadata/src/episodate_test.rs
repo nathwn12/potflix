@@ -90,6 +90,7 @@ fn episodate_low_confidence_is_miss() {
 /// so the live round trip uses the full title, which only the main series
 /// fully covers.
 #[test]
+#[ignore = "live network; run with --ignored"]
 fn episodate_live_rezero_round_trip() {
     let source = EpisodateSource::new("", http_client());
     let cancel = Cancel::with_deadline(Duration::from_secs(25));

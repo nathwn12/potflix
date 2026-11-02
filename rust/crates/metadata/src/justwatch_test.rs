@@ -92,6 +92,7 @@ fn justwatch_series_gates_before_wire() {
 /// 2016 SHOW carrying a synopsis and a poster. Real network, real input; a
 /// mock proves nothing here.
 #[test]
+#[ignore = "live network; run with --ignored"]
 fn justwatch_live_rezero_round_trip() {
     let source = JustWatchSource::new("", http_client());
     let cancel = Cancel::with_deadline(Duration::from_secs(25));
