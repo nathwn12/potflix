@@ -391,10 +391,10 @@ mod tests {
     fn TestCreateIssueRunnerArgvAndURL() {
         let r = sample_report();
         let capture = Capture::new(
-            "Creating issue in nathwn12/Potflix\nhttps://github.com/nathwn12/Potflix/issues/12\n",
+            "Creating issue in nathwn12/potflix\nhttps://github.com/nathwn12/potflix/issues/12\n",
         );
         let opts = Options {
-            repo: "nathwn12/Potflix".to_string(),
+            repo: "nathwn12/potflix".to_string(),
             runner: Some(capture.runner()),
             labels: vec!["needs-repair".to_string(), "bug".to_string()],
             gh: gh(true, "gh"),
@@ -402,13 +402,13 @@ mod tests {
 
         let (got, err) = create_issue(&r, &opts);
         assert!(err.is_none(), "CreateIssue: {err:?}");
-        assert_eq!(got, "https://github.com/nathwn12/Potflix/issues/12");
+        assert_eq!(got, "https://github.com/nathwn12/potflix/issues/12");
 
         let mut want = strings(&[
             "issue",
             "create",
             "--repo",
-            "nathwn12/Potflix",
+            "nathwn12/potflix",
             "--title",
         ]);
         want.push(issue_title(&r));
@@ -454,7 +454,7 @@ mod tests {
     fn TestCreateIssueFallsBackToAPrefilledURL() {
         let r = sample_report();
         let opts = Options {
-            repo: "nathwn12/Potflix".to_string(),
+            repo: "nathwn12/potflix".to_string(),
             gh: gh(false, "gh"),
             ..Default::default()
         };
@@ -462,7 +462,7 @@ mod tests {
         assert!(err.is_none(), "CreateIssue: {err:?}");
 
         let (base, q) = parse_query(&got);
-        assert_eq!(base, "https://github.com/nathwn12/Potflix/issues/new");
+        assert_eq!(base, "https://github.com/nathwn12/potflix/issues/new");
         assert_eq!(q.get("title").map(String::as_str), Some(issue_title(&r).as_str()));
         assert_eq!(q.get("body").map(String::as_str), Some(issue_body(&r).as_str()));
         let body = q.get("body").map(String::as_str).unwrap_or_default();

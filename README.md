@@ -9,7 +9,7 @@
 You build from source. On Windows, with a Rust toolchain installed:
 
 ```powershell
-git clone https://github.com/nathwn12/Potflix.git
+git clone https://github.com/nathwn12/potflix.git
 cd Potflix
 powershell -ExecutionPolicy Bypass -File tools\rust-build.ps1
 .\dist\potflix.exe
@@ -52,12 +52,12 @@ You need Windows, PotPlayer, the Discord desktop app (the web client has no loca
 
 ## Links
 
-- [Repository](https://github.com/nathwn12/Potflix)
+- [Repository](https://github.com/nathwn12/potflix)
 - [Changelog](CHANGELOG.md)
 - [Rust port notes](RUST-PORT.md)
 - [Third-party notices](THIRD-PARTY-NOTICES.md)
-- [Issues](https://github.com/nathwn12/Potflix/issues)
-- [Releases](https://github.com/nathwn12/Potflix/releases)
+- [Issues](https://github.com/nathwn12/potflix/issues)
+- [Releases](https://github.com/nathwn12/potflix/releases)
 - [License](LICENSE) (MIT)
 
 <!-- nathwn12 house footer: identical in every repo. Do not edit. -->
