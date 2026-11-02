@@ -99,6 +99,7 @@ fn ann_warning_and_low_confidence_are_miss() {
 /// its cover, its episode count and its synopsis. Real network, real input;
 /// a mock proves nothing here.
 #[test]
+#[ignore = "live network; run with --ignored"]
 fn ann_live_bebop_round_trip() {
     let source = AnnSource::new("", http_client());
     let cancel = Cancel::with_deadline(Duration::from_secs(25));
