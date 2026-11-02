@@ -44,6 +44,13 @@ powershell -ExecutionPolicy Bypass -File tools\check.ps1 -Build -Selftest
 
 Runs clippy, the workspace tests, the title-parity step, the build, and the headless selftest.
 
+## Status
+
+Experimental and still moving. It works today, but it is not a finished
+product: interfaces may change, features may be improved or removed, and a
+release can break the one before it. This is maintained by one person, not a
+team. If it breaks, open an issue with the command you ran and what you saw.
+
 ## Links
 
 - [Releases](https://github.com/nathwn12/potflix/releases)
