@@ -1,8 +1,10 @@
 <p align="center">
   <img src="assets/icon.ico" width="120" height="120" alt="Potflix icon" />
 </p>
-<h1 align="center">Potflix</h1>
-<p align="center"><strong>Mirror whatever plays in PotPlayer onto your Discord card.</strong></p>
+
+# Potflix
+
+Mirror whatever plays in PotPlayer onto your Discord card.
 
 ## Install
 
@@ -47,7 +49,6 @@ The Card view is a local preview of the Discord card, not a byte-for-byte copy o
 You get metadata with no keys and no accounts, cached on disk for 30 days; offline, the card falls back to the clean filename title. You can export and re-import that cache as one JSON bundle.
 
 ## Requirements
-
 You need Windows, PotPlayer, the Discord desktop app (the web client has no local presence pipe), and a Rust toolchain with `cargo` for the one-time build.
 
 ## Links
@@ -58,12 +59,6 @@ You need Windows, PotPlayer, the Discord desktop app (the web client has no loca
 - [Third-party notices](THIRD-PARTY-NOTICES.md)
 - [Issues](https://github.com/nathwn12/potflix/issues)
 - [Releases](https://github.com/nathwn12/potflix/releases)
-- [License](LICENSE) (MIT)
 
-<!-- nathwn12 house footer: identical in every repo. Do not edit. -->
-<p align="center">
-  <a href="https://github.com/nathwn12"><img src="assets/signature.svg" width="96" alt="nathwn12" /></a>
-</p>
-<p align="center">
-  <sub>Built by <a href="https://github.com/nathwn12">nathwn12</a> · <a href="https://github.com/nathwn12?tab=repositories">All projects</a></sub>
-</p>
+## License
+MIT. See [LICENSE](LICENSE).
