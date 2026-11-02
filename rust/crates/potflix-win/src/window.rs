@@ -3855,7 +3855,7 @@ pub fn scan_live_status_text(
 /// `reportButtonLabel` (`go\window.go:1034`).
 pub const REPORT_BUTTON_LABEL: &str = "Report";
 /// `reportRepo` (`go\window.go:1036`).
-pub const REPORT_REPO: &str = "nathwn12/Potflix";
+pub const REPORT_REPO: &str = "nathwn12/potflix";
 /// `reportLabel` (`go\window.go:1038`).
 pub const REPORT_LABEL: &str = "needs-repair";
 /// `reportNothingText` (`go\window.go:1042`).
@@ -14955,7 +14955,7 @@ mod tests {
     #[test]
     fn report_failure_logs_cause_and_names_reason_in_status() {
         const CAUSE: &str = "could not add label: 'needs-repair' not found";
-        const PREFILLED: &str = "https://github.com/nathwn12/Potflix/issues/new?title=a&body=b";
+        const PREFILLED: &str = "https://github.com/nathwn12/potflix/issues/new?title=a&body=b";
         let scratch = Scratch::new("report-failure-visible");
         let log_path = scratch.join("potflix-debug.log");
         let log: &'static app_support::debuglog::Logger = Box::leak(Box::new(
@@ -15034,8 +15034,8 @@ mod tests {
     /// URL still handed to the open path.
     #[test]
     fn report_status_shows_filed_url_or_failure_reason() {
-        const FILED: &str = "https://github.com/nathwn12/Potflix/issues/12";
-        const PREFILLED: &str = "https://github.com/nathwn12/Potflix/issues/new?title=a&body=b";
+        const FILED: &str = "https://github.com/nathwn12/potflix/issues/12";
+        const PREFILLED: &str = "https://github.com/nathwn12/potflix/issues/new?title=a&body=b";
         let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let open_ok = Arc::new(AtomicBool::new(true));
         let seen_calls = Arc::clone(&calls);
@@ -15155,7 +15155,7 @@ mod tests {
     fn open_url_texts() {
         assert!(report_opened_text(false).contains("opened"));
         assert!(report_opened_text(true).contains("prefilled"));
-        let url = "https://github.com/nathwn12/Potflix/issues/new?title=x";
+        let url = "https://github.com/nathwn12/potflix/issues/new?title=x";
         assert!(report_launch_text(url).contains(url));
         let path = repair_report_path();
         assert!(

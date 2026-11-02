@@ -60,7 +60,7 @@ pub const WIKIPEDIA_DEFAULT_BASE: &str = "https://en.wikipedia.org";
 /// `wikipediaUserAgent` identifies the app per the Wikimedia User-Agent policy
 /// (descriptive app identifier, never a credential).
 pub const WIKIPEDIA_USER_AGENT: &str =
-    "Potflix/1.0 (https://github.com/nathwn12/Potflix; contact: potflix-app)";
+    "Potflix/1.0 (https://github.com/nathwn12/potflix; contact: potflix-app)";
 
 /// The GET transport for Wikipedia: `http.go`'s wire shape with the Wikimedia
 /// `User-Agent` instead of the shared one.
