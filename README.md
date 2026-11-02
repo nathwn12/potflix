@@ -4,7 +4,7 @@
 
 # Potflix
 
-Shows the current PotPlayer track as a Discord Rich Presence card. Built for Windows users who play media in PotPlayer.
+Shows your current PotPlayer track as a Discord Rich Presence card. Built for Windows users who play media in PotPlayer.
 
 ## Install
 
@@ -44,6 +44,7 @@ powershell -ExecutionPolicy Bypass -File tools\check.ps1 -Build -Selftest
 
 Runs clippy, the workspace tests, the title-parity step, the build, and the headless selftest.
 
-## License
+## Links
 
-MIT — see [LICENSE](LICENSE).
+- [Releases](https://github.com/nathwn12/potflix/releases)
+- [MIT](LICENSE)
