@@ -174,7 +174,7 @@ try {
   }
 
   Write-Host '[check] test'
-  cargo test --workspace --release --locked
+  & (Join-Path $root 'tools\rust-test.ps1') -MaxJobs 8
   if ($LASTEXITCODE -ne 0) {
     Write-Host "CHECK FAILED: test (exit $LASTEXITCODE)" -ForegroundColor Red
     exit 1

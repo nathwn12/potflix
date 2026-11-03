@@ -213,6 +213,19 @@ pub(crate) fn dead_url() -> String {
     format!("http://{addr}")
 }
 
+/// A loopback mock that answers every request immediately with a 500 and
+/// records each hit in `hits`. The kind-gate test points its sources here
+/// instead of a dead port: a ruled-out query still returns `Ok(None)` without
+/// touching the wire, while an allowed query surfaces a wire error proven by
+/// a recorded hit rather than a connection timeout.
+pub(crate) fn failing_server(hits: &Arc<AtomicUsize>) -> FakeServer {
+    let hits = Arc::clone(hits);
+    FakeServer::start(move |_| {
+        hits.fetch_add(1, Ordering::SeqCst);
+        Response::error(500, "boom")
+    })
+}
+
 fn serve_connection<F>(stream: TcpStream, handler: Arc<F>)
 where
     F: Fn(&Request) -> Response + Send + Sync + 'static,

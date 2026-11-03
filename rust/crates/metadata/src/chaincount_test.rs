@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use metadata_core::context::resolve_query;
@@ -9,7 +10,7 @@ use metadata_core::types::{Episode, Kind, Media, Query};
 use metadata_http::cancel::Cancel;
 
 use crate::resolver::{Options, Resolver, Source};
-use crate::testsupport::{dead_url, http_client, wiki_client, TempDir};
+use crate::testsupport::{failing_server, http_client, wiki_client, TempDir};
 use crate::Error;
 use crate::{anilist::AnilistSource, cinemeta::CinemetaSource};
 use crate::{ann::AnnSource, bangumi::BangumiSource, episodate::EpisodateSource};
@@ -305,7 +306,14 @@ fn chain_call_counts() {
 /// control that proves the dead server would have been hit).
 #[test]
 fn kind_gate_no_network() {
-    let dead = dead_url();
+    // The positive control answers immediately on loopback and records each
+    // hit: an allowed query must surface a wire error AND leave a recorded
+    // hit, while a ruled-out query must leave the counter untouched. A dead
+    // port cost ~1 s per allowed query (11.1 s for the 11 sources); the mock
+    // keeps the same proof without the timeout.
+    let hits: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+    let mock = failing_server(&hits);
+    let mock_url = mock.url();
     let series_q = Query {
         kind: Kind::SERIES,
         title: "Breaking Bad".to_string(),
@@ -327,83 +335,99 @@ fn kind_gate_no_network() {
     let cases: Vec<(&str, Box<dyn Source>, &Query, &Query)> = vec![
         (
             "cinemeta",
-            Box::new(CinemetaSource::new(dead.clone(), http_client())),
+            Box::new(CinemetaSource::new(mock_url.clone(), http_client())),
             &empty_q,
             &movie_q,
         ),
         (
             "wikipedia",
-            Box::new(WikipediaSource::new(dead.clone(), wiki_client())),
+            Box::new(WikipediaSource::new(mock_url.clone(), wiki_client())),
             &series_q,
             &movie_q,
         ),
         (
             "tvmaze",
-            Box::new(TvmazeSource::new(dead.clone(), http_client())),
+            Box::new(TvmazeSource::new(mock_url.clone(), http_client())),
             &movie_q,
             &series_q,
         ),
         (
             "anilist",
-            Box::new(AnilistSource::new(dead.clone(), http_client())),
+            Box::new(AnilistSource::new(mock_url.clone(), http_client())),
             &movie_q,
             &series_q,
         ),
         (
             "tenrai",
-            Box::new(TenraiSource::new(dead.clone(), http_client())),
+            Box::new(TenraiSource::new(mock_url.clone(), http_client())),
             &movie_q,
             &series_q,
         ),
         (
             "kitsu",
-            Box::new(KitsuSource::new(dead.clone(), http_client())),
+            Box::new(KitsuSource::new(mock_url.clone(), http_client())),
             &movie_q,
             &series_q,
         ),
         (
             "justwatch",
-            Box::new(JustWatchSource::new(dead.clone(), http_client())),
+            Box::new(JustWatchSource::new(mock_url.clone(), http_client())),
             &series_q,
             &movie_q,
         ),
         (
             "episodate",
-            Box::new(EpisodateSource::new(dead.clone(), http_client())),
+            Box::new(EpisodateSource::new(mock_url.clone(), http_client())),
             &movie_q,
             &series_q,
         ),
         (
             "bangumi",
-            Box::new(BangumiSource::new(dead.clone(), http_client())),
+            Box::new(BangumiSource::new(mock_url.clone(), http_client())),
             &movie_q,
             &series_q,
         ),
         (
             "livechart",
-            Box::new(LivechartSource::new(dead.clone(), http_client())),
+            Box::new(LivechartSource::new(mock_url.clone(), http_client())),
             &movie_q,
             &series_q,
         ),
         (
             "ann",
-            Box::new(AnnSource::new(dead.clone(), http_client())),
+            Box::new(AnnSource::new(mock_url.clone(), http_client())),
             &movie_q,
             &series_q,
         ),
     ];
     for (name, source, ruled_out, allowed) in cases {
         let cancel = Cancel::with_deadline(Duration::from_secs(10));
+        let before = hits.load(Ordering::SeqCst);
         match source.find(&cancel, ruled_out) {
             Ok(None) => {}
             other => panic!("{name} ruled-out query: got {other:?}, want Ok(None)"),
         }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            before,
+            "{name}: ruled-out query must not touch the wire"
+        );
         match source.find(&cancel, allowed) {
-            Err(err) => assert!(
-                !err.message().is_empty(),
-                "{name}: the allowed query must surface a wire error"
-            ),
+            Err(err) => {
+                assert!(
+                    !err.message().is_empty(),
+                    "{name}: the allowed query must surface a wire error"
+                );
+                assert!(
+                    err.message().contains("500"),
+                    "{name}: the allowed query must surface the recording 500 mock, got {err:?}"
+                );
+            }
             Ok(other) => panic!("{name} allowed query: got {other:?}, want a network error"),
         }
+        assert!(
+            hits.load(Ordering::SeqCst) > before,
+            "{name}: the allowed query must reach the wire"
+        );
     }
 }

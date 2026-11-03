@@ -1659,6 +1659,15 @@ mod tests {
             let _ = accept_tx.send(srv.accept().map_err(|e| e.to_string()));
         });
 
+        let act = discord::Activity {
+            details: "Show".to_string(),
+            state: r#"S1 E2 "Pilot""#.to_string(),
+            small_image: "play".to_string(),
+            has_start: true,
+            start: 12345,
+            ..Default::default()
+        };
+
         let c = discord::Client::new(discord::Config {
             client_id: CLIENT_ID.to_string(),
             pipe_base: base,
@@ -1679,6 +1688,12 @@ mod tests {
             })),
             ..Default::default()
         });
+        // No connection is published yet, so this is deterministically
+        // NotConnected: proves the pre-connection kind explicitly.
+        match c.set_activity(act.clone()) {
+            Err(discord::Error::NotConnected) => {}
+            other => panic!("pre-connect SetActivity = {other:?}, want NotConnected"),
+        }
         c.start();
 
         let sc = match accept_rx.recv_timeout(Duration::from_secs(5)) {
@@ -1690,19 +1705,29 @@ mod tests {
         let (op, _) = sc.read_frame().expect("handshake frame");
         assert_eq!(op, discord::OP_HANDSHAKE);
 
-        let act = discord::Activity {
-            details: "Show".to_string(),
-            state: r#"S1 E2 "Pilot""#.to_string(),
-            small_image: "play".to_string(),
-            has_start: true,
-            start: 12345,
-            ..Default::default()
-        };
-
         // Before Discord's READY dispatch a command is refused, not written.
-        match c.set_activity(act.clone()) {
-            Err(discord::Error::NotReady) => {}
-            other => panic!("pre-READY SetActivity = {other:?}, want NotReady"),
+        // The handshake read proves the peer accepted, but the client's
+        // connection publication races the first send: `send()` returns
+        // `NotConnected` while `state.conn` is None, then `NotReady` until
+        // READY. There is no public pre-READY observable (`generation()` and
+        // `on_connect` only advance at READY), so the call itself is the
+        // signal: retry ONLY `NotConnected` with `yield_now` up to 3 s, fail
+        // on any other non-`NotReady` result, and require the terminal state
+        // to be `NotReady` before READY is written below. No sleep, still
+        // pre-READY (READY is written below, and the
+        // `connected clientId=<redacted>` wait stays after it, unchanged).
+        let pre_ready_deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            match c.set_activity(act.clone()) {
+                Err(discord::Error::NotReady) => break,
+                Err(discord::Error::NotConnected)
+                    if std::time::Instant::now() < pre_ready_deadline =>
+                {
+                    std::thread::yield_now();
+                    continue;
+                }
+                other => panic!("pre-READY SetActivity = {other:?}, want NotReady"),
+            }
         }
 
         sc.write_frame(
