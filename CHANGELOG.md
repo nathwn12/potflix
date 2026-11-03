@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- the icon renderer boxed the P's bowl arc from its start point instead of the ellipse centre, so the bowl was drawn one radius too wide and the mark sat off-centre, the play notch riding the bowl's left half; `tools\make-icons.ps1` now boxes the bowl from its centre and fails when a mark is not centred.
+
 ## [1.2.0] - 2026-11-03
 
 ### Changed
