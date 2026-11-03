@@ -4165,7 +4165,7 @@ thread_local! {
 }
 
 /// The status bar's right-aligned version, read from the same constant the
-/// window already uses ([`crate::settings::APP_VERSION`], `1.1.0` -> `v1.1`).
+/// window already uses ([`crate::settings::APP_VERSION`], `x.y.z` -> `vx.y`).
 /// Pure so the paint and its tests agree on the exact short form.
 #[must_use]
 pub fn app_version_short() -> String {
@@ -12704,7 +12704,7 @@ fn paint_scan_bar(hdc: Gdi::HDC, status: Rect, dpi: i32, st: &UiState) {
     );
 }
 
-/// The status bar's right-aligned version (`v1.1` from
+/// The status bar's right-aligned version (`v<major>.<minor>` from
 /// [`crate::settings::APP_VERSION`]): 12px muted, vertically centred in the
 /// 24px bar, inset 16px from the window's right edge. Pure text, no control.
 ///
@@ -12722,7 +12722,7 @@ pub fn status_version_rect(status: Rect, dpi: i32) -> Rect {
 }
 
 /// The status version's font: the ONE source both the fit measurement and the
-/// paint read, so the measured "v1.1" is the rendered "v1.1".
+/// paint read, so the measured short version is the rendered short version.
 fn version_font(dpi: i32) -> Gdi::HFONT {
     brand::ui(scale_px(dpi, 12), brand::UI_WEIGHT)
 }
@@ -22936,7 +22936,15 @@ mod tests {
     /// `H:MM[:SS]`; paused counts up and holds the bar; no anchor hides it.
     #[test]
     fn hero_meta_and_version_derive_from_the_record() {
-        assert_eq!(app_version_short(), "v1.1", "from {}", crate::settings::APP_VERSION);
+        let mut version_parts = crate::settings::APP_VERSION.split('.');
+        let major = version_parts.next().unwrap_or("").trim();
+        let minor = version_parts.next().unwrap_or("").trim();
+        assert_eq!(
+            app_version_short(),
+            format!("v{major}.{minor}"),
+            "from {}",
+            crate::settings::APP_VERSION
+        );
         // Movies show the runtime, never an episode marker.
         assert_eq!(
             hero_meta_for(2024, true, false, "2h 46m", 0, 0, 0),
