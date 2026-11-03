@@ -7,82 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- Background prefetch of the playing title the moment a video starts, so
-  `Fix match` opens already populated from that cache instead of running its
-  search in front of you.
-- Pattern detection reads `S1`/`S01`/`Season` folders and `E1`/`E01`/`Episode`
-  filenames, plus matching sibling files and anime folder names, to choose TV
-  against movie and regular against anime.
-- Same-work rows from different providers merge into one result: the merge
-  keeps the first-ranked identity and splices that row's empty poster,
-  synopsis, genres and length from the others, and the provisional latch
-  carries the merged synopsis into the RPC immediately.
-
 ### Changed
 
-- The window is rebuilt around one object: the title PotPlayer is playing. The
-  object card (cover, title, year/kind, connection state) sits first, one
-  title+year field and one Search follow it, and every payload knob -- field
-  toggles, the line-2 state row and the kind override -- lives behind a single
-  `Advanced` disclosure. At rest at 463x703 the window shows zero payload
-  controls, one search verb and no repair affordance.
-- `Fix match…` is no longer a peer of the query field. Repair is one text row
-  inside the results list (`Not this one? Open advanced match…`), present only
-  while a row is selected; the dialog's criteria and wire behaviour are
-  unchanged.
-- The matched record's kind now sets the control: a series match is latched as
-  a series even when the previous search was seeded as a movie, and the kind
-  display is derived from the record rather than from user state.
-- The Discord previews no longer borrow the local account name: the member and
-  profile surfaces read `You`. This build exposes no connected Discord identity
-  to the window, so no handle is invented.
-
-- The card mapping, implemented in the working tree but not yet shipped: the
-  header is the media title -- `name` carries it, so the client draws
-  `Watching <media title>` (the movie title, or the series title for an
-  episode) and never `Watching Potflix`; series line 1
-  stays empty because the header already carries the show title, line 2 is
-  `SxxEyy · Episode` (the filename's own tag stands in for a missing code;
-  the episode title is the resolved title, else the filename's own episode
-  name), with `- Paused` when paused; movie line 1 is `Title (Year)` and
-  line 2 is `Genres · Runtime` with missing parts skipped (`- Paused` when
-  paused). The synopsis no longer takes a body line: it rides the artwork
-  hover text (`large_text`) as a snippet capped at 128 UTF-16 units that ends
-  with `…` whenever it is cut, while the complete stored note stays in the
-  Card view's `Synopsis` tooltip -- the movie tooltip is no longer omitted.
-  No status icon rides the card: the small slot is never populated. The
-  artwork slot holds the resolved poster URL or nothing -- the branded app
-  mark is never a missing-art fallback, and the Card view paints no `P` mark,
-  FILM/SERIES badge or play/pause glyph over or instead of the art
-  (`rust\crates\presence\src\lib.rs`, `rust\crates\discord\src\activity.rs`,
-  `rust\crates\potflix-win\src\window.rs`). A season-0 or absent season never fabricates `S00`:
-  absolute episodes render `E02` from the absolute number. An empty series
-  line 2 is a deliberate one-line card -- as is any state rung whose text
-  would repeat the header title (`""`, `"Paused"` when paused) -- so `Minimal`
-  is not the only one-line path. Nothing playing clears the card: no
-  `Browsing`/`Idle` activity and no header left behind
-  (`rust\crates\app\src\main.rs`).
-- The Card view follows the live card's kind on its own: the Series/Movie
-  toggle (`Card lines for` row) is removed, the Details row is removed (line
-  1 is fixed by the mapping; the stored `Default` value stays for
-  compatibility, and only the State row offers presets), and the retired
-  Title/Series/Episode ids migrate to Default on load and on save
-  (`rust\crates\presence\src\cardspec.rs`,
-  `rust\crates\app-support\src\config.rs`,
-  `rust\crates\potflix-win\src\window.rs`).
-- Search runs every provider leg concurrently and streams rows into the picker
-  as each leg answers, instead of waiting for the slowest.
-- The reliable chain is TVmaze, AniList, Tenrai, Kitsu and Cinemeta;
-  Wikipedia, JustWatch, Episodate, Bangumi, LiveChart and ANN are removed.
-- Scopes are `All` / `TV` / `Movies` / `Anime TV` / `Anime Movies` and rows
-  read `Regular TV`, `Regular movie`, `Anime TV`, `Anime movie`; clicking a
-  result latches it immediately with the season/show or movie scope the file
-  shape implies.
+- One universal search: the scope row (`All / TV / Movies / Anime TV / Anime Movies`) is gone; every query runs both chains and merges, so no category reaches the user.
+- Result rows carry poster thumbnails, and artwork is always on: the Artwork toggle is deleted, and an undecodable cached cover is dropped instead of poisoning the slot.
+- The settled card: a movie reads `Year · Genre, Genre` over the runtime; a series leaves line 1 empty and reads `S05E14 · Episode` on line 2; a paused card carries no timestamps, so no count-up timer appears; episode prose never rides the tooltip; the owner's latch poster outranks provider art.
+- Settings is exactly five rows: Discord connection, Close to tray, Run at startup, Theme, Clear metadata. The presence chip tells the truth: silent while the link is healthy, naming the reason only when it is not.
 
 ### Fixed
 
+- Every settings write honours the injected config path, so a test run can no longer rewrite the owner's real `config.json`.
 - A single-file movie correction inside a latched show no longer deletes the
   show-wide series latch: only the season-folder latch for the file's own
   season is cleared, so the show cover, episode pins, and every other episode

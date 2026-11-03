@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/icon.ico" width="120" height="120" alt="Potflix icon" />
+  <img src="assets/icon.svg" width="120" alt="Potflix icon" />
 </p>
 
 # Potflix
@@ -32,9 +32,15 @@ Discord shows `Watching <title>` while media plays. Closing the window parks the
 | Key | Default | Effect |
 | --- | --- | --- |
 | `POTFLIX_CLIENT_ID` env or `client-id.txt` beside the exe | built-in ID | Discord app name and artwork |
-| Search scope | `All / TV / Movies / Anime TV / Anime Movies` | Limit lookup to one clear class |
 | `--minimized` | off | Start silent in the tray, for autostart |
 | `--selftest` | off | Headless wiring proof; needs no PotPlayer or Discord |
+
+## Screenshots
+
+<p>
+  <img src="assets/screenshot-card.png" width="420" alt="Card view" />
+  <img src="assets/screenshot-settings.png" width="420" alt="Settings view" />
+</p>
 
 ## Development
 
