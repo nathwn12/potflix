@@ -516,8 +516,6 @@ pub struct SettingsLayout {
     pub labels: Vec<NamedTextRect>,
     /// The scan-speed hint's wrapped text block.
     pub hint: Rect,
-    /// The dead-cache line.
-    pub dead: Rect,
     /// The Theme row's title ("Theme") and its 12px muted description. The
     /// row itself is the two 36px segments in `btns` (`BTN_THEME_*`); these
     /// rects are the left text column sharing the same 48px band.
@@ -1236,13 +1234,6 @@ pub fn compute_settings_layout(
 
     push_label(&mut l, "settings.lib", &mut y);
     push_row(&mut l, BTN_CLEAR_CACHE, "Clear metadata".into(), BTN_DANGER, &mut y);
-    y += gap;
-    l.dead = Rect {
-        left: margin,
-        top: y,
-        right: margin + content_w,
-        bottom: y + cap_h,
-    };
 
     // Top-bar controls: gear back to Card, self hidden but wired.
     l.btns.push(UiButton {
@@ -1278,7 +1269,7 @@ pub fn settings_scroll_origin(dpi: i32) -> i32 {
 }
 
 /// The bottom of the Settings content in an unscrolled table: the lowest
-/// scrolled rect (rows, segments, hint, dead line). Pure so paint, hit test
+/// scrolled rect (rows, segments, hint). Pure so paint, hit test
 /// and focus clamp against the same range.
 #[must_use]
 pub fn settings_content_bottom(l: &SettingsLayout, dpi: i32) -> i32 {
@@ -1295,7 +1286,7 @@ pub fn settings_content_bottom(l: &SettingsLayout, dpi: i32) -> i32 {
         }
         bottom = bottom.max(lab.rc.bottom);
     }
-    bottom = bottom.max(l.hint.bottom).max(l.dead.bottom);
+    bottom = bottom.max(l.hint.bottom);
     bottom = bottom.max(l.theme_title.bottom).max(l.theme_desc.bottom);
     bottom
 }
@@ -1341,7 +1332,6 @@ pub fn apply_settings_scroll(mut l: SettingsLayout, scroll: i32, ch: i32, dpi: i
         shift(&mut lab.rc);
     }
     shift(&mut l.hint);
-    shift(&mut l.dead);
     shift(&mut l.theme_title);
     shift(&mut l.theme_desc);
     l
@@ -1477,10 +1467,6 @@ pub fn settings_text_rects(cw: i32, ch: i32, dpi: i32, l: &SettingsLayout) -> Ve
     out.push(NamedTextRect {
         id: "settings.hint".into(),
         rc: l.hint,
-    });
-    out.push(NamedTextRect {
-        id: "settings.dead".into(),
-        rc: l.dead,
     });
     for b in &l.btns {
         out.push(NamedTextRect {
@@ -4842,7 +4828,6 @@ pub struct UiState {
     /// is shown only while no live preview exists, and it never sends Discord
     /// activity — the object card says so in words.
     local_preview: Option<(CardKind, CardPreviewInput)>,
-    pub dead_cache_count: i32,
 
     preview_series: Option<CardPreviewInput>,
     preview_movie: Option<CardPreviewInput>,
@@ -4936,7 +4921,6 @@ impl Default for UiState {
             preload_cancel: None,
             preview_kind: None,
             local_preview: None,
-            dead_cache_count: 0,
             preview_series: None,
             preview_movie: None,
             synopsis_pinned: false,
@@ -9002,7 +8986,6 @@ impl UiState {
         self.scan_speed_state = cfg.effective_scan_speed().to_string();
         self.theme_state = cfg.effective_theme().to_string();
         set_live_theme(&self.theme_state);
-        self.dead_cache_count = crate::settings::refresh_dead_cache_count();
         self.open_settings();
     }
 
@@ -11461,7 +11444,6 @@ impl UiState {
             )));
             return;
         }
-        self.dead_cache_count = crate::settings::refresh_dead_cache_count();
         app_logf("library: cleared metadata cache");
         self.set_status_text(crate::settings::CLEAR_METADATA_STATUS);
     }
@@ -13388,18 +13370,6 @@ fn paint_narrow_settings(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &Se
             hdc,
             crate::settings::SCAN_HINT_TEXT,
             vis,
-            hint_font,
-            COL_MUTED,
-        );
-    }
-    if let Some(vis) = clip_rect_above_status(l.dead, status_top)
-        && vis.bottom > vis.top
-    {
-        draw_ui_text(
-            hdc,
-            &crate::settings::dead_cache_label(st.dead_cache_count),
-            vis,
-            fmt_left,
             hint_font,
             COL_MUTED,
         );
@@ -18874,15 +18844,24 @@ mod tests {
         }
     }
 
+    /// Owner order: no dead-cache line under Clear metadata. The Settings
+    /// layout carries no such rect, no text id, and Clear metadata stays.
     #[test]
-    fn dead_cache_label_text() {
-        assert_eq!(
-            crate::settings::dead_cache_label(0),
-            "0 titles marked dead - Clear metadata retries them"
+    fn no_dead_cache_line_in_settings() {
+        let l = compute_settings_layout(MAIN_CLIENT_W, MAIN_CLIENT_H, 96, false, "turbo", "amoled");
+        assert!(
+            l.labels.iter().all(|lab| lab.id != "settings.dead"),
+            "dead-cache text rect is gone"
         );
-        assert_eq!(
-            crate::settings::dead_cache_label(5),
-            "5 titles marked dead - Clear metadata retries them"
+        assert!(
+            settings_text_rects(MAIN_CLIENT_W, MAIN_CLIENT_H, 96, &l)
+                .iter()
+                .all(|t| t.id != "settings.dead"),
+            "no painted dead-cache line"
+        );
+        assert!(
+            l.settings_btn(BTN_CLEAR_CACHE).is_some(),
+            "Clear metadata survives"
         );
     }
 

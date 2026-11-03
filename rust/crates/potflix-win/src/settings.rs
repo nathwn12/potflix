@@ -242,18 +242,6 @@ pub fn on_select_scan_speed(cfg_path: &Path, profile: &str) -> Result<String, St
     Ok(format!("Scan speed: {}", scan_segment_label(profile)))
 }
 
-/// `deadCacheLabel` (`go\settings_sections.go:164`).
-#[must_use]
-pub fn dead_cache_label(n: i32) -> String {
-    format!("{n} titles marked dead - Clear metadata retries them")
-}
-
-/// `refreshDeadCacheCount` (`go\settings_sections.go:170`).
-#[must_use]
-pub fn refresh_dead_cache_count() -> i32 {
-    metadata::cache::count_negatives(&metadata_dir())
-}
-
 // ---------------------------------------------------------------------------
 // Window-free cores (`go\settings_sections.go:203-275`).
 // ---------------------------------------------------------------------------

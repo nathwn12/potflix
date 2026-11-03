@@ -1137,7 +1137,7 @@ fn run_ui(log: &'static Logger) {
     let _ = dc.close();
 }
 
-fn snapshot_request(args: &[String]) -> Option<Result<(String, String), String>> {
+fn snapshot_request(args: &[String]) -> Option<Result<(String, String, bool), String>> {
     let pos = args.iter().position(|a| a == "--snapshot")?;
     let frame = match args.get(pos + 1) {
         Some(f) => f.clone(),
@@ -1148,7 +1148,7 @@ fn snapshot_request(args: &[String]) -> Option<Result<(String, String), String>>
         Some(o) => o.clone(),
         None => return Some(Err("snapshot: --snapshot <frame> --out <path.png>".into())),
     };
-    Some(Ok((frame, out)))
+    Some(Ok((frame, out, potflix_win::snapshot::want_real_art(args))))
 }
 
 fn main() {
@@ -1157,16 +1157,30 @@ fn main() {
     if let Some(req) = snapshot_request(&args) {
         selftest::attach_console();
         let code = match req {
-            Ok((frame, out)) => match potflix_win::snapshot::capture_snapshot(&frame, &out) {
-                Ok(()) => {
-                    println!("SNAPSHOT-OK {frame} {out}");
-                    0
+            Ok((frame, out, art_real)) => {
+                match potflix_win::snapshot::capture_snapshot_with_art(&frame, &out, art_real) {
+                    Ok(summary) => {
+                        println!("SNAPSHOT-OK {frame} {out}");
+                        if summary.real {
+                            println!("ART=real");
+                            println!("ART_DISTINCT={}", summary.distinct);
+                            for (name, hex) in &summary.posters {
+                                println!("ART_POSTER {name} {hex}");
+                            }
+                        } else {
+                            println!("ART=seeded");
+                        }
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("SNAPSHOT-FAIL: {e}");
+                        if e.starts_with("art-duplicate:") {
+                            println!("ART=duplicate");
+                        }
+                        1
+                    }
                 }
-                Err(e) => {
-                    eprintln!("SNAPSHOT-FAIL: {e}");
-                    1
-                }
-            },
+            }
             Err(e) => {
                 eprintln!("SNAPSHOT-FAIL: {e}");
                 1
