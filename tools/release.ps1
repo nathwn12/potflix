@@ -233,6 +233,15 @@ function Invoke-ReleaseGate([string]$Repo, [string]$CheckPath) {
   return $g.Code
 }
 
+# True when a --numstat line holds exactly the expected added/removed counts:
+# the first two tab-separated fields must equal $Added/$Removed as strings,
+# so '-' (binary) never passes; the trailing path is required but ignored.
+function Test-Numstat([string]$Line, [string]$Added, [string]$Removed) {
+  $parts = ("$Line").Trim() -split "`t"
+  if ($parts.Count -lt 3) { return $false }
+  return ($parts[0] -eq $Added -and $parts[1] -eq $Removed)
+}
+
 function Remove-ReleaseDir([string]$Repo, [string]$V) {
   $dir = Join-Path $Repo ("build\release\" + $V)
   if (Test-Path -LiteralPath $dir) {
@@ -263,7 +272,7 @@ function Invoke-SelfTest([string]$Repo) {
   }
   New-Item -ItemType Directory -Force -Path $scratch | Out-Null
   try {
-    # 1/6: dirty tree refuses with exit 2.
+    # 1/7: dirty tree refuses with exit 2.
     $d = Join-Path $scratch 'dirty'
     New-Item -ItemType Directory -Force -Path $d | Out-Null
     [void](Invoke-Git $d @('init', '-q'))
@@ -271,12 +280,12 @@ function Invoke-SelfTest([string]$Repo) {
     Set-Content -LiteralPath (Join-Path $d 'file.txt') -Value 'x' -NoNewline
     $dirty = @(Get-DirtyPaths $d)
     if ($dirty.Count -eq 0) {
-      Write-Host 'SELFTEST FAIL 1/6: dirty scratch repo read as clean'
+      Write-Host 'SELFTEST FAIL 1/7: dirty scratch repo read as clean'
       return 1
     }
-    Write-Host 'SELFTEST 1/6 PASS: dirty tree refuses with exit 2'
+    Write-Host 'SELFTEST 1/7 PASS: dirty tree refuses with exit 2'
 
-    # 2/6: wrong branch refuses with exit 3.
+    # 2/7: wrong branch refuses with exit 3.
     $b = Join-Path $scratch 'branch'
     New-Item -ItemType Directory -Force -Path $b | Out-Null
     [void](Invoke-Git $b @('init', '-q', '-b', 'main'))
@@ -284,12 +293,12 @@ function Invoke-SelfTest([string]$Repo) {
     [void](Invoke-Git $b @('checkout', '-q', '-b', 'feature/x'))
     $br = Get-Branch $b
     if ($br -eq 'main') {
-      Write-Host 'SELFTEST FAIL 2/6: scratch branch read as main'
+      Write-Host 'SELFTEST FAIL 2/7: scratch branch read as main'
       return 1
     }
-    Write-Host 'SELFTEST 2/6 PASS: wrong branch refuses with exit 3'
+    Write-Host 'SELFTEST 2/7 PASS: wrong branch refuses with exit 3'
 
-    # 3/6: HEAD ahead of origin/main refuses with exit 4 (local bare remote,
+    # 3/7: HEAD ahead of origin/main refuses with exit 4 (local bare remote,
     # no network).
     $bare = Join-Path $scratch 'remote.git'
     [void](Invoke-Git $scratch @('init', '-q', '--bare', 'remote.git'))
@@ -301,12 +310,12 @@ function Invoke-SelfTest([string]$Repo) {
     $head = ("$((Invoke-Git $w @('rev-parse', 'HEAD')).Lines -join '')").Trim()
     $up = ("$((Invoke-Git $w @('rev-parse', 'origin/main')).Lines -join '')").Trim()
     if ($head -eq '' -or $head -eq $up) {
-      Write-Host 'SELFTEST FAIL 3/6: scratch clone did not diverge as built'
+      Write-Host 'SELFTEST FAIL 3/7: scratch clone did not diverge as built'
       return 1
     }
-    Write-Host 'SELFTEST 3/6 PASS: diverged main refuses with exit 4'
+    Write-Host 'SELFTEST 3/7 PASS: diverged main refuses with exit 4'
 
-    # 4/6: existing tag refuses with exit 5.
+    # 4/7: existing tag refuses with exit 5.
     $t = Join-Path $scratch 'tag'
     New-Item -ItemType Directory -Force -Path $t | Out-Null
     [void](Invoke-Git $t @('init', '-q'))
@@ -314,22 +323,22 @@ function Invoke-SelfTest([string]$Repo) {
     [void](Invoke-Git $t @('tag', 'v9.9.9'))
     $sha = Get-LocalTagSha $t '9.9.9'
     if ($sha -eq '') {
-      Write-Host 'SELFTEST FAIL 4/6: scratch tag not found after tagging'
+      Write-Host 'SELFTEST FAIL 4/7: scratch tag not found after tagging'
       return 1
     }
-    Write-Host 'SELFTEST 4/6 PASS: existing tag refuses with exit 5'
+    Write-Host 'SELFTEST 4/7 PASS: existing tag refuses with exit 5'
 
-    # 5/6: non-greater version refuses with exit 6 (pure compare, no repo).
+    # 5/7: non-greater version refuses with exit 6 (pure compare, no repo).
     $c1 = Compare-Version '1.2.0' '1.2.0'
     $c2 = Compare-Version '1.1.9' '1.2.0'
     $c3 = Compare-Version '1.10.0' '1.9.9'
     if ($c1 -ne 0 -or $c2 -ne -1 -or $c3 -ne 1) {
-      Write-Host 'SELFTEST FAIL 5/6: version compare misordered equal/lower/higher'
+      Write-Host 'SELFTEST FAIL 5/7: version compare misordered equal/lower/higher'
       return 1
     }
-    Write-Host 'SELFTEST 5/6 PASS: non-greater version refuses with exit 6'
+    Write-Host 'SELFTEST 5/7 PASS: non-greater version refuses with exit 6'
 
-    # 6/6: red gate refuses with exit 7 (stub scripts, never the real gate).
+    # 6/7: red gate refuses with exit 7 (stub scripts, never the real gate).
     $failStub = Join-Path $scratch 'gate-fail.ps1'
     Set-Content -LiteralPath $failStub -Value "param([switch]`$Build,[switch]`$Selftest)`nexit 1" -NoNewline
     $passStub = Join-Path $scratch 'gate-pass.ps1'
@@ -337,10 +346,21 @@ function Invoke-SelfTest([string]$Repo) {
     $redCode = Invoke-ReleaseGate $scratch $failStub
     $greenCode = Invoke-ReleaseGate $scratch $passStub
     if ($redCode -eq 0 -or $greenCode -ne 0) {
-      Write-Host 'SELFTEST FAIL 6/6: gate stub did not map red to nonzero and green to zero'
+      Write-Host 'SELFTEST FAIL 6/7: gate stub did not map red to nonzero and green to zero'
       return 1
     }
-    Write-Host 'SELFTEST 6/6 PASS: red gate refuses with exit 7'
+    Write-Host 'SELFTEST 6/7 PASS: red gate refuses with exit 7'
+
+    # 7/7: numstat parse takes the first two tab fields, ignoring the path.
+    if (-not (Test-Numstat "1`t1`tpath" '1' '1')) {
+      Write-Host 'SELFTEST FAIL 7/7: numstat 1/1 with path was not accepted'
+      return 1
+    }
+    if ((Test-Numstat "2`t1`tpath" '1' '1') -or (Test-Numstat "-`t-`tpath" '1' '1')) {
+      Write-Host 'SELFTEST FAIL 7/7: numstat 2/1 or binary -/- was wrongly accepted'
+      return 1
+    }
+    Write-Host 'SELFTEST 7/7 PASS: numstat parse accepts 1/1 with path and refuses 2/1'
   } finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
   }
@@ -510,7 +530,7 @@ if ($hits -ne 1) {
 }
 [IO.File]::WriteAllText($cargoPath, ($rawLines -join $cargoEol), (New-Object Text.UTF8Encoding($false)))
 $numstat = ("$((Invoke-Git $root @('diff', '--numstat', '--', 'rust/Cargo.toml')).Lines -join '')").Trim()
-if ($numstat -ne "1`t1") {
+if (-not (Test-Numstat $numstat '1' '1')) {
   Write-Host ("RELEASE FAILED: rust\Cargo.toml diff is " + $numstat + ", expected 1 added / 1 removed; rolled back")
   Invoke-Rollback $root $Version
   exit 8
@@ -532,7 +552,7 @@ if ($cargoCode -ne 0) {
   exit 8
 }
 $lockStat = ("$((Invoke-Git $root @('diff', '--numstat', '--', 'rust/Cargo.lock')).Lines -join '')").Trim()
-if ($lockStat -ne "12`t12") {
+if (-not (Test-Numstat $lockStat '12' '12')) {
   Write-Host ("RELEASE FAILED: Cargo.lock changed " + $lockStat + ", expected 12 added / 12 removed own-crate lines; rolled back")
   Invoke-Rollback $root $Version
   exit 8
