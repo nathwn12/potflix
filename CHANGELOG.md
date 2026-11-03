@@ -7,12 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-03
+
 ### Changed
 
 - One universal search: the scope row (`All / TV / Movies / Anime TV / Anime Movies`) is gone; every query runs both chains and merges, so no category reaches the user.
 - Result rows carry poster thumbnails, and artwork is always on: the Artwork toggle is deleted, and an undecodable cached cover is dropped instead of poisoning the slot.
 - The settled card: a movie reads `Year · Genre, Genre` over the runtime; a series leaves line 1 empty and reads `S05E14 · Episode` on line 2; a paused card carries no timestamps, so no count-up timer appears; episode prose never rides the tooltip; the owner's latch poster outranks provider art.
 - Settings is exactly five rows: Discord connection, Close to tray, Run at startup, Theme, Clear metadata. The presence chip tells the truth: silent while the link is healthy, naming the reason only when it is not.
+- README carries install, usage, and screenshots (`assets/screenshot-card.png`, `assets/screenshot-settings.png`); the app and tray icons are drawn from the current `assets/icon.svg` mark by `tools\make-icons.ps1`.
+- Version lives once in `rust\Cargo.toml` `[workspace.package]` and flows to the exe VERSIONINFO and `APP_VERSION`; CI (`ci.yml`) mirrors the local `tools\check.ps1` gate (clippy plus release tests).
 
 ### Fixed
 
