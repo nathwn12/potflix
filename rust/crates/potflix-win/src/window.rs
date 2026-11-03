@@ -107,10 +107,6 @@ pub const BTN_REPORT: i32 = 23;
 pub const BTN_CLEAR_INDEX: i32 = 24;
 /// Settings BEHAVIOUR "Discord connection" toggle (approved redesign).
 pub const BTN_DISCORD: i32 = 100;
-/// Settings BEHAVIOUR "Metadata cache" toggle (approved redesign).
-pub const BTN_META_CACHE: i32 = 101;
-/// Settings BEHAVIOUR "Card layout" toggle (approved redesign).
-pub const BTN_CARD_LAYOUT_TOGGLE: i32 = 102;
 /// Settings BEHAVIOUR "Theme" segments: AMOLED (default) and Dark. The two
 /// segments share one 48px row; the selected one uses the text-colour
 /// underline convention (`BTN_TOGGLE_ON`), never red.
@@ -1087,12 +1083,11 @@ pub fn compute_layout_total(total: i32, cw: i32, ch: i32, dpi: i32, top: i32) ->
 
 /// `computeSettingsLayout` — approved narrow redesign.
 ///
-/// Pinned 48px top bar + 15pt title, scrollable 48px body rows under 11px caps
-/// labels: BEHAVIOUR (Discord/Close-to-tray/Metadata-cache/Card-layout/Startup as
-/// 36x20 toggles), CARD (five field toggles + four line-2 presets), LIBRARY
-/// (Clear metadata/Clear index/Export/Import/Open log folder), SCAN SPEED
-/// (Gentle/Balanced/Turbo + explainer). 24px status bar. Body rows may extend
-/// past `ch`: the view scrolls, the title and status stay pinned.
+/// Pinned 48px top bar + 15pt title, five 48px body rows under 11px caps
+/// labels: BEHAVIOUR (Discord connection, Close to tray, Run at startup,
+/// plus the Theme segments) and LIBRARY (Clear metadata). The defaults are
+/// the product: no row rebuilds a default. 24px status bar. Body rows may
+/// extend past `ch`: the view scrolls, the title and status stay pinned.
 #[must_use]
 pub fn compute_settings_layout(
     cw: i32,
@@ -1130,11 +1125,9 @@ pub fn compute_settings_layout(
         bottom: status_top + status_h,
     };
 
-    let cur_scan = app_support::config::normalize_scan_speed(scan_speed);
     let cur_theme = app_support::config::normalize_theme(theme);
-    let (_, states) = presence::cardspec::card_presets();
-    let designer = presence::live_designer();
     let spec = crate::settings::startup_toggle_label(startup);
+    let _ = scan_speed;
 
     // Stack cursor below the pinned title.
     let mut y = topbar_h + title_h + gap;
@@ -1180,8 +1173,6 @@ pub fn compute_settings_layout(
     push_label(&mut l, "settings.behaviour", &mut y);
     push_row(&mut l, BTN_DISCORD, "Discord connection".into(), BTN_OUTLINE, &mut y);
     push_row(&mut l, BTN_CLOSE, "Close to tray".into(), BTN_OUTLINE, &mut y);
-    push_row(&mut l, BTN_META_CACHE, "Metadata cache".into(), BTN_OUTLINE, &mut y);
-    push_row(&mut l, BTN_CARD_LAYOUT_TOGGLE, "Card layout".into(), BTN_OUTLINE, &mut y);
     push_row(&mut l, BTN_STARTUP, spec.into(), BTN_OUTLINE, &mut y);
     // Theme row: one 48px band under BEHAVIOUR. Left column carries the
     // "Theme" title plus the 12px muted description; right column carries
@@ -1243,119 +1234,9 @@ pub fn compute_settings_layout(
     }
     y += gap;
 
-    push_label(&mut l, "settings.card", &mut y);
-    // Covers are always on: no artwork toggle. The rest of the field
-    // toggles stay.
-    push_row(
-        &mut l,
-        BTN_FIELD_DETAILS,
-        "Details".to_string(),
-        if designer.details { BTN_TOGGLE_ON } else { BTN_TOGGLE },
-        &mut y,
-    );
-    push_row(
-        &mut l,
-        BTN_FIELD_STATE,
-        "State".to_string(),
-        if designer.state { BTN_TOGGLE_ON } else { BTN_TOGGLE },
-        &mut y,
-    );
-    push_row(
-        &mut l,
-        BTN_FIELD_SYNOPSIS,
-        "Synopsis".to_string(),
-        if designer.synopsis { BTN_TOGGLE_ON } else { BTN_TOGGLE },
-        &mut y,
-    );
-    push_row(
-        &mut l,
-        BTN_FIELD_TIMERS,
-        "Timers".to_string(),
-        if designer.timers { BTN_TOGGLE_ON } else { BTN_TOGGLE },
-        &mut y,
-    );
-    // Line-2 presets: one row of four segments sharing one 48px line.
-    {
-        let n = states.len().max(1) as i32;
-        let seg_gap = sc(SP_2);
-        let w = ((content_w - seg_gap * (n - 1)) / n).max(sc(10));
-        let fallback = app_support::config::CardSpec::default();
-        for (i, p) in states.iter().enumerate() {
-            let i = i as i32;
-            let x = margin + i * (w + seg_gap);
-            l.btns.push(UiButton {
-                id: card_state_button(i),
-                label: p.label.clone(),
-                style: card_preset_style(1, &p.id, &fallback),
-                rc: Rect {
-                    left: x,
-                    top: y,
-                    right: if i == n - 1 { margin + content_w } else { x + w },
-                    bottom: y + row_h,
-                },
-            });
-        }
-        y += row_h;
-    }
-    y += gap;
-
     push_label(&mut l, "settings.lib", &mut y);
     push_row(&mut l, BTN_CLEAR_CACHE, "Clear metadata".into(), BTN_DANGER, &mut y);
-    push_row(&mut l, BTN_CLEAR_INDEX, "Clear index".into(), BTN_DANGER, &mut y);
-    push_row(&mut l, BTN_EXPORT, "Export…".into(), BTN_OUTLINE, &mut y);
-    push_row(&mut l, BTN_IMPORT, "Import…".into(), BTN_OUTLINE, &mut y);
-    push_row(&mut l, BTN_OPEN_LOG, "Open log folder".into(), BTN_OUTLINE, &mut y);
     y += gap;
-
-    push_label(&mut l, "settings.scan", &mut y);
-    {
-        let seg_gap = sc(SP_2);
-        let seg_w = (content_w - seg_gap * 2) / 3;
-        let seg = |i: i32| {
-            let left = margin + i * (seg_w + seg_gap);
-            Rect {
-                left,
-                top: y,
-                right: if i == 2 { margin + content_w } else { left + seg_w },
-                bottom: y + sc(BTN_H),
-            }
-        };
-        l.btns.push(UiButton {
-            id: BTN_SCAN_GENTLE,
-            label: "Gentle".into(),
-            style: crate::settings::scan_segment_style(
-                app_support::config::SCAN_SPEED_GENTLE,
-                cur_scan,
-            ),
-            rc: seg(0),
-        });
-        l.btns.push(UiButton {
-            id: BTN_SCAN_BALANCED,
-            label: "Balanced".into(),
-            style: crate::settings::scan_segment_style(
-                app_support::config::SCAN_SPEED_BALANCED,
-                cur_scan,
-            ),
-            rc: seg(1),
-        });
-        l.btns.push(UiButton {
-            id: BTN_SCAN_TURBO,
-            label: "Turbo".into(),
-            style: crate::settings::scan_segment_style(
-                app_support::config::SCAN_SPEED_TURBO,
-                cur_scan,
-            ),
-            rc: seg(2),
-        });
-        y += sc(BTN_H) + sc(SP_2);
-    }
-    l.hint = Rect {
-        left: margin,
-        top: y,
-        right: margin + content_w,
-        bottom: y + sc(18),
-    };
-    y += sc(18) + sc(SP_1);
     l.dead = Rect {
         left: margin,
         top: y,
@@ -1626,35 +1507,18 @@ pub fn main_focus_order() -> Vec<i32> {
     vec![BTN_CARD, BTN_SETTINGS, BTN_REPORT, BTN_CLOSE]
 }
 
-/// `settingsFocusOrder` — approved narrow visual order: top-bar Card, media
-/// folders, behaviour, CARD, library, scan, in layout order.
+/// `settingsFocusOrder` — approved narrow visual order: top-bar Card, then the
+/// five surviving rows in layout order.
 #[must_use]
 pub fn settings_focus_order() -> Vec<i32> {
     vec![
         BTN_CARD,
         BTN_DISCORD,
         BTN_CLOSE,
-        BTN_META_CACHE,
-        BTN_CARD_LAYOUT_TOGGLE,
         BTN_STARTUP,
         BTN_THEME_AMOLED,
         BTN_THEME_DARK,
-        BTN_FIELD_DETAILS,
-        BTN_FIELD_STATE,
-        BTN_FIELD_SYNOPSIS,
-        BTN_FIELD_TIMERS,
-        card_state_button(0),
-        card_state_button(1),
-        card_state_button(2),
-        card_state_button(3),
         BTN_CLEAR_CACHE,
-        BTN_CLEAR_INDEX,
-        BTN_EXPORT,
-        BTN_IMPORT,
-        BTN_OPEN_LOG,
-        BTN_SCAN_GENTLE,
-        BTN_SCAN_BALANCED,
-        BTN_SCAN_TURBO,
     ]
 }
 
@@ -1664,9 +1528,9 @@ pub fn card_state_button(i: i32) -> i32 {
     BTN_CARD_STATE_AT + i
 }
 
-/// `cardFocusOrder` — approved narrow visual order: gear, field, Search,
-/// hero Fix, pinned Apply, Change filters. Hidden Card/Back stay wired for
-/// Esc/keyboard but are never Tab stops.
+/// `cardFocusOrder` — approved narrow visual order: gear, field, Search, hero
+/// Fix, pinned Apply. The wide workspace keeps its own Advanced disclosure
+/// (mouse-reachable); the narrow layout carries no Change-filters control.
 #[must_use]
 pub fn card_focus_order() -> Vec<i32> {
     vec![
@@ -1675,7 +1539,6 @@ pub fn card_focus_order() -> Vec<i32> {
         BTN_PICKER_SEARCH,
         BTN_FIX_MATCH,
         BTN_PICKER_APPLY,
-        BTN_ADVANCED,
         BTN_SYNOPSIS,
     ]
 }
@@ -2010,11 +1873,10 @@ pub fn compute_card_narrow(
         }
     };
     l.stage = panel;
-    // List area above the pinned footer (Apply 36 + gap + Change 32 + pad).
-    // The footer anchors to the visible bottom (`status_top`), never to
-    // `panel.bottom`: when the pinned bands already exceed a tiny client the
-    // panel extends below the fold, but Apply/Change stay inside the client
-    // above the status bar.
+    // List area above the pinned footer (Apply 36 + gaps). The footer anchors
+    // to the visible bottom (`status_top`), never to `panel.bottom`: when the
+    // pinned bands already exceed a tiny client the panel extends below the
+    // fold, but Apply stays inside the client above the status bar.
     let foot = status_top.min(panel.bottom);
     let apply_top = foot - sc(SP_2) - sc(32) - sc(SP_1) - sc(BTN_H);
     l.picker_results = Rect {
@@ -2083,10 +1945,9 @@ pub fn compute_card_narrow(
             },
         });
     }
-    // Apply pinned to the visible bottom; Change filters text button under it.
-    // Both meet the 32px touch floor (Change filters is a 32px text row).
-    // `foot` is the visible bottom, so both stay inside the client even when
-    // the panel overflows a tiny viewport.
+    // Apply pinned to the visible bottom (one 32px text row of breathing room
+    // to the status bar). `foot` is the visible bottom, so Apply stays inside
+    // the client even when the panel overflows a tiny viewport.
     l.btns.push(UiButton {
         id: BTN_PICKER_APPLY,
         label: "Apply to playing title".into(),
@@ -2096,17 +1957,6 @@ pub fn compute_card_narrow(
             top: apply_top,
             right: panel.right - sc(SP_3),
             bottom: apply_top + sc(BTN_H),
-        },
-    });
-    l.btns.push(UiButton {
-        id: BTN_ADVANCED,
-        label: "Change filters".into(),
-        style: BTN_TEXT,
-        rc: Rect {
-            left: panel.left + sc(SP_3),
-            top: foot - sc(SP_2) - sc(32),
-            right: panel.right - sc(SP_3),
-            bottom: foot - sc(SP_2),
         },
     });
     // Back stays wired for Esc/keyboard, hidden in the new anatomy.
@@ -4943,7 +4793,6 @@ pub struct UiState {
     /// field, so a painted pill and its click can never disagree.
     pub discord_enabled: bool,
     pub close_to_tray: bool,
-    pub card_large_art: bool,
     /// Test-only config-path override: when `Some`, theme/scan persistence
     /// writes there instead of the owner's store, so click tests prove
     /// persistence without touching the real file.
@@ -5066,7 +4915,6 @@ impl Default for UiState {
             startup_state: false,
             discord_enabled: true,
             close_to_tray: true,
-            card_large_art: false,
             test_config_path: None,
             startup_set: Arc::new(|on| {
                 crate::settings::set_startup_enabled(on).map_err(|e| e.to_string())
@@ -10174,33 +10022,9 @@ impl UiState {
             self.on_toggle_close_to_tray();
             return None;
         }
-        if id == BTN_META_CACHE {
-            self.on_toggle_meta_cache();
-            return None;
-        }
-        if id == BTN_CARD_LAYOUT_TOGGLE {
-            self.on_toggle_card_layout();
-            return None;
-        }
-        if let Some(field) = designer_field_for_button(id) {
-            self.toggle_designer_field(field);
-            return None;
-        }
-        if let Some((line, preset)) = card_preset_for_button(id) {
-            debug_assert_eq!(line, 1, "only the State row offers presets");
-            self.on_select_card_preset(&preset);
-            return None;
-        }
         match id {
             BTN_BACK => {
                 self.enter_main();
-                None
-            }
-            BTN_SCAN_GENTLE | BTN_SCAN_BALANCED | BTN_SCAN_TURBO => {
-                let profile = crate::settings::scan_profile_for_button(id);
-                if !profile.is_empty() {
-                    self.on_select_scan_speed(profile);
-                }
                 None
             }
             BTN_THEME_AMOLED | BTN_THEME_DARK => {
@@ -10211,14 +10035,10 @@ impl UiState {
                 None
             }
             BTN_CLEAR_CACHE => Some(BlockingUi::ClearMetadata),
-            BTN_CLEAR_INDEX => Some(BlockingUi::ClearIndex),
-            BTN_EXPORT => Some(BlockingUi::ExportBundle),
-            BTN_IMPORT => Some(BlockingUi::ImportBundle),
             BTN_STARTUP => {
                 self.on_toggle_startup();
                 None
             }
-            BTN_OPEN_LOG => Some(BlockingUi::OpenLogFolder),
             _ => None,
         }
     }
@@ -11276,26 +11096,6 @@ impl UiState {
             "Close to tray: on"
         } else {
             "Close to tray: off"
-        });
-    }
-
-    /// Flip the metadata-cache pill (the picker's persistent cache gate).
-    pub fn on_toggle_meta_cache(&mut self) {
-        self.cache_enabled = !self.cache_enabled;
-        self.set_status_text(if self.cache_enabled {
-            "Metadata cache: on"
-        } else {
-            "Metadata cache: off"
-        });
-    }
-
-    /// Flip the Card-layout pill (large art in the now-playing card).
-    pub fn on_toggle_card_layout(&mut self) {
-        self.card_large_art = !self.card_large_art;
-        self.set_status_text(if self.card_large_art {
-            "Card layout: large art"
-        } else {
-            "Card layout: compact"
         });
     }
 
@@ -13173,14 +12973,37 @@ fn paint_main_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState) {
     }
 }
 
+/// The narrow bar's chip text: the one status the app shows, and it tells the
+/// truth. A healthy link shows nothing (no chrome for a healthy default); a
+/// down link names the reason in one short muted label. The link half reads
+/// the same live mirror the publisher writes
+/// ([`app_support::config::live_discord_up`]), never a constant -- so a build
+/// with no Discord running cannot claim one.
+#[must_use]
+pub fn discord_bar_text(st: &UiState) -> String {
+    if !st.discord_enabled {
+        return "Discord off".to_string();
+    }
+    if app_support::config::live_discord_up() {
+        return String::new();
+    }
+    "Discord not running".to_string()
+}
+
 /// `paintSettingsCard` (`go\window.go:2998`).
 /// The narrow bar's one caller: both narrow views route their 48px chrome
 /// through here so `narrow::bar` has exactly one caller.
-fn paint_narrow_bar(hdc: Gdi::HDC, bar_rc: Rect, dpi: i32, gear_rc: Rect, gear_hovered: bool) {
-    // Snapshot/desktop runs with no live Discord handle: the chip reports the
-    // connected copy the mock pins; the off copy exists for the disconnected
-    // state and is covered by unit tests.
-    narrow::bar(hdc, bar_rc, dpi, "Discord connected", gear_rc, gear_hovered);
+fn paint_narrow_bar(
+    hdc: Gdi::HDC,
+    bar_rc: Rect,
+    dpi: i32,
+    st: &UiState,
+    gear_rc: Rect,
+    gear_hovered: bool,
+) {
+    // No live Discord handle on a snapshot/desktop run: the chip names the
+    // down link; the connected state paints no chrome at all.
+    narrow::bar(hdc, bar_rc, dpi, &discord_bar_text(st), gear_rc, gear_hovered);
 }
 
 /// Narrow Card: bar, hero, search, results panel to the 24px
@@ -13209,6 +13032,7 @@ fn paint_narrow_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &CardLa
                 bottom: scale_px(dpi, TOPBAR_H_L),
             },
             dpi,
+            st,
             gear,
             st.hover_btn == BTN_SETTINGS || st.pressed_btn == BTN_SETTINGS,
         );
@@ -13377,21 +13201,15 @@ fn paint_narrow_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &CardLa
             );
         }
     }
-    // Apply pinned to the panel bottom (disabled with no pick), Change filters
-    // text button under it.
+    // Apply pinned to the panel bottom (disabled with no pick).
     for b in &l.btns {
-        if b.id == BTN_PICKER_APPLY || b.id == BTN_ADVANCED {
+        if b.id == BTN_PICKER_APPLY {
             let mut bb = b.clone();
-            if b.id == BTN_ADVANCED {
-                bb.label = "Change filters".to_string();
-                bb.style = BTN_TEXT;
+            bb.style = if st.card_layout_state().can_apply {
+                BTN_ACCENT
             } else {
-                bb.style = if st.card_layout_state().can_apply {
-                    BTN_ACCENT
-                } else {
-                    BTN_OUTLINE
-                };
-            }
+                BTN_OUTLINE
+            };
             paint_button(hdc, &bb, dpi, button_font, st);
         }
     }
@@ -13448,6 +13266,7 @@ fn paint_narrow_settings(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &Se
                 bottom: sc(TOPBAR_H_L),
             },
             dpi,
+            st,
             gear,
             st.hover_btn == BTN_CARD || st.pressed_btn == BTN_CARD,
         );
@@ -13466,10 +13285,7 @@ fn paint_narrow_settings(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &Se
         };
         let text = match lab.id.as_str() {
             "settings.lib" => "LIBRARY",
-            "settings.media" => "MEDIA FOLDERS",
             "settings.behaviour" => "BEHAVIOUR",
-            "settings.card" => "CARD",
-            "settings.scan" => "SCAN SPEED",
             _ => continue,
         };
         draw_ui_text_tracked(
@@ -13484,11 +13300,8 @@ fn paint_narrow_settings(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &Se
     }
     // Body rows via the one settings_row primitive. The toggle pills read the
     // same stored bools the click flips, so paint and hit-test share one state.
-    let designer = st.designer;
     let discord_on = st.discord_enabled;
     let close_on = st.close_to_tray;
-    let cache_on = st.cache_enabled;
-    let large_on = st.card_large_art;
     let row_info = |id: i32| -> Option<(&'static str, &'static str, narrow::NarrowCtl)> {
         match id {
             BTN_ADD => Some(("Add folder", "Choose a folder to watch for new titles", narrow::NarrowCtl::Chevron)),
@@ -13506,46 +13319,12 @@ fn paint_narrow_settings(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &Se
                 "Keep running when the window is closed",
                 narrow::NarrowCtl::Toggle(close_on),
             )),
-            BTN_META_CACHE => Some((
-                "Metadata cache",
-                "Keep recent matches for faster search",
-                narrow::NarrowCtl::Toggle(cache_on),
-            )),
-            BTN_CARD_LAYOUT_TOGGLE => Some((
-                "Card layout",
-                "Show the large art in the now playing card",
-                narrow::NarrowCtl::Toggle(large_on),
-            )),
             BTN_STARTUP => Some((
                 "Run at startup",
                 "Launch Potflix when Windows starts",
                 narrow::NarrowCtl::Toggle(st.startup_state),
             )),
-            BTN_FIELD_DETAILS => Some((
-                "Details",
-                "Send the title line to Discord",
-                narrow::NarrowCtl::Toggle(designer.details),
-            )),
-            BTN_FIELD_STATE => Some((
-                "State",
-                "Send the status line to Discord",
-                narrow::NarrowCtl::Toggle(designer.state),
-            )),
-            BTN_FIELD_SYNOPSIS => Some((
-                "Synopsis",
-                "Keep the local synopsis body",
-                narrow::NarrowCtl::Toggle(designer.synopsis),
-            )),
-            BTN_FIELD_TIMERS => Some((
-                "Timers",
-                "Send the elapsed time to Discord",
-                narrow::NarrowCtl::Toggle(designer.timers),
-            )),
             BTN_CLEAR_CACHE => Some(("Clear metadata", "Drop every saved match", narrow::NarrowCtl::Chevron)),
-            BTN_CLEAR_INDEX => Some(("Clear index", "Drop the folder index", narrow::NarrowCtl::Chevron)),
-            BTN_EXPORT => Some(("Export…", "Save a bundle of the library", narrow::NarrowCtl::Chevron)),
-            BTN_IMPORT => Some(("Import…", "Restore a bundle", narrow::NarrowCtl::Chevron)),
-            BTN_OPEN_LOG => Some(("Open log folder", "Show the debug logs", narrow::NarrowCtl::Chevron)),
             _ => None,
         }
     };
@@ -13555,26 +13334,6 @@ fn paint_narrow_settings(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &Se
     let mut theme_done = false;
     for b in &l.btns {
         if b.id == BTN_THEME_AMOLED || b.id == BTN_THEME_DARK {
-            continue;
-        }
-        if b.id == BTN_SCAN_GENTLE || b.id == BTN_SCAN_BALANCED || b.id == BTN_SCAN_TURBO {
-            let Some(vis) = clip_rect_above_status(b.rc, status_top) else {
-                continue;
-            };
-            paint_button(hdc, &UiButton { rc: vis, ..b.clone() }, dpi, button_font, st);
-            if b.id == st.hover_btn {
-                draw_focus_ring(hdc, vis, dpi);
-            }
-            continue;
-        }
-        if (BTN_CARD_STATE_AT..BTN_CARD_STATE_AT + 10).contains(&b.id) {
-            let Some(vis) = clip_rect_above_status(b.rc, status_top) else {
-                continue;
-            };
-            paint_button(hdc, &UiButton { rc: vis, ..b.clone() }, dpi, button_font, st);
-            if b.id == st.hover_btn {
-                draw_focus_ring(hdc, vis, dpi);
-            }
             continue;
         }
         if b.id == BTN_CARD || b.id == BTN_SETTINGS || b.id == BTN_BACK {
@@ -15793,24 +15552,20 @@ mod tests {
     #[test]
     fn settings_hit_test() {
         let l = compute_settings_layout(MAIN_CLIENT_W, MAIN_CLIENT_H, 96, false, "balanced", "amoled");
-        // Approved narrow: 7 behaviour (5 + Theme's 2 segments) + 8 CARD (the
-        // artwork toggle is gone) + 5 library + 3 scan + Card gear + 2 hidden
-        // wiring rects. The media folder group is gone by owner order
-        // (2026-11-03).
-        assert_eq!(l.btns.len(), 26);
+        // Approved narrow, five rows: Discord connection, Close to tray, Run
+        // at startup, Theme (AMOLED|Dark segments), Clear metadata -- plus the
+        // Card gear and the 2 hidden wiring rects. Everything else (Metadata
+        // cache, Card layout, the Discord field toggles, the line-2 presets,
+        // Clear index, Export, Import, Open log, Scan speed) is gone by owner
+        // order (2026-11-03).
+        assert_eq!(l.btns.len(), 9);
         for id in [
             BTN_DISCORD,
             BTN_CLOSE,
-            BTN_META_CACHE,
-            BTN_CARD_LAYOUT_TOGGLE,
             BTN_STARTUP,
             BTN_THEME_AMOLED,
             BTN_THEME_DARK,
             BTN_CLEAR_CACHE,
-            BTN_CLEAR_INDEX,
-            BTN_EXPORT,
-            BTN_IMPORT,
-            BTN_OPEN_LOG,
             BTN_CARD,
         ] {
             let rc = l
@@ -15872,12 +15627,16 @@ mod tests {
             on.btns.iter().find(|b| b.id == BTN_STARTUP).unwrap().label,
             "[x] Start with Windows"
         );
-        // LIBRARY group holds the library ids in order.
+        // LIBRARY group holds exactly one row: Clear metadata.
         let lib_idx = l.labels.iter().position(|x| x.id == "settings.lib").unwrap();
         let lib_top = l.labels[lib_idx].rc.bottom;
-        for id in [BTN_CLEAR_CACHE, BTN_CLEAR_INDEX, BTN_EXPORT, BTN_IMPORT] {
-            let rc = l.settings_btn(id).unwrap();
-            assert!(rc.top >= lib_top, "library {id} {rc:?} left the LIBRARY group");
+        let rc = l.settings_btn(BTN_CLEAR_CACHE).unwrap();
+        assert!(rc.top >= lib_top, "Clear metadata left the LIBRARY group: {rc:?}");
+        for id in [BTN_CLEAR_INDEX, BTN_EXPORT, BTN_IMPORT, BTN_OPEN_LOG] {
+            assert!(
+                l.settings_btn(id).is_none(),
+                "library id {id} is gone from Settings"
+            );
         }
         // The startup toggle spans the content width, one row under its label.
         let beh_idx = l.labels.iter().position(|x| x.id == "settings.behaviour").unwrap();
@@ -16099,8 +15858,8 @@ mod tests {
     fn focus_order_covers_rect_table() {
         for (order, want_len) in [
             (main_focus_order(), 4usize),
-            (settings_focus_order(), 24),
-            (card_focus_order(), 7usize),
+            (settings_focus_order(), 7),
+            (card_focus_order(), 6usize),
         ] {
             assert_eq!(order.len(), want_len);
             let mut seen = std::collections::HashSet::new();
@@ -16109,22 +15868,37 @@ mod tests {
             }
         }
         assert_eq!(focus_order_for_view(View::Main).len(), 4);
-        assert_eq!(focus_order_for_view(View::Settings).len(), 24);
-        assert_eq!(focus_order_for_view(View::Card).len(), 7);
+        assert_eq!(focus_order_for_view(View::Settings).len(), 7);
+        assert_eq!(focus_order_for_view(View::Card).len(), 6);
         for id in [BTN_REPORT, BTN_CLOSE, BTN_SETTINGS, BTN_CARD] {
             assert!(main_focus_order().contains(&id), "missing {id}");
         }
-        // The Card presets now live in Settings under CARD: the narrow Card
-        // carries no preset row, so the old Card preset-slice assertion is
-        // retired with the disclosure.
+        // The Card presets live in the wide Card disclosure, never in
+        // Settings: the narrow Card carries no preset row, and neither does
+        // the slimmed Settings table.
         assert!(
             !card_focus_order().contains(&card_state_button(0)),
             "narrow Card carries no preset row"
         );
         assert!(
-            settings_focus_order().contains(&card_state_button(0)),
-            "CARD presets live in Settings"
+            !settings_focus_order().contains(&card_state_button(0)),
+            "Settings carries no preset row"
         );
+        assert!(
+            !settings_focus_order().contains(&BTN_ADVANCED),
+            "Settings has no disclosure control"
+        );
+        assert!(
+            !card_focus_order().contains(&BTN_ADVANCED),
+            "narrow Card carries no Change-filters control"
+        );
+        // Settings lays out exactly the five surviving rows.
+        for id in [BTN_DISCORD, BTN_CLOSE, BTN_STARTUP, BTN_CLEAR_CACHE] {
+            assert!(
+                settings_focus_order().contains(&id),
+                "surviving Settings row {id} is a Tab stop"
+            );
+        }
         // The focus order IS the visible rect table: hidden wiring rects
         // (empty) are keyboard/Esc-only and never Tab stops. The Card pair is
         // the playing shape (hero Fix present); the idle shape omits it.
@@ -16479,7 +16253,10 @@ mod tests {
 
     /// Every fixed blocking action, with the real route that reaches it.
     /// The folder actions (AddDir/OpenFolder) left with the folder feature on
-    /// 2026-11-03; their routes are gone with the controls.
+    /// 2026-11-03; their routes are gone with the controls. The unrouted
+    /// library actions (Clear index, Export, Import, Open log) left Settings
+    /// the same day: their rows are gone, so no click can reach them, and the
+    /// guard release they relied on is still proven by the surviving routes.
     const ROUTES: &[(&str, Drive, BlockingUi)] = &[
         (
             "HideWindow ('Close to tray' button)",
@@ -16496,38 +16273,6 @@ mod tests {
                 btn: BTN_CLEAR_CACHE,
             },
             BlockingUi::ClearMetadata,
-        ),
-        (
-            "ClearIndex ('Clear index' button)",
-            Drive::Btn {
-                view: View::Settings,
-                btn: BTN_CLEAR_INDEX,
-            },
-            BlockingUi::ClearIndex,
-        ),
-        (
-            "ExportBundle ('Export...' button)",
-            Drive::Btn {
-                view: View::Settings,
-                btn: BTN_EXPORT,
-            },
-            BlockingUi::ExportBundle,
-        ),
-        (
-            "ImportBundle ('Import...' button)",
-            Drive::Btn {
-                view: View::Settings,
-                btn: BTN_IMPORT,
-            },
-            BlockingUi::ImportBundle,
-        ),
-        (
-            "OpenLogFolder ('Open log folder' button)",
-            Drive::Btn {
-                view: View::Settings,
-                btn: BTN_OPEN_LOG,
-            },
-            BlockingUi::OpenLogFolder,
         ),
         (
             "FixMatch ('Fix match...' button)",
@@ -18053,8 +17798,8 @@ mod tests {
                 PreviewSurface::default(),
             );
             // Approved narrow at rest (nothing playing): gear, field, Search,
-            // pinned Apply, Change filters — no scope row, no category
-            // words; the hero Fix exists only while a title is playing.
+            // pinned Apply — no scope row, no category words, no Change
+            // filters; the hero Fix exists only while a title is playing.
             // Card/Back stay wired but hidden (empty rects, never Tab stops).
             let at_rest: Vec<i32> = l.btns.iter().map(|b| b.id).collect();
             assert_eq!(
@@ -18064,7 +17809,6 @@ mod tests {
                     BTN_PICKER_FIELD,
                     BTN_PICKER_SEARCH,
                     BTN_PICKER_APPLY,
-                    BTN_ADVANCED,
                     BTN_CARD_BACK,
                     BTN_CARD,
                     BTN_SYNOPSIS,
@@ -18105,7 +17849,6 @@ mod tests {
             for id in [
                 BTN_PICKER_FIELD,
                 BTN_PICKER_SEARCH,
-                BTN_ADVANCED,
                 BTN_PICKER_APPLY,
             ] {
                 let rc = open.card_btn(id).unwrap_or_else(|| panic!("id {id} missing"));
@@ -18836,11 +18579,16 @@ mod tests {
         }
         assert_eq!(st.card_specs_state, before_specs, "specs untouched");
         assert_eq!(st.status_text, before_status, "status untouched");
+        // State presets are no longer a Settings row: the line-2 presets live
+        // behind the wide Card disclosure, so the reachable control proves the
+        // retired Details ids are inert because the Details row is gone, not
+        // because the whole action is a no-op.
         assert!(
             card_preset_for_button(card_state_button(0)).is_some(),
-            "the State row must still map: the Details ids are inert, the action is not"
+            "the State row must still map: the retired ids are inert, the action is not"
         );
-        // Details never laid out on Card or Settings; State lives in Settings.
+        // Details never laid out on Card or Settings; the State preset lives
+        // in the wide Card disclosure, never in slimmed Settings.
         let l = compute_card_layout_with(
             MAIN_CLIENT_W,
             MAIN_CLIENT_H,
@@ -18861,8 +18609,39 @@ mod tests {
             "a Details button is still laid out in Settings"
         );
         assert!(
-            s.btns.iter().any(|b| b.id == card_state_button(0)),
-            "the reachable State button lives in Settings CARD"
+            s.btns.iter().all(|b| b.id != card_state_button(0)),
+            "no State preset button lives in slimmed Settings"
+        );
+        let wide = compute_card_layout_state(
+            1180,
+            700,
+            96,
+            &CardSpecs::default(),
+            CardKind::Series,
+            PreviewSurface::default(),
+            &CardLayoutState {
+                advanced: true,
+                has_selection: false,
+                can_apply: false,
+                playing: false,
+                filter: crate::search::KindFilter::All,
+            },
+        );
+        assert!(
+            wide.card_btn(card_state_button(0)).is_some(),
+            "the open wide disclosure still offers the State preset"
+        );
+        let shut = compute_card_layout(
+            1180,
+            700,
+            96,
+            &CardSpecs::default(),
+            CardKind::Series,
+            PreviewSurface::default(),
+        );
+        assert!(
+            shut.card_btn(card_state_button(0)).is_none(),
+            "the State preset hides until the wide disclosure opens"
         );
         assert!(
             !card_focus_order_with(true).iter().any(|id| (30..34).contains(id)),
@@ -19459,46 +19238,23 @@ mod tests {
 
     // -- settings_scan_test.go ----------------------------------------------
 
+    /// Owner order 2026-11-03: Scan speed has no Settings row. The layout
+    /// carries no scan segment and no SCAN caption; the profile still
+    /// persists through the settings core (covered in `settings::tests`).
     #[test]
     fn settings_scan_hit_test() {
         let l = compute_settings_layout(MAIN_CLIENT_W, MAIN_CLIENT_H, 96, false, "balanced", "amoled");
-        assert_eq!(l.btns.len(), 26);
+        assert_eq!(l.btns.len(), 9);
         for id in [BTN_SCAN_GENTLE, BTN_SCAN_BALANCED, BTN_SCAN_TURBO] {
-            let rc = l
-                .settings_btn(id)
-                .unwrap_or_else(|| panic!("scan id {id} missing"));
             assert!(
-                rc.right <= MAIN_CLIENT_W && rc.left >= 0 && rc.top >= 0,
-                "scan {id} escapes horizontally: {rc:?}"
-            );
-            assert_eq!(
-                button_at_point(&l.btns, (rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2),
-                id
+                l.settings_btn(id).is_none(),
+                "scan segment {id} is gone from Settings"
             );
         }
-        let g = l.settings_btn(BTN_SCAN_GENTLE).unwrap();
-        let b = l.settings_btn(BTN_SCAN_BALANCED).unwrap();
-        let u = l.settings_btn(BTN_SCAN_TURBO).unwrap();
-        assert!(g.top == b.top && b.top == u.top && g.bottom == b.bottom && b.bottom == u.bottom);
-        assert!(g.right <= b.left && b.right <= u.left);
-        // No overlap among visible scan segments (body scrolls, so only
-        // same-viewport overlap counts).
-        for (i, a) in l.btns.iter().enumerate() {
-            for c in l.btns.iter().skip(i + 1) {
-                if a.rc.top >= MAIN_CLIENT_H && c.rc.top >= MAIN_CLIENT_H {
-                    continue;
-                }
-                assert!(!rects_intersect(a.rc, c.rc), "{} and {} overlap", a.id, c.id);
-            }
-        }
-        let scan_idx = l.labels.iter().position(|x| x.id == "settings.scan").unwrap();
-        for id in [BTN_SCAN_GENTLE, BTN_SCAN_BALANCED, BTN_SCAN_TURBO] {
-            let rc = l.settings_btn(id).unwrap();
-            assert!(
-                rc.top >= l.labels[scan_idx].rc.bottom && rc.bottom <= l.hint.top,
-                "scan {id} {rc:?} left the SCAN SPEED group"
-            );
-        }
+        assert!(
+            l.labels.iter().all(|t| t.id != "settings.scan"),
+            "settings still paints the SCAN SPEED caption"
+        );
     }
 
     #[test]
@@ -21110,8 +20866,7 @@ mod tests {
     #[test]
     fn card_tabs_and_bottom_buttons_share_one_anatomy() {
         // Approved narrow: gear opens Settings (text), hero Fix is an outline
-        // ghost (only while playing), Change filters is text; hidden
-        // Card/Back keep their styles.
+        // ghost (only while playing); hidden Card/Back keep their styles.
         let card = compute_card_layout_state(
             MAIN_CLIENT_W,
             MAIN_CLIENT_H,
@@ -21140,7 +20895,10 @@ mod tests {
             BTN_OUTLINE,
             "hero Fix is an outline ghost, not a text row"
         );
-        assert_eq!(style_of(BTN_ADVANCED), BTN_TEXT);
+        assert!(
+            card.btns.iter().all(|b| b.id != BTN_ADVANCED),
+            "narrow Card carries no Change-filters control"
+        );
         assert_eq!(style_of(BTN_SETTINGS), BTN_TEXT);
         let settings = compute_settings_layout(MAIN_CLIENT_W, MAIN_CLIENT_H, 96, false, "turbo", "amoled");
         let sstyle_of = |id: i32| {
@@ -21151,7 +20909,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("settings button {id} missing"))
                 .style
         };
-        assert_eq!(sstyle_of(BTN_OPEN_LOG), BTN_OUTLINE);
+        assert_eq!(sstyle_of(BTN_CLEAR_CACHE), BTN_DANGER);
         assert_eq!(sstyle_of(BTN_CARD), BTN_TEXT);
     }
 
@@ -21391,19 +21149,26 @@ mod tests {
                 CardKind::Movie,
                 PreviewSurface::default(),
             );
-            for id in [BTN_PICKER_FIELD, BTN_PICKER_SEARCH, BTN_ADVANCED] {
+            for id in [BTN_PICKER_FIELD, BTN_PICKER_SEARCH] {
                 let rc = l
                     .card_btn(id)
                     .unwrap_or_else(|| panic!("{cw}x{ch}: picker control {id} missing"));
-                // Tiny 270px viewports scroll the panel: field/search stay
-                // pinned, Change filters may sit below the fold.
-                if ch < 480 && id == BTN_ADVANCED {
-                    assert!(rc.left >= 0 && rc.right <= cw && rc.top >= 0, "{cw}x{ch}: Change filters escapes horizontally: {rc:?}");
-                    continue;
-                }
                 assert!(
                     rc.left >= 0 && rc.top >= 0 && rc.right <= cw && rc.bottom <= ch,
                     "{cw}x{ch}: picker control {id} escapes the client: {rc:?}"
+                );
+            }
+            // Change filters survives only in the wide disclosure; the narrow
+            // layout carries no such control.
+            if cw >= 1180 && ch >= 700 {
+                assert!(
+                    l.card_btn(BTN_ADVANCED).is_some(),
+                    "{cw}x{ch}: wide disclosure keeps Change filters"
+                );
+            } else {
+                assert!(
+                    l.card_btn(BTN_ADVANCED).is_none(),
+                    "{cw}x{ch}: narrow layout carries no Change filters"
                 );
             }
             assert!(
@@ -22518,74 +22283,39 @@ mod tests {
     /// Settings scrolls: the below-fold tail is unreachable at offset 0 and
     /// reachable after scrolling, and paint, hit test and focus share the one
     /// `settings_scroll` offset (wheel/PgDn/End move it; focus reveal keeps it).
+    /// The slimmed Settings fits its five rows above the status bar at rest:
+    /// every surviving control hits inside the client with no scroll.
     #[test]
     fn settings_scroll_reaches_below_fold_controls() {
-        let mut st = UiState::default();
-        st.cur_view = View::Settings;
         let (cw, ch, dpi) = (MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
         let raw = compute_settings_layout(cw, ch, dpi, false, "balanced", "amoled");
         let status_top = raw.status.top;
-        let below: Vec<i32> = raw
-            .btns
-            .iter()
-            .filter(|b| {
-                b.rc.bottom > b.rc.top
-                    && b.rc.top >= status_top
-                    && b.id != BTN_CARD
-                    && b.id != BTN_SETTINGS
-                    && b.id != BTN_BACK
-            })
-            .map(|b| b.id)
-            .collect();
-        assert!(
-            below.len() >= 6,
-            "expected the below-fold tail, got {}: {below:?}",
-            below.len()
-        );
-        let target = *below.last().expect("a below-fold control");
-        let rc = raw.settings_btn(target).expect("target rect");
-        let (x, y) = ((rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2);
-        // At rest the tail is chrome-side: no hit inside the client.
+        let mut st = UiState::default();
+        st.cur_view = View::Settings;
         let l0 = st.layout_settings_for(cw, ch, dpi);
-        assert_eq!(
-            button_at_point_above_status(&l0.btns, l0.status.top, x, y),
-            0,
-            "below-fold {target} must not hit at offset 0"
-        );
-        // End / PageDown move the one offset; the tail becomes hittable.
-        assert!(st.on_settings_key_down_ex(NULL, VK_END, false));
-        assert!(st.settings_scroll > 0, "End must scroll Settings");
-        let l1 = st.layout_settings_for(cw, ch, dpi);
-        let rc1 = l1.settings_btn(target).expect("scrolled target rect");
-        assert!(
-            rc1.bottom <= l1.status.top,
-            "scrolled {target} must clear the status bar: {rc1:?}"
-        );
-        assert_eq!(
-            button_at_point_above_status(
-                &l1.btns,
-                l1.status.top,
-                (rc1.left + rc1.right) / 2,
-                (rc1.top + rc1.bottom) / 2
-            ),
-            target,
-            "scrolled {target} must hit"
-        );
-        // Home returns to the top; focus reveal shares the offset.
-        assert!(st.on_settings_key_down_ex(NULL, VK_HOME, false));
-        assert_eq!(st.settings_scroll, 0);
-        st.focus_id = target;
-        st.reveal_settings_focused(NULL);
-        let l2 = st.layout_settings_for(cw, ch, dpi);
-        let rc2 = l2.settings_btn(target).expect("revealed target rect");
-        assert!(
-            rc2.top >= settings_scroll_origin(dpi) && rc2.bottom <= l2.status.top,
-            "focused {target} must be revealed above the status bar: {rc2:?}"
-        );
-        // PageDown also routes to Settings, not to Main.
-        let before = st.settings_scroll;
-        assert!(st.on_settings_key_down_ex(NULL, VK_NEXT, false));
-        assert!(st.settings_scroll > before, "PgDn must scroll Settings");
+        for id in settings_focus_order() {
+            if id == BTN_CARD {
+                continue;
+            }
+            let rc = l0
+                .settings_btn(id)
+                .unwrap_or_else(|| panic!("surviving row {id} missing"));
+            assert!(
+                rc.bottom <= status_top,
+                "surviving row {id} {rc:?} needs a fold that no longer exists"
+            );
+            assert_eq!(
+                button_at_point_above_status(
+                    &l0.btns,
+                    l0.status.top,
+                    (rc.left + rc.right) / 2,
+                    (rc.top + rc.bottom) / 2
+                ),
+                id,
+                "surviving row {id} must hit at rest"
+            );
+        }
+        let _ = raw;
     }
 
     /// A row straddling `status_top` paints and hits only above it: the
@@ -22628,8 +22358,8 @@ mod tests {
         );
     }
 
-    /// At the supported-minimum clients Apply/Change stay inside the client
-    /// above the status bar instead of sliding below the fold.
+    /// At the supported-minimum clients Apply stays inside the client above
+    /// the status bar instead of sliding below the fold.
     #[test]
     fn narrow_footer_stays_inside_small_clients() {
         for (cw, ch) in [(360, 270), (460, 360)] {
@@ -22649,17 +22379,21 @@ mod tests {
                         filter: crate::search::KindFilter::All,
                     },
                 );
-                for id in [BTN_PICKER_APPLY, BTN_ADVANCED] {
-                    let rc = l.card_btn(id).unwrap_or_else(|| panic!("{cw}x{ch} button {id} missing"));
-                    assert!(
-                        rc.left >= 0 && rc.top >= 0 && rc.right <= cw && rc.bottom <= ch,
-                        "{cw}x{ch} button {id} escapes the client: {rc:?}"
-                    );
-                    assert!(
-                        rc.bottom <= l.status.top,
-                        "{cw}x{ch} button {id} slides under the status bar: {rc:?}"
-                    );
-                }
+                let apply = l.card_btn(BTN_PICKER_APPLY).unwrap_or_else(|| {
+                    panic!("{cw}x{ch} Apply button missing")
+                });
+                assert!(
+                    apply.left >= 0 && apply.top >= 0 && apply.right <= cw && apply.bottom <= ch,
+                    "{cw}x{ch} Apply escapes the client: {apply:?}"
+                );
+                assert!(
+                    apply.bottom <= l.status.top,
+                    "{cw}x{ch} Apply slides under the status bar: {apply:?}"
+                );
+                assert!(
+                    l.card_btn(BTN_ADVANCED).is_none(),
+                    "{cw}x{ch} still lays out Change filters"
+                );
             }
         }
     }
@@ -23094,11 +22828,11 @@ mod tests {
                 );
             } else {
                 // Approved narrow: results panel owns the list; hero owns
-                // rows. The one field, one Search and Change filters are at
-                // rest; the removed scope ids (85/88 here, all five in the
-                // layout test) are absent.
+                // rows. The one field and one Search are at rest; the removed
+                // scope ids (85/88 here, all five in the layout test) and
+                // Change filters are absent.
                 if !l.compact {
-                    for id in [BTN_PICKER_FIELD, BTN_PICKER_SEARCH, BTN_ADVANCED] {
+                    for id in [BTN_PICKER_FIELD, BTN_PICKER_SEARCH] {
                         assert!(
                             l.card_btn(id).is_some(),
                             "{cw}x{ch}: control {id} missing at rest"
@@ -23968,22 +23702,66 @@ mod tests {
         assert_eq!(st.close_to_tray, !before);
     }
 
+    /// Owner order 2026-11-03: the defaults are the product. Metadata cache,
+    /// Card layout, the Discord field toggles, the line-2 presets, Clear
+    /// index, Export, Import, Open log and Scan speed are gone from Settings
+    /// outright -- not hidden. The layout table, the click route and the
+    /// focus ring carry none of them.
     #[test]
-    fn click_settings_meta_cache_flips() {
-        let mut st = settings_click_state();
-        let before = st.cache_enabled;
+    fn removed_settings_controls_are_gone_from_settings() {
+        let st = settings_click_state();
         let l = st.layout_settings_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        assert_eq!(click_settings_id(&mut st, &l, BTN_META_CACHE), None);
-        assert_eq!(st.cache_enabled, !before);
-    }
-
-    #[test]
-    fn click_settings_card_layout_flips() {
-        let mut st = settings_click_state();
-        let before = st.card_large_art;
-        let l = st.layout_settings_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        assert_eq!(click_settings_id(&mut st, &l, BTN_CARD_LAYOUT_TOGGLE), None);
-        assert_eq!(st.card_large_art, !before);
+        for id in [
+            BTN_CLEAR_INDEX,
+            BTN_EXPORT,
+            BTN_IMPORT,
+            BTN_OPEN_LOG,
+            BTN_SCAN_GENTLE,
+            BTN_SCAN_BALANCED,
+            BTN_SCAN_TURBO,
+        ] {
+            assert!(
+                l.btns.iter().all(|b| b.id != id),
+                "settings still lays out removed control {id}"
+            );
+            assert!(
+                l.settings_btn(id).is_none(),
+                "settings still hit-tests removed control {id}"
+            );
+        }
+        for id in [BTN_FIELD_DETAILS, BTN_FIELD_STATE, BTN_FIELD_SYNOPSIS, BTN_FIELD_TIMERS] {
+            assert!(
+                l.btns.iter().all(|b| b.id != id),
+                "settings still lays out removed field toggle {id}"
+            );
+        }
+        for i in 0..4 {
+            assert!(
+                l.btns.iter().all(|b| b.id != card_state_button(i)),
+                "settings still lays out removed preset segment {i}"
+            );
+        }
+        assert!(
+            l.labels.iter().all(|t| t.id != "settings.card"),
+            "settings still paints the CARD caption"
+        );
+        assert!(
+            l.labels.iter().all(|t| t.id != "settings.scan"),
+            "settings still paints the SCAN SPEED caption"
+        );
+        // And the focus ring reaches exactly the surviving rows.
+        assert_eq!(
+            settings_focus_order(),
+            vec![
+                BTN_CARD,
+                BTN_DISCORD,
+                BTN_CLOSE,
+                BTN_STARTUP,
+                BTN_THEME_AMOLED,
+                BTN_THEME_DARK,
+                BTN_CLEAR_CACHE,
+            ]
+        );
     }
 
     #[test]
@@ -24034,20 +23812,23 @@ mod tests {
         set_live_theme(app_support::config::THEME_AMOLED);
     }
 
+    /// Scan speed has no Settings control any more: the profile still persists
+    /// and applies live through the settings core, but Settings offers no row
+    /// that could rebuild the default.
     #[test]
-    fn click_settings_scan_gentle_selects_profile() {
-        let scratch = Scratch::new("click-scan-speed");
-        let cfg = scratch.join("config.json");
-        let mut st = settings_click_state();
-        st.test_config_path = Some(cfg.clone());
+    fn click_settings_scan_segments_are_gone() {
+        let st = settings_click_state();
         let l = st.layout_settings_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        assert_eq!(click_settings_id(&mut st, &l, BTN_SCAN_GENTLE), None);
-        assert_eq!(
-            st.scan_speed_state,
-            app_support::config::SCAN_SPEED_GENTLE
-        );
-        let saved = app_support::config::load_config_from(&cfg).unwrap_or_default();
-        assert_eq!(saved.effective_scan_speed(), app_support::config::SCAN_SPEED_GENTLE);
+        for id in [BTN_SCAN_GENTLE, BTN_SCAN_BALANCED, BTN_SCAN_TURBO] {
+            assert!(
+                l.btns.iter().all(|b| b.id != id),
+                "settings still lays out scan segment {id}"
+            );
+            assert!(
+                !settings_focus_order().contains(&id),
+                "scan segment {id} is still a Tab stop"
+            );
+        }
     }
 
     #[test]
@@ -24175,47 +23956,29 @@ mod tests {
         presence::set_live_designer(presence::DesignerSpec::default());
     }
 
+    /// Owner order 2026-11-03: the four Discord field toggles are gone from
+    /// Settings outright. The designer's shipped default (every field on) is
+    /// the product, so no control can rebuild it.
     #[test]
-    fn click_settings_field_details_flips() {
-        let mut st = settings_click_state();
-        presence::set_live_designer(presence::DesignerSpec::default());
-        st.designer = presence::DesignerSpec::default();
+    fn click_settings_field_toggles_are_gone() {
+        let st = settings_click_state();
         let l = st.layout_settings_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        assert_eq!(click_settings_id(&mut st, &l, BTN_FIELD_DETAILS), None);
-        assert!(!st.designer.details);
-        presence::set_live_designer(presence::DesignerSpec::default());
-    }
-
-    #[test]
-    fn click_settings_field_state_flips() {
-        let mut st = settings_click_state();
-        presence::set_live_designer(presence::DesignerSpec::default());
-        st.designer = presence::DesignerSpec::default();
-        let l = st.layout_settings_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        assert_eq!(click_settings_id(&mut st, &l, BTN_FIELD_STATE), None);
-        assert!(!st.designer.state);
-        presence::set_live_designer(presence::DesignerSpec::default());
-    }
-
-    #[test]
-    fn click_settings_field_synopsis_flips() {
-        let mut st = settings_click_state();
-        presence::set_live_designer(presence::DesignerSpec::default());
-        st.designer = presence::DesignerSpec::default();
-        let l = st.layout_settings_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        assert_eq!(click_settings_id(&mut st, &l, BTN_FIELD_SYNOPSIS), None);
-        assert!(!st.designer.synopsis);
-        presence::set_live_designer(presence::DesignerSpec::default());
-    }
-
-    #[test]
-    fn click_settings_field_timers_flips() {
-        let mut st = settings_click_state();
-        presence::set_live_designer(presence::DesignerSpec::default());
-        st.designer = presence::DesignerSpec::default();
-        let l = st.layout_settings_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        assert_eq!(click_settings_id(&mut st, &l, BTN_FIELD_TIMERS), None);
-        assert!(!st.designer.timers);
+        for id in [BTN_FIELD_DETAILS, BTN_FIELD_STATE, BTN_FIELD_SYNOPSIS, BTN_FIELD_TIMERS] {
+            assert!(
+                l.btns.iter().all(|b| b.id != id),
+                "settings still lays out field toggle {id}"
+            );
+            assert!(
+                l.settings_btn(id).is_none(),
+                "settings still hit-tests field toggle {id}"
+            );
+            assert!(
+                !settings_focus_order().contains(&id),
+                "field toggle {id} is still a Tab stop"
+            );
+        }
+        // The designer's shipped default stays identity: with no toggle able
+        // to flip a field, the composed card is the card.
         presence::set_live_designer(presence::DesignerSpec::default());
     }
 
@@ -24229,43 +23992,30 @@ mod tests {
         );
     }
 
+    /// Owner order 2026-11-03: Clear index, Export, Import and Open log have
+    /// no Settings row any more. Clear metadata is the one surviving library
+    /// action.
     #[test]
-    fn click_settings_clear_index_routes() {
-        let mut st = settings_click_state();
+    fn click_settings_library_extras_are_gone() {
+        let st = settings_click_state();
         let l = st.layout_settings_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        assert_eq!(
-            click_settings_id(&mut st, &l, BTN_CLEAR_INDEX),
-            Some(BlockingUi::ClearIndex)
-        );
-    }
-
-    #[test]
-    fn click_settings_export_routes() {
-        let mut st = settings_click_state();
-        let l = st.layout_settings_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        assert_eq!(
-            click_settings_id(&mut st, &l, BTN_EXPORT),
-            Some(BlockingUi::ExportBundle)
-        );
-    }
-
-    #[test]
-    fn click_settings_import_routes() {
-        let mut st = settings_click_state();
-        let l = st.layout_settings_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        assert_eq!(
-            click_settings_id(&mut st, &l, BTN_IMPORT),
-            Some(BlockingUi::ImportBundle)
-        );
-    }
-
-    #[test]
-    fn click_settings_open_log_routes() {
-        let mut st = settings_click_state();
-        let l = st.layout_settings_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        assert_eq!(
-            click_settings_id(&mut st, &l, BTN_OPEN_LOG),
-            Some(BlockingUi::OpenLogFolder)
+        for id in [BTN_CLEAR_INDEX, BTN_EXPORT, BTN_IMPORT, BTN_OPEN_LOG] {
+            assert!(
+                l.btns.iter().all(|b| b.id != id),
+                "settings still lays out library control {id}"
+            );
+            assert!(
+                l.settings_btn(id).is_none(),
+                "settings still hit-tests library control {id}"
+            );
+            assert!(
+                !settings_focus_order().contains(&id),
+                "library control {id} is still a Tab stop"
+            );
+        }
+        assert!(
+            l.settings_btn(BTN_CLEAR_CACHE).is_some(),
+            "Clear metadata survives"
         );
     }
 
@@ -24340,14 +24090,23 @@ mod tests {
         assert!(st.picker.open, "refused Apply never latches");
     }
 
+    /// Owner order 2026-11-03: the narrow Card carries no Change-filters
+    /// control. `BTN_ADVANCED` toggles state the narrow layout never exposes,
+    /// so the button is gone from the narrow table (the wide workspace keeps
+    /// its own Advanced disclosure).
     #[test]
-    fn click_card_change_filters_flips() {
+    fn click_card_change_filters_is_gone_from_narrow() {
         let mut st = UiState::default();
         st.cur_view = View::Card;
-        let before = st.advanced_open;
         let l = st.layout_card_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        assert_eq!(card_click_id(&mut st, &l, BTN_ADVANCED), None);
-        assert_eq!(st.advanced_open, !before);
+        assert!(
+            l.card_btn(BTN_ADVANCED).is_none(),
+            "narrow Card still lays out Change filters"
+        );
+        assert!(
+            !card_focus_order().contains(&BTN_ADVANCED),
+            "Change filters is still a narrow Tab stop"
+        );
     }
 
     #[test]
@@ -24357,6 +24116,32 @@ mod tests {
         let l = st.layout_card_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
         assert_eq!(card_click_id(&mut st, &l, BTN_SETTINGS), None);
         assert_eq!(st.cur_view, View::Settings);
+    }
+
+    /// The bar tells the truth: a disconnected link never renders the old
+    /// "Discord connected" literal; a down link names the reason in one short
+    /// muted label; a healthy link shows no chrome at all. The link half reads
+    /// the same live mirror the publisher writes, never a constant.
+    #[test]
+    fn pill_names_the_down_link_never_a_healthy_one() {
+        app_support::config::set_live_discord_up(false);
+        let mut st = UiState::default();
+        assert!(st.discord_enabled, "the shipped default leaves Discord on");
+        let down = discord_bar_text(&st);
+        assert_eq!(down, "Discord not running", "the down link names itself: {down:?}");
+        assert!(
+            !down.contains("connected"),
+            "a down link must never claim a connection: {down:?}"
+        );
+        st.discord_enabled = false;
+        assert_eq!(discord_bar_text(&st), "Discord off", "an off switch names itself");
+        st.discord_enabled = true;
+        app_support::config::set_live_discord_up(true);
+        assert!(
+            discord_bar_text(&st).is_empty(),
+            "a healthy link shows no chrome"
+        );
+        app_support::config::set_live_discord_up(false);
     }
 
     #[test]

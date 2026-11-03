@@ -158,10 +158,10 @@ impl Gate {
     /// current tracker state; `pos`/`total` are the live PotPlayer times; `now`
     /// is epoch ms; `event` reports whether the tracker emitted a change/seek
     /// this poll; `debounced` reports whether the tracker is holding a seek for
-    /// the trailing edge. It returns the card with its timestamps anchored (start
-    /// while running, plus the projected end when the duration is known; start
-    /// only, anchored at the pause moment, while paused) and the verdict. A pause
-    /// sends a paused card once and then stays quiet.
+    /// the trailing edge. It returns the card with its timestamps anchored
+    /// (start plus the projected end) while running and with NO timestamps at
+    /// all while paused, and the verdict. A pause sends a paused card once and
+    /// then stays quiet.
     ///
     /// Rate guard: at most [`RATE_MAX_SENDS`] sends per [`RATE_WINDOW_MS`]
     /// (sliding window over the monotonic clock). A would-send card goes out
@@ -201,10 +201,10 @@ impl Gate {
         }
 
         // Pause: send a paused card and KEEP it. The activity type is Watching
-        // and the card carries a count-UP timer anchored at the pause moment
-        // (timestamps.start = now - pausedElapsedMs, where pausedElapsedMs is 0
-        // at the transition), so the client reads "paused for M:SS". There is NO
-        // timestamps.end while paused. Decided here, before the suppression
+        // and the card carries NO timestamps at all: a start-only anchor
+        // renders as a count-up that reads as playing, so the composer strips
+        // the anchor and the gate must not re-add it. There is NO
+        // timestamps.end while paused either. Decided here, before the suppression
         // paths, so the pause card is never debounced or throttled. The pause is
         // detected via is_paused_card (the builder's Paused flag, with the legacy
         // small_image marker honoured); no pause icon rides the wire.
@@ -233,8 +233,8 @@ impl Gate {
                     },
                 );
             }
-            out.has_start = true;
-            out.start = now; // now - pausedElapsedMs; pausedElapsedMs == 0 here
+            out.has_start = false;
+            out.start = 0;
             out.end = 0;
             if self.send_times.len() >= RATE_MAX_SENDS {
                 // The pause transition is owed but the window is full: hold the

@@ -210,20 +210,24 @@ pub fn bar(
     // No in-app wordmark: the OS caption already reads "Potflix", so a second
     // text label in this bar doubles the name. The mark stays at the left.
     // Right side: hairline chip + 32px gear glyph. Gear rect is the layout's
-    // measured rect; the chip sits left of it with an 8px gap.
-    let chip_pad_x = sc(10);
-    let chip_w = text_width_px(hdc, chip_font, chip_text) + chip_pad_x * 2;
-    let chip_h = sc(24);
-    let chip_rc = Rect {
-        left: gear_rc.left - sc(SP_2) - chip_w,
-        top: bar_rc.top + (bar_rc.bottom - bar_rc.top - chip_h) / 2,
-        right: gear_rc.left - sc(SP_2),
-        bottom: bar_rc.top + (bar_rc.bottom - bar_rc.top - chip_h) / 2 + chip_h,
-    };
-    if chip_rc.right > chip_rc.left {
-        fill_round_rect(hdc, chip_rc, COL_SURFACE, sc(R_CTRL));
-        stroke_round_rect_w(hdc, chip_rc, COL_BORDER, sc(R_CTRL), sc(STROKE_HAIR));
-        draw_center(hdc, chip_text, chip_rc, chip_font, COL_MUTED);
+    // measured rect; the chip sits left of it with an 8px gap. A healthy link
+    // shows NO chrome: an empty chip text paints nothing, so the bar stays
+    // quiet unless there is a reason to name.
+    if !chip_text.is_empty() {
+        let chip_pad_x = sc(10);
+        let chip_w = text_width_px(hdc, chip_font, chip_text) + chip_pad_x * 2;
+        let chip_h = sc(24);
+        let chip_rc = Rect {
+            left: gear_rc.left - sc(SP_2) - chip_w,
+            top: bar_rc.top + (bar_rc.bottom - bar_rc.top - chip_h) / 2,
+            right: gear_rc.left - sc(SP_2),
+            bottom: bar_rc.top + (bar_rc.bottom - bar_rc.top - chip_h) / 2 + chip_h,
+        };
+        if chip_rc.right > chip_rc.left {
+            fill_round_rect(hdc, chip_rc, COL_SURFACE, sc(R_CTRL));
+            stroke_round_rect_w(hdc, chip_rc, COL_BORDER, sc(R_CTRL), sc(STROKE_HAIR));
+            draw_center(hdc, chip_text, chip_rc, chip_font, COL_MUTED);
+        }
     }
     // Gear glyph centred in its 32px rect; never the "Settings" text (that is
     // what clipped to "Set…"). Muted at rest, body text on hover/press --

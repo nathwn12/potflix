@@ -342,8 +342,9 @@ fn gate_debounce_reason() {
 #[test]
 fn gate_pause_sends_parked_card() {
     // Pause sends a parked paused card and does NOT clear the activity. The card
-    // keeps the cleaned details/state, small_image "pause", and a count-UP start
-    // anchored at the pause moment (now), with no end.
+    // keeps the cleaned details/state, small_image "pause", and NO timestamps
+    // at all: a start-only anchor would render as a count-up that reads as
+    // playing, so the composer strips it and the gate must not re-add it.
     let mut g = Gate::default();
     let (out, v) = g.decide(
         Activity {
@@ -362,8 +363,8 @@ fn gate_pause_sends_parked_card() {
     assert!(v.send, "pause must send a parked card, got {v}");
     assert!(!v.clear, "pause must NOT clear the activity");
     assert!(
-        out.small_image == "pause" && out.has_start && out.start == 100000 && out.end == 0,
-        "paused card = {out:?}, want pause start=100000 end=0"
+        out.small_image == "pause" && !out.has_start && out.start == 0 && out.end == 0,
+        "paused card = {out:?}, want pause with no timestamps"
     );
 }
 
@@ -491,7 +492,8 @@ fn gate_paused_content_change_resends() {
         !v.send && v.reason == REASON_PAUSED,
         "unchanged paused card = {v}, want suppressed:{REASON_PAUSED}"
     );
-    // Changed content: must re-send, anchored at the new pause moment.
+    // Changed content: must re-send, with no timestamps (paused cards never
+    // carry an anchor).
     let (out, v) = g.decide(
         paused("ShowB", "S1 E2 - Paused"),
         1000,
@@ -504,10 +506,10 @@ fn gate_paused_content_change_resends() {
     assert!(
         out.details == "ShowB"
             && out.state == "S1 E2 - Paused"
-            && out.has_start
-            && out.start == 100500
+            && !out.has_start
+            && out.start == 0
             && out.end == 0,
-        "changed paused card = {out:?}, want ShowB/S1 E2 - Paused start=100500 end=0"
+        "changed paused card = {out:?}, want ShowB/S1 E2 - Paused with no timestamps"
     );
     // The re-sent card becomes the new parked reference: unchanged again stays
     // quiet.
@@ -661,8 +663,8 @@ fn gate_backward_clock_step_does_not_stall_heartbeat() {
 }
 
 /// Proves the pristine-card pause path: a builder-produced paused card
-/// (paused=true, no small_image icon) sends once with the count-UP anchor and
-/// then stays parked and quiet.
+/// (paused=true, no small_image icon) sends once with NO timestamps and then
+/// stays parked and quiet.
 #[test]
 fn gate_pause_flag_parks_icon_free_card() {
     let mut g = Gate::default();
@@ -683,8 +685,8 @@ fn gate_pause_flag_parks_icon_free_card() {
         v.clear
     );
     assert!(
-        out.has_start && out.start == 100000 && out.end == 0,
-        "parked pause card = {out:?}, want start=100000 end=0"
+        !out.has_start && out.start == 0 && out.end == 0,
+        "parked pause card = {out:?}, want no timestamps"
     );
     let (_, v) = g.decide(paused, 1000, 60000, 200000, false, false);
     assert!(
@@ -852,7 +854,7 @@ fn gate_rate_paused_flush_parks() {
     // First poll after the window flushes the parked pause card.
     let (out, v) = g.decide(paused.clone(), 2250, 60000, NOW0 + RATE_WINDOW_MS + 1500, false, false);
     assert!(v.send, "paused flush must send, got {v}");
-    assert!(out.has_start && out.end == 0, "parked pause carries start only");
+    assert!(!out.has_start && out.start == 0 && out.end == 0, "parked pause carries no timestamps");
     // Then it stays parked.
     let (_, v) = g.decide(paused, 2250, 60000, NOW0 + RATE_WINDOW_MS + 1750, false, false);
     assert_eq!(v.reason, REASON_PAUSED, "parked repeat, got {v}");

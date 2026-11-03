@@ -354,8 +354,12 @@ fn push_activity(
     // no preview, and leave the gate untouched so the next real media sends
     // fresh.
     if is_no_media_title(raw_title) {
-        if let Err(err) = dc.clear_activity() {
-            selftest::event_send_error(log, &err);
+        match dc.clear_activity() {
+            Ok(()) => config::set_live_discord_up(true),
+            Err(err) => {
+                config::set_live_discord_up(false);
+                selftest::event_send_error(log, &err);
+            }
         }
         return false;
     }
@@ -436,8 +440,12 @@ fn push_activity(
     // A pause parks the paused card and keeps it; the gate never sets Clear now,
     // so this branch is dormant and retained for the null-activity path only.
     if verdict.clear {
-        if let Err(err) = dc.clear_activity() {
-            selftest::event_send_error(log, &err);
+        match dc.clear_activity() {
+            Ok(()) => config::set_live_discord_up(true),
+            Err(err) => {
+                config::set_live_discord_up(false);
+                selftest::event_send_error(log, &err);
+            }
         }
         return false;
     }
@@ -457,6 +465,7 @@ fn push_activity(
     };
     match dc.set_activity(wire) {
         Ok(()) => {
+            config::set_live_discord_up(true);
             record(
                 kind,
                 raw_title.to_string(),
@@ -466,6 +475,7 @@ fn push_activity(
             true
         }
         Err(err) => {
+            config::set_live_discord_up(false);
             selftest::event_send_error(log, &err);
             false
         }
@@ -719,8 +729,12 @@ fn poll_step<P: PlayerProbe>(
                     config::set_live_now_playing(None);
                     state.stop_since = 0;
                     if clear_due(dc.generation(), state.cleared_gen) {
-                        if let Err(err) = dc.clear_activity() {
-                            selftest::event_send_error(log, &err);
+                        match dc.clear_activity() {
+                            Ok(()) => config::set_live_discord_up(true),
+                            Err(err) => {
+                                config::set_live_discord_up(false);
+                                selftest::event_send_error(log, &err);
+                            }
                         }
                         log.log("cleared (idle, no media)");
                         state.cleared_gen = dc.generation();
@@ -759,8 +773,12 @@ fn poll_step<P: PlayerProbe>(
                     // mirror with the card.
                     config::set_live_now_playing(None);
                     if clear_due(dc.generation(), state.cleared_gen) {
-                        if let Err(err) = dc.clear_activity() {
-                            selftest::event_send_error(log, &err);
+                        match dc.clear_activity() {
+                            Ok(()) => config::set_live_discord_up(true),
+                            Err(err) => {
+                                config::set_live_discord_up(false);
+                                selftest::event_send_error(log, &err);
+                            }
                         }
                         selftest::event_cleared_stopped(log);
                         state.cleared_gen = dc.generation();
@@ -814,8 +832,12 @@ fn poll_step<P: PlayerProbe>(
         // ended, so the clear and the mirror go together.
         state.segment = None;
         config::set_live_now_playing(None);
-        if let Err(err) = dc.clear_activity() {
-            selftest::event_send_error(log, &err);
+        match dc.clear_activity() {
+            Ok(()) => config::set_live_discord_up(true),
+            Err(err) => {
+                config::set_live_discord_up(false);
+                selftest::event_send_error(log, &err);
+            }
         }
         selftest::event_cleared_window_gone(log);
         state.cleared_gen = dc.generation();
@@ -1015,7 +1037,10 @@ fn run_ui(log: &'static Logger) {
     let (client_id, _) = clientid::resolve_client_id();
     let dc = discord::Client::new(discord::Config {
         client_id: client_id.to_string(),
-        on_connect: Some(Box::new(move || selftest::event_connected(log))),
+        on_connect: Some(Box::new(move || {
+            config::set_live_discord_up(true);
+            selftest::event_connected(log)
+        })),
         on_reply: Some(Box::new(move |reply: discord::Reply| {
             if reply.error {
                 selftest::event_push_error(
@@ -1033,6 +1058,7 @@ fn run_ui(log: &'static Logger) {
             selftest::event_push_ack_timeout(log, nonce);
         })),
         on_drop: Some(Box::new(move |err: &discord::Error| {
+            config::set_live_discord_up(false);
             selftest::event_session_dropped(log, err);
         })),
         ..Default::default()
@@ -1419,7 +1445,6 @@ mod tests {
         const START2: i64 = IT_N - 7500;
         const START3: i64 = IT_N - 13000;
         const START4: i64 = IT_N + 5750;
-        const PAUSE_START: i64 = IT_N + 2750;
         const END0: i64 = IT_N + (IT_TOTAL - 1000);
         const END1: i64 = IT_N + 1000 + (IT_TOTAL - 2800);
         const END2: i64 = IT_N + 1500 + (IT_TOTAL - 9000);
@@ -1448,8 +1473,8 @@ mod tests {
                 name: "Breaking Bad".to_string(),
                 details: String::new(),
                 state: "S4 E7 \u{b7} Problem Dog \u{b7} Paused".to_string(),
-                has_start: true,
-                start: PAUSE_START,
+                has_start: false,
+                start: 0,
                 has_end: false,
                 end: 0,
             },
@@ -1470,10 +1495,15 @@ mod tests {
         }
 
         // R1: playing frames carry BOTH timestamps; the paused frame carries
-        // start only, never end.
+        // NEITHER (a start-only anchor renders as a count-up that reads as
+        // playing).
         for (i, sent) in got.iter().enumerate() {
             if i == 4 {
-                assert!(!sent.has_end, "paused frame {i} carries end: {}", raws[i]);
+                assert!(
+                    !sent.has_start && !sent.has_end,
+                    "paused frame {i} carries timestamps: {}",
+                    raws[i]
+                );
                 continue;
             }
             assert!(

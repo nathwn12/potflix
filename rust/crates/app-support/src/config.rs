@@ -516,6 +516,24 @@ pub fn live_card_specs() -> CardSpecs {
         .unwrap_or_default()
 }
 
+/// The process-wide presence-link state: true once the Discord transport has
+/// completed a handshake (and every successful send re-asserts it), false when
+/// the transport drops or a send fails. The publisher owns the writes; the UI
+/// pill owns the read, so the bar and the wire share one source. Defaults to
+/// false: with no live Discord handle the bar must never claim a connection.
+static LIVE_DISCORD_UP: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
+
+/// Publish the presence-link state. The transport callbacks and the send path
+/// both report here, so the pill reads what the publisher sees.
+pub fn set_live_discord_up(up: bool) {
+    *LIVE_DISCORD_UP.lock().unwrap_or_else(|e| e.into_inner()) = up;
+}
+
+/// Whether the presence link is up (the last publisher report).
+pub fn live_discord_up() -> bool {
+    *LIVE_DISCORD_UP.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// What is playing right now, as the poll loop sees it: the raw window title
 /// and the full path of the file. The UI offers "Fix match" only while
 /// something plays (and latches exactly this file), so the poll loop publishes
