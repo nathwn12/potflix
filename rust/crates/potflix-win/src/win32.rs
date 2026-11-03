@@ -362,6 +362,15 @@ pub const SW_HIDE: i32 = 0;
 pub const SW_SHOW: i32 = 5;
 
 pub const WM_PAINT: u32 = 0x000F;
+
+/// `WM_PRINT` (0x0317): `PrintWindow` asks the window to draw into the
+/// caller's DC. `DefWindowProcW` only draws the frame, so the client area is
+/// the app's job; without it a headless snapshot is an empty bitmap.
+pub const WM_PRINT: u32 = 0x0317;
+
+/// `WM_PRINTCLIENT` (0x0318): the client-only form of [`WM_PRINT`].
+pub const WM_PRINTCLIENT: u32 = 0x0318;
+
 pub const WM_COMMAND: u32 = 0x0111;
 pub const WM_SET_ICON: u32 = 0x0080;
 
@@ -980,6 +989,8 @@ mod tests {
         assert_eq!(WM_CONTEXT_MENU, wam::WM_CONTEXTMENU);
         assert_eq!(WM_APP, wam::WM_APP);
         assert_eq!(WM_PAINT, wam::WM_PAINT);
+        assert_eq!(WM_PRINT, wam::WM_PRINT);
+        assert_eq!(WM_PRINTCLIENT, wam::WM_PRINTCLIENT);
         assert_eq!(WM_COMMAND, wam::WM_COMMAND);
         assert_eq!(WM_SET_ICON, wam::WM_SETICON);
         assert_eq!(WM_MOUSE_MOVE, wam::WM_MOUSEMOVE);

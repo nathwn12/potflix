@@ -15170,6 +15170,17 @@ pub unsafe extern "system" fn main_wnd_proc(
             paint_main_window(hwnd);
             return 0;
         }
+        crate::win32::WM_PRINT | crate::win32::WM_PRINTCLIENT => {
+            // `PrintWindow` renders through `WM_PRINT`; `DefWindowProcW` draws
+            // only the frame, so the client area is ours to paint into the
+            // caller's DC. Without this every headless frame is an empty
+            // bitmap, whatever the theme.
+            let hdc = wparam as windows_sys::Win32::Graphics::Gdi::HDC;
+            if !hdc.is_null() {
+                paint_to_hdc(hdc, get_client_rect(hwnd), window_dpi(hwnd));
+            }
+            return 0;
+        }
         crate::win32::WM_SIZE | crate::win32::WM_DPI_CHANGED => {
             ui().invalidate();
             return 0;
