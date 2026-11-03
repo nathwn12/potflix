@@ -9,16 +9,20 @@
 //! migration is needed for stored configs.
 //!
 //! [`default_card_spec`] is the shipped per-kind mapping: movie details
-//! `Title (Year)` over a genre/runtime state; series details the series title
-//! over `SxxEyy / Episode`. The synopsis stays in the artwork tooltip as a
-//! <=128-unit snippet; both body lines are identity/playback only. Any state
+//! `<year> · <genres>` over a runtime state; series details EMPTY over
+//! `SxxEyy · Episode`. The work-level synopsis stays in the artwork tooltip
+//! as a <=128-unit snippet (episode-pinned prose never rides); both body
+//! lines are identity/playback only, never the title. Any state
 //! preset whose final text would repeat the series title blanks instead.
-//! The paused " - Paused" marker path is preserved on every rung.
+//! The paused " · Paused" marker rides the last populated body line.
 
 use player::window::{APP_NAME, SUFFIX};
 use serde::{Deserialize, Serialize};
 
-use crate::{Action, Resolved, compose_details_for, compose_name_inner, compose_state_for};
+use crate::{
+    Action, PAUSED_MARKER, Resolved, compose_details_for, compose_name_inner, compose_state_for,
+    unknown_code_state, with_state_time,
+};
 
 /// Details-line preset id: the shipped default.
 pub const CARD_DETAILS_DEFAULT: &str = "default";
@@ -135,8 +139,8 @@ impl CardSpec {
 
     /// Returns the (details, state) body lines for the given inputs under this
     /// spec (`cardspec.go:147`). The default spec is the shipped per-kind
-    /// mapping: movie `Title (Year)` over genre/runtime, series title over
-    /// `SxxEyy / Episode`. No body line ever repeats the activity header: the
+    /// mapping: movie `<year> · <genres>` over the runtime, series EMPTY over
+    /// `SxxEyy · Episode`. No body line ever repeats the activity header: the
     /// header carries the media title, so a line identical to it blanks. The
     /// synopsis is never a body line under the default;
     /// [`CARD_STATE_SYNOPSIS`] is an explicit legacy preset. The idle card
@@ -160,13 +164,38 @@ impl CardSpec {
         if is_idle_title(raw_title) {
             return ("Browsing".to_string(), "Idle".to_string());
         }
+        // UNKNOWN: the parsed title (in the header) plus the parsed code if
+        // any on line 2; no art, no prose, no timestamps (the composer
+        // strips those). Presets do not reach this card: there is nothing
+        // resolved to restyle.
+        if r.unknown {
+            let mut state = unknown_code_state(raw_title, r);
+            if a.is_some_and(|x| x.paused) {
+                state = with_state_time(&state, PAUSED_MARKER);
+            }
+            return (String::new(), state);
+        }
         let spec = self.normalized();
         let mut details = compose_details_for(raw_title, r, is_movie, &spec.details);
-        let state = compose_state_for(raw_title, a, r, is_movie, &spec.state);
+        let mut state = compose_state_for(raw_title, a, r, is_movie, &spec.state);
+        // PAUSED under the default state line: the default branches mark a
+        // populated state themselves; when the state is empty the marker
+        // rides the last populated body line instead -- the details when one
+        // exists, else a bare marker on the state.
+        if a.is_some_and(|x| x.paused)
+            && spec.state == CARD_STATE_DEFAULT
+            && state.is_empty()
+        {
+            if details.is_empty() {
+                state = with_state_time("", PAUSED_MARKER);
+            } else {
+                details = with_state_time(&details, PAUSED_MARKER);
+            }
+        }
         // One rule for both surfaces (wire and Card-view preview): no body line
         // repeats the header. The header carries the media title, so a series'
         // own title on line 1 blanks; the episode state still carries
-        // `SxxEyy · Episode`. A movie's line 1 keeps `Title (Year)`.
+        // `SxxEyy · Episode`. A movie's line 1 keeps `<year> · <genres>`.
         let header = compose_name_inner(raw_title, r);
         if !details.is_empty() && details == header {
             details.clear();
@@ -177,7 +206,7 @@ impl CardSpec {
 
 /// The small named set per line (`cardspec.go:83`): 1 stored Details value
 /// and 4 State choices. Details keeps only Default (the per-kind default
-/// line: episode title for TV, synopsis for movies); the stored value stays
+/// line: empty for TV, `<year> · <genres>` for movies); the stored value stays
 /// for compatibility but the Card view offers no Details row. Episode
 /// rendered byte-identical to Default for both kinds, so it is retired
 /// alongside Title and Series (which repeated the activity header, T5-B).

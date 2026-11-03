@@ -199,12 +199,14 @@ fn latch_resolved(path: &str, query: &metadata::Query) -> Option<presence::Resol
 }
 
 /// One latch as the card's resolved inputs. A movie latch renders its `media`
-/// snapshot, with the latch poster as the artwork fallback; a season/show
-/// latch renders the playing episode's pin -- its title, synopsis and episode
-/// code -- under the latch's own series name, poster and year. With no pin
-/// for the playing episode the show title/poster still resolve and the code
-/// rides from the query (the provisional path), so the latch is never a
-/// forced movie: `is_movie` follows the latch scope, not the filename.
+/// snapshot, with the owner's latch poster WINNING over the snapshot poster;
+/// a season/show latch renders the playing episode's pin -- its title and
+/// episode code -- under the latch's own series name, poster and year, but
+/// the pin's own synopsis NEVER rides the tooltip (episode prose spoils the
+/// episode). With no pin for the playing episode the show title/poster still
+/// resolve and the code rides from the query (the provisional path), so the
+/// latch is never a forced movie: `is_movie` follows the latch scope, not
+/// the filename.
 fn resolved_from_latch(off: &overrides::Override, query: &metadata::Query) -> presence::Resolved {
     match off.scope {
         overrides::Scope::Movie => {
@@ -226,9 +228,15 @@ fn resolved_from_latch(off: &overrides::Override, query: &metadata::Query) -> pr
             if res.year <= 0 {
                 res.year = off.year;
             }
-            if res.artwork.is_empty() {
+            // The owner's stored choice wins: the latch poster beats the
+            // media snapshot poster. The snapshot is only the fallback when
+            // the latch carries no poster of its own.
+            if !off.poster.is_empty() {
                 res.artwork = off.poster.clone();
             }
+            // A movie snapshot synopsis describes the work, so it may ride
+            // the tooltip.
+            res.synopsis_is_work = true;
             res
         }
         overrides::Scope::Season | overrides::Scope::Series => {
@@ -248,6 +256,8 @@ fn resolved_from_latch(off: &overrides::Override, query: &metadata::Query) -> pr
             };
             if let Some(pin) = pin {
                 res.episode_name = pin.title.clone();
+                // Episode-pinned prose: `synopsis_is_work` stays false (the
+                // default), so this never rides the Discord tooltip.
                 res.synopsis = pin.synopsis.clone();
                 res.season = i64::from(pin.season);
                 res.number = pin.number;
@@ -374,6 +384,10 @@ fn push_activity(
                     episode_name: answer.episode,
                     artwork: answer.artwork,
                     synopsis: answer.synopsis,
+                    // A resolver synopsis describes the work (show or
+                    // movie); the episode title rides separately, so the
+                    // tooltip is spoiler-free.
+                    synopsis_is_work: true,
                     genres: answer.genres,
                     length: answer.length,
                     year: answer.year,
@@ -382,10 +396,17 @@ fn push_activity(
                     number: answer.number,
                     absolute: if query.absolute { query.episode } else { 0 },
                     buttons: Vec::new(),
+                    unknown: false,
                 };
                 found = true;
             }
         }
+    }
+    // An unmatched UNKNOWN title (themes, extras, bare names) is not a
+    // provisional series: the card is the cleaned title plus the parsed code
+    // if any, with no art, no prose and no timestamps.
+    if !found && query.kind == metadata::Kind::UNKNOWN {
+        res.unknown = true;
     }
     // The kind follows the answer when one was found, else the query; an
     // UNKNOWN title takes the series ladder.
@@ -1426,7 +1447,7 @@ mod tests {
                 clear: false,
                 name: "Breaking Bad".to_string(),
                 details: String::new(),
-                state: "S4 E7 \u{b7} Problem Dog - Paused".to_string(),
+                state: "S4 E7 \u{b7} Problem Dog \u{b7} Paused".to_string(),
                 has_start: true,
                 start: PAUSE_START,
                 has_end: false,
@@ -1465,7 +1486,7 @@ mod tests {
         assert!(
             !got[4].clear
                 && got[4].name == "Breaking Bad"
-                && got[4].state == "S4 E7 \u{b7} Problem Dog - Paused",
+                && got[4].state == "S4 E7 \u{b7} Problem Dog \u{b7} Paused",
             "frame 4 is not the parked paused card: {got:?}"
         );
         for (i, sent) in got.iter().enumerate() {
@@ -2648,7 +2669,7 @@ mod tests {
             "the title preset repeats the header and blanks"
         );
         assert_eq!(
-            movie_card.state, "Sci-Fi \u{b7} 2h 46m",
+            movie_card.state, "2h 46m",
             "state survives the details preset"
         );
 
@@ -2701,7 +2722,7 @@ mod tests {
         let (d1, s1) = wire_lines(&first);
         let parked = s1.as_deref().unwrap_or("");
         assert!(
-            parked.ends_with(" - Paused"),
+            parked.ends_with(" \u{b7} Paused"),
             "first frame is the parked pause card, got {parked:?}"
         );
         // A save publishes the Minimal state preset; the next paused poll with
@@ -2979,8 +3000,9 @@ mod tests {
 
     /// A latched series file renders FROM THE LATCH: the episode name and
     /// synopsis are the stored pin's and the artwork is the latch poster.
-    /// Details keeps the pin's episode title alone (the show lives in the
-    /// header); the state is the pin's episode code plus the pin's synopsis.
+    /// Details keeps the header (the show lives in the header); the state is
+    /// the pin's episode code plus the pin's episode title, and the pin's
+    /// synopsis never rides the tooltip (episode prose spoils the episode).
     /// META_RESOLVER is only ever set by `run_ui`, never in a test binary, so
     /// the latch branch is the ONLY possible source of these values -- the
     /// exclusivity is structural.
@@ -3079,8 +3101,8 @@ mod tests {
         );
         assert_eq!(
             a["assets"]["large_text"].as_str().unwrap_or(""),
-            "A synopsis from the pin.",
-            "the pin's synopsis: {v}"
+            "",
+            "the pin's episode prose never rides the tooltip: {v}"
         );
         assert_eq!(
             a["assets"]["large_image"].as_str().unwrap_or(""),
@@ -3094,11 +3116,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A latched movie renders FROM its `media` snapshot (the resolver-free
-    /// exclusivity is structural, as above). Rewriting the store -- the
-    /// snapshot loses its artwork, so the card must fall back to the latch
-    /// poster -- only takes effect through the mtime-driven reload, so this one
-    /// test pins both.
+    /// A latched movie renders FROM its `media` snapshot for identity -- but
+    /// the owner's latch poster wins over the snapshot poster. Rewriting the
+    /// store -- the snapshot loses its artwork, or the poster changes -- only
+    /// takes effect through the mtime-driven reload, so this one test pins
+    /// all three.
     #[test]
     fn latched_movie_file_renders_its_media_snapshot() {
         // Same process-wide fixture state as the series test: one serial.
@@ -3184,13 +3206,13 @@ mod tests {
         );
         assert_eq!(
             a["details"].as_str().unwrap_or(""),
-            "Latch Movie (2019)",
-            "the snapshot's title and year lead the card: {v}"
+            "2019 \u{b7} Action",
+            "the snapshot's year and genres lead the card: {v}"
         );
         assert_eq!(
             a["state"].as_str().unwrap_or(""),
-            "Action \u{b7} 1h 40m",
-            "the snapshot's genres and runtime: {v}"
+            "1h 40m",
+            "the snapshot's runtime: {v}"
         );
         assert_eq!(
             a["assets"]["large_text"].as_str().unwrap_or(""),
@@ -3199,8 +3221,8 @@ mod tests {
         );
         assert_eq!(
             a["assets"]["large_image"].as_str().unwrap_or(""),
-            "https://example.com/latch-media.jpg",
-            "the snapshot's artwork: {v}"
+            "https://example.com/latch-movie.jpg",
+            "the owner's latch poster wins over the snapshot artwork: {v}"
         );
 
         // Rewrite the store without media artwork: only the mtime-driven
@@ -3867,6 +3889,100 @@ mod tests {
         assert_eq!(card.name, "Latch Show", "provisional header");
         assert_eq!(card.details, "", "provisional details blank");
         assert_eq!(card.state, "E07", "provisional state carries the code");
+    }
+
+    /// The owner's latch poster wins over the media snapshot poster (the
+    /// snapshot is only the fallback), and a movie snapshot synopsis is
+    /// work-level, so it rides the tooltip.
+    #[test]
+    fn latch_movie_owner_poster_wins_over_snapshot() {
+        let latch = overrides::Override {
+            scope: overrides::Scope::Movie,
+            key: "movie".to_string(),
+            title: "Latch Movie".to_string(),
+            year: 2019,
+            provider: "cinemeta".to_string(),
+            provider_id: "tt1".to_string(),
+            poster: "https://example.com/latch-movie.jpg".to_string(),
+            media: Some(metadata::Media {
+                source: "cinemeta".to_string(),
+                source_id: "tt1".to_string(),
+                kind: metadata::Kind::MOVIE,
+                title: "Latch Movie".to_string(),
+                year: 2019,
+                artwork: "https://example.com/latch-media.jpg".to_string(),
+                synopsis: "The media snapshot's synopsis.".to_string(),
+                genres: "Action".to_string(),
+                length: "1h 40m".to_string(),
+                ..metadata::Media::default()
+            }),
+            episodes: Vec::new(),
+            created_at_ms: 1_700_000_000_001,
+        };
+        let query = metadata::Query {
+            kind: metadata::Kind::MOVIE,
+            title: "Latch Movie".to_string(),
+            year: 2019,
+            ..metadata::Query::default()
+        };
+        let res = resolved_from_latch(&latch, &query);
+        assert!(res.is_movie, "a movie latch stays a movie");
+        assert_eq!(res.series, "Latch Movie", "the snapshot title");
+        assert_eq!(
+            res.artwork, "https://example.com/latch-movie.jpg",
+            "the owner's poster wins over the snapshot"
+        );
+        assert!(
+            res.synopsis_is_work,
+            "a snapshot synopsis is work-level and rides the tooltip"
+        );
+        // No latch poster: the snapshot artwork is the fallback.
+        let mut bare = latch.clone();
+        bare.poster.clear();
+        let res = resolved_from_latch(&bare, &query);
+        assert_eq!(
+            res.artwork, "https://example.com/latch-media.jpg",
+            "the snapshot is the fallback with no latch poster"
+        );
+    }
+
+    /// A series latch pin's synopsis is episode-level: it describes the
+    /// playing episode, so it never rides the tooltip.
+    #[test]
+    fn latch_series_pin_synopsis_is_episode_level() {
+        let latch = overrides::Override {
+            scope: overrides::Scope::Series,
+            key: "show".to_string(),
+            title: "Latch Show".to_string(),
+            year: 2011,
+            provider: "tvmaze".to_string(),
+            provider_id: "7".to_string(),
+            poster: "https://example.com/latch-series.jpg".to_string(),
+            media: None,
+            episodes: vec![metadata::overrides::EpisodePin {
+                season: 2,
+                number: 5,
+                absolute: 0,
+                title: "The Pin Episode".to_string(),
+                synopsis: "A synopsis from the pin.".to_string(),
+            }],
+            created_at_ms: 1_700_000_000_000,
+        };
+        let query = metadata::Query {
+            kind: metadata::Kind::SERIES,
+            title: "Latch Show".to_string(),
+            season: 2,
+            episode: 5,
+            ..metadata::Query::default()
+        };
+        let res = resolved_from_latch(&latch, &query);
+        assert!(!res.is_movie, "a series latch is never a movie");
+        assert_eq!(res.episode_name, "The Pin Episode", "the pin title");
+        assert_eq!(res.synopsis, "A synopsis from the pin.", "the pin note");
+        assert!(
+            !res.synopsis_is_work,
+            "a pin synopsis is episode-level and never rides"
+        );
     }
 
     /// T1: an explicit series latch beats a movie-classified file on the

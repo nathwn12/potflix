@@ -127,16 +127,28 @@ pub fn ensure_async(url: &str) {
     std::thread::spawn(move || {
         let cancel = metadata_http::Cancel::with_deadline(FETCH_DEADLINE);
         let client = metadata_http::HttpClient::new(FETCH_TIMEOUT);
-        if let Ok(response) = client.get_with_accept(&cancel, &url, "image/*") {
+        let outcome = (|| -> Result<(), String> {
+            let response = client
+                .get_with_accept(&cancel, &url, "image/*")
+                .map_err(|e| format!("request failed: {e}"))?;
             let status = response.status();
-            let mut body = response.into_body();
-            if status.is_success() {
-                let mut bytes = Vec::new();
-                let _ = body.as_reader().take(MAX_COVER_BYTES).read_to_end(&mut bytes);
-                if !bytes.is_empty() {
-                    let _ = put_cached(&url, &bytes);
-                }
+            if !status.is_success() {
+                return Err(format!("HTTP {}", status.as_u16()));
             }
+            let mut body = response.into_body();
+            let mut bytes = Vec::new();
+            body.as_reader()
+                .take(MAX_COVER_BYTES)
+                .read_to_end(&mut bytes)
+                .map_err(|e| format!("body read failed: {e}"))?;
+            if bytes.is_empty() {
+                return Err("empty body".to_string());
+            }
+            put_cached(&url, &bytes).map_err(|e| format!("cache write failed: {e}"))?;
+            Ok(())
+        })();
+        if let Err(reason) = outcome {
+            crate::window::app_logf(&format!("artwork: fetch {url}: {reason}"));
         }
         IN_FLIGHT
             .lock()
@@ -162,7 +174,10 @@ pub struct Cover {
 
 impl Cover {
     /// Load a cached cover for `url`, or `None` when the cache has no decodable
-    /// image. The caller owns the decoded handle for the duration of one paint.
+    /// image. A cache file that no longer decodes (truncated fetch, wrong
+    /// bytes) is deleted so the next paint retries the fetch instead of
+    /// serving a permanent absence. The caller owns the decoded handle for
+    /// the duration of one paint.
     #[must_use]
     pub fn load(url: &str) -> Option<Self> {
         if !is_cached(url) {
@@ -177,6 +192,12 @@ impl Cover {
         // SAFETY: `wide` is a live null-terminated path; `image` is written only
         // by GDI+ and checked before use.
         let status = unsafe { win32::GdipCreateBitmapFromFile(wide.as_ptr(), &mut image) };
+        if status != 0 || image.is_null() {
+            // Undecodable bytes poison the slot forever: drop the file so the
+            // next paint refetches instead of missing forever.
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
         if status != 0 || image.is_null() {
             return None;
         }

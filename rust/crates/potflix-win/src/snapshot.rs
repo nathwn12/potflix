@@ -445,7 +445,7 @@ fn picker_rows() -> Vec<metadata::Candidate> {
             year: 2024,
             provider: "tvmaze".to_string(),
             provider_id: "tvmaze-dune-prophecy".to_string(),
-            poster: String::new(),
+            poster: "https://example.com/dune-prophecy.jpg".to_string(),
             synopsis: "The Bene Gesserit origin.".to_string(),
             genres: "Sci-Fi . Drama".to_string(),
             length: "60 min".to_string(),
@@ -457,7 +457,7 @@ fn picker_rows() -> Vec<metadata::Candidate> {
             year: 1984,
             provider: "cinemeta".to_string(),
             provider_id: "tt0087182".to_string(),
-            poster: String::new(),
+            poster: "https://example.com/dune-1984.jpg".to_string(),
             synopsis: "The spice must flow.".to_string(),
             genres: "Sci-Fi".to_string(),
             length: "2h 17m".to_string(),
@@ -547,6 +547,11 @@ fn capture_card(out: &str) -> Result<(), String> {
         || {
             let (raw, res, action, kind) = populated_movie();
             seed_cover(&res.artwork)?;
+            for row in picker_rows() {
+                if !row.poster.is_empty() {
+                    seed_cover(&row.poster)?;
+                }
+            }
             // A live title is playing, so the hero ghost exists in this frame.
             app_support::config::set_live_now_playing(Some(
                 app_support::config::NowPlaying {
@@ -637,6 +642,11 @@ fn capture_picker(out: &str) -> Result<(), String> {
         || {
             let (raw, res, action, kind) = populated_movie();
             seed_cover(&res.artwork)?;
+            for row in picker_rows() {
+                if !row.poster.is_empty() {
+                    seed_cover(&row.poster)?;
+                }
+            }
             {
                 let mut st = window::ui();
                 st.cur_view = View::Card;
@@ -697,6 +707,11 @@ fn capture_picker_empty(out: &str) -> Result<(), String> {
         || {
             let (raw, res, action, kind) = populated_movie();
             seed_cover(&res.artwork)?;
+            for row in picker_rows() {
+                if !row.poster.is_empty() {
+                    seed_cover(&row.poster)?;
+                }
+            }
             {
                 let mut st = window::ui();
                 st.cur_view = View::Card;

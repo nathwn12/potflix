@@ -146,6 +146,46 @@ fn anilist_stub(streaming: &str) -> (FakeServer, AnilistSource) {
     (server, source)
 }
 
+/// Episode artwork is the series cover, never the episode still: a
+/// `streamingEpisodes[].thumbnail` is a frame of the episode being watched
+/// (spoiler plus burned-in subtitles), so it must never stand in as art.
+#[test]
+fn anilist_episode_artwork_is_the_series_cover_never_the_still() {
+    let still = "https://example.com/episode-still.jpg";
+    let cover = "https://example.com/cover-large.jpg";
+    let body = format!(
+        "{{\"data\":{{\"Page\":{{\"media\":[{{\"id\":1,\"title\":{{\"romaji\":\"Show\",\"english\":\"Show\"}},\"seasonYear\":2020,\"coverImage\":{{\"extraLarge\":\"{cover}\",\"large\":\"\"}},\"streamingEpisodes\":[{{\"title\":\"Episode 1 - Pilot\",\"url\":\"http://x\",\"site\":\"Crunchyroll\",\"thumbnail\":\"{still}\"}}]}}]}}}}}}"
+    );
+    let server = FakeServer::start(move |_req: &Request| Response::json(&body));
+    let source = AnilistSource::new(server.url(), http_client());
+    let media = source
+        .find(
+            &Cancel::background(),
+            &Query {
+                kind: Kind::SERIES,
+                title: "Show".to_string(),
+                ..Query::default()
+            },
+        )
+        .expect("Find")
+        .expect("expected media, got nil");
+    assert_eq!(media.artwork, cover, "the show art is the cover");
+    assert!(
+        !media.episodes.is_empty(),
+        "the fixture must carry an episode"
+    );
+    for episode in &media.episodes {
+        assert_eq!(
+            episode.artwork, cover,
+            "episode artwork is the series cover: {episode:?}"
+        );
+        assert!(
+            !episode.artwork.contains("episode-still"),
+            "never the streaming still: {episode:?}"
+        );
+    }
+}
+
 fn anilist_numbers(media: &Media) -> Vec<i32> {
     media
         .episodes

@@ -1,4 +1,4 @@
-//! Narrow chrome primitives: five explicit paint functions, each with a
+//! Narrow chrome primitives: four explicit paint functions, each with a
 //! measured rect owned by the layout and exactly one caller in `window.rs`.
 //!
 //! - `bar` (48px): 20px mark left (no wordmark: the OS caption already reads
@@ -6,10 +6,8 @@
 //!   `#F2F3F5` hover, accent never).
 //! - `hero` (<=124px): 64x96 poster, 20 semibold title single line, 12 muted
 //!   meta, 12 status, 32px ghost "Fix match" right-aligned on the status row.
-//! - `scope_row` (36px): five equal segments, 12px, no borders/boxes,
-//!   selected = 2px underline flush to row bottom, unselected muted.
-//! - `result_row` (56px): 32x48 thumb, 13 semibold title, 12 muted meta built
-//!   from the record only (provider names forbidden).
+//! - `result_row` (56px): 32x48 cover thumb, 13 semibold title, 12 muted meta
+//!   built from the record only (provider names forbidden).
 //! - `settings_row` (48px): 13 label left at 16, 12 muted desc under it,
 //!   right-aligned 36px control; 11px caps labels 32px above each group
 //!   (layout owns the caps; this paints one row).
@@ -19,8 +17,7 @@ use windows_sys::Win32::Graphics::Gdi;
 use super::{
     fill_rect_solid, fill_round_rect, scale_px, stroke_round_rect_w, COL_ACCENT,
     COL_BORDER, COL_CARD, COL_MUTED, COL_ROW_HOVER, COL_SURFACE, COL_TEXT, FS_CHIP, FS_HERO_META,
-    FS_HERO_TITLE, FS_ROW_TITLE, FS_SCOPE, R_CTRL, R_PANEL, SP_1, SP_2, SP_3, SP_4, STROKE_HAIR,
-    STROKE_FOCUS, UiButton, BTN_TOGGLE_ON, Rect,
+    FS_HERO_TITLE, FS_ROW_TITLE, R_CTRL, R_PANEL, SP_1, SP_2, SP_3, STROKE_HAIR, Rect,
 };
 use crate::win32;
 
@@ -308,62 +305,22 @@ pub fn hero(
 }
 
 // ---------------------------------------------------------------------------
-// scope_row: 36px five equal segments. Measured rects = the five buttons; one
-// caller = `window::paint_narrow_card`.
-// ---------------------------------------------------------------------------
-
-/// Paint the ONE five-segment scope row: no borders or boxes, selected = 2px
-/// underline flush to the row bottom, unselected muted. Labels are centred
-/// with no ellipsis (the layout guarantees equal fifths fit at 460px).
-pub fn scope_row(hdc: Gdi::HDC, segs: &[UiButton], dpi: i32) {
-    let sc = |v: i32| scale_px(dpi, v);
-    if segs.is_empty() {
-        return;
-    }
-    let font = crate::brand::ui(sc(FS_SCOPE), crate::brand::UI_WEIGHT);
-    for b in segs {
-        // Measured: the layout guarantees equal fifths fit at 460px; the
-        // extent pins it so a clipped segment fails loudly in debug.
-        let w = text_width_px(hdc, font, &b.label);
-        debug_assert!(
-            w <= (b.rc.right - b.rc.left).max(1),
-            "scope '{}' {}px exceeds segment {}px",
-            b.label,
-            w,
-            b.rc.right - b.rc.left
-        );
-        let on = b.style == BTN_TOGGLE_ON;
-        let tc = if on { COL_TEXT } else { COL_MUTED };
-        draw_center(hdc, &b.label, b.rc, font, tc);
-        if on {
-            let ind = Rect {
-                left: b.rc.left + sc(SP_4),
-                top: b.rc.bottom - sc(STROKE_FOCUS),
-                right: b.rc.right - sc(SP_4),
-                bottom: b.rc.bottom,
-            };
-            fill_rect_solid(hdc, ind, COL_TEXT);
-        }
-    }
-    // SAFETY: font created above.
-    unsafe {
-        Gdi::DeleteObject(font);
-    }
-}
-
-// ---------------------------------------------------------------------------
 // result_row: 56px record row. Measured rect = the row; one caller =
 // `window::paint_narrow_card` (via the results panel loop).
 // ---------------------------------------------------------------------------
 
-/// Paint one 56px result row: 32x48 thumb, 13 semibold title, 12 muted
+/// Paint one 56px result row: 32x48 cover thumb (the decoded poster when its
+/// bytes are cached, else the empty tile), 13 semibold title, 12 muted
 /// record-only meta. Selected gets the hover fill plus the accent left bar.
+/// The click/hit geometry still reads from the layout table: this paints
+/// inside the measured row rect only.
 pub fn result_row(
     hdc: Gdi::HDC,
     rc: Rect,
     dpi: i32,
     title: &str,
     meta: &str,
+    cover: Option<&crate::artwork::Cover>,
     selected: bool,
 ) {
     let sc = |v: i32| scale_px(dpi, v);
@@ -388,15 +345,15 @@ pub fn result_row(
             COL_ACCENT,
         );
     }
-    // 32x48 thumb.
+    // 32x48 cover thumb: the decoded poster when cached, else the empty
+    // tile. Same tile painter as the hero cover, so rows and hero agree.
     let thumb = Rect {
         left: rc.left + sc(SP_3),
         top: rc.top + sc(SP_1),
         right: rc.left + sc(SP_3) + sc(32),
         bottom: rc.top + sc(SP_1) + sc(48),
     };
-    fill_round_rect(hdc, thumb, COL_SURFACE, sc(R_CTRL));
-    stroke_round_rect_w(hdc, thumb, COL_BORDER, sc(R_CTRL), sc(STROKE_HAIR));
+    super::paint_cover(hdc, thumb, dpi, cover);
     let title_font = crate::brand::ui(sc(FS_ROW_TITLE), crate::brand::UI_WEIGHT);
     let meta_font = crate::brand::ui(sc(FS_HERO_META), crate::brand::UI_WEIGHT);
     let text_l = thumb.right + sc(SP_3);

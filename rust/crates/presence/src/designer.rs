@@ -123,6 +123,7 @@ mod tests {
             genres: "Sci-Fi, Adventure".to_string(),
             length: "2h 46m".to_string(),
             synopsis: "Paul Atreides unites with the Fremen.".to_string(),
+            synopsis_is_work: true,
             artwork: "https://example.com/dune.jpg".to_string(),
             ..Resolved::default()
         };
@@ -259,7 +260,7 @@ mod tests {
     fn movie_episode_identity_and_episode_state_survive_the_designer() {
         let movie = movie_card();
         assert_eq!(movie.name, "Dune: Part Two");
-        assert_eq!(movie.details, "Dune: Part Two (2024)");
+        assert_eq!(movie.details, "2024 \u{b7} Sci-Fi, Adventure");
 
         let episode = series_card();
         assert_eq!(episode.name, "Breaking Bad", "episode header is the series");

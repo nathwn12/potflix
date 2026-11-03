@@ -130,25 +130,16 @@ pub const BTN_SURFACE_PROFILE: i32 = 61;
 pub const BTN_SURFACE_ACTIVITY: i32 = 62;
 /// The designer's field toggles. Each flips one [`presence::DesignerSpec`]
 /// field and immediately publishes it to the live mirror the sender reads.
-pub const BTN_FIELD_ARTWORK: i32 = 70;
+/// Covers are always on, so there is no artwork toggle.
 pub const BTN_FIELD_DETAILS: i32 = 71;
 pub const BTN_FIELD_STATE: i32 = 72;
 pub const BTN_FIELD_SYNOPSIS: i32 = 73;
 pub const BTN_FIELD_TIMERS: i32 = 74;
 /// The Card workspace's title/year query field. It is the same single-field
 /// contract as the picker dialog: a title, or a title with a trailing year.
+/// Search is universal: every query runs both chains (regular and anime) with
+/// no user-selected scope, and the list merges into one ranked result.
 pub const BTN_PICKER_FIELD: i32 = 80;
-/// The Advanced search-scope filter, five segments in this order: `All` (the
-/// default), `TV`, `Movies`, `Anime TV`, `Anime Movies`. It shapes the SEARCH
-/// only; the record a row resolves owns the preview's kind.
-pub const BTN_PICKER_ALL: i32 = 85;
-pub const BTN_PICKER_MOVIE: i32 = 81;
-pub const BTN_PICKER_TV: i32 = 82;
-/// The anime TV segment: the anime legs' series answers. A provider class, not
-/// a kind of its own.
-pub const BTN_PICKER_ANIME_TV: i32 = 87;
-/// The anime movies segment: the anime legs' movie answers.
-pub const BTN_PICKER_ANIME_MOVIE: i32 = 88;
 /// The one primary picker action: Search. It never changes label or job: a
 /// second verb (applying a match to the playing title) is its own inline
 /// control, [`BTN_PICKER_APPLY`].
@@ -387,7 +378,6 @@ pub const R_TILE: i32 = brand::squircle(32);
 /// Approved narrow band geometry, logical px at 96 DPI.
 pub const TOPBAR_H_L: i32 = 48;
 pub const HERO_MAX_H_L: i32 = 124;
-pub const SCOPE_H_L: i32 = 36;
 pub const RESULT_ROW_H_L: i32 = 56;
 pub const BAND_GAP_L: i32 = 12;
 pub const STATUS_BAR_H_L: i32 = 24;
@@ -434,7 +424,6 @@ pub const FS_TOPBAR_APP: i32 = 13;
 pub const FS_CHIP: i32 = 12;
 pub const FS_HERO_TITLE: i32 = 20;
 pub const FS_HERO_META: i32 = 12;
-pub const FS_SCOPE: i32 = 12;
 pub const FS_ROW_TITLE: i32 = 13;
 pub const FS_EMPTY_TITLE: i32 = 15;
 pub const FS_EMPTY_SUB: i32 = 13;
@@ -1255,13 +1244,8 @@ pub fn compute_settings_layout(
     y += gap;
 
     push_label(&mut l, "settings.card", &mut y);
-    push_row(
-        &mut l,
-        BTN_FIELD_ARTWORK,
-        "Artwork".to_string(),
-        if designer.artwork { BTN_TOGGLE_ON } else { BTN_TOGGLE },
-        &mut y,
-    );
+    // Covers are always on: no artwork toggle. The rest of the field
+    // toggles stay.
     push_row(
         &mut l,
         BTN_FIELD_DETAILS,
@@ -1655,7 +1639,6 @@ pub fn settings_focus_order() -> Vec<i32> {
         BTN_STARTUP,
         BTN_THEME_AMOLED,
         BTN_THEME_DARK,
-        BTN_FIELD_ARTWORK,
         BTN_FIELD_DETAILS,
         BTN_FIELD_STATE,
         BTN_FIELD_SYNOPSIS,
@@ -1681,20 +1664,15 @@ pub fn card_state_button(i: i32) -> i32 {
     BTN_CARD_STATE_AT + i
 }
 
-/// `cardFocusOrder` — approved narrow visual order: gear, field, Search, the
-/// ONE five-segment scope row, hero Fix, pinned Apply, Change filters. Hidden
-/// Card/Back stay wired for Esc/keyboard but are never Tab stops.
+/// `cardFocusOrder` — approved narrow visual order: gear, field, Search,
+/// hero Fix, pinned Apply, Change filters. Hidden Card/Back stay wired for
+/// Esc/keyboard but are never Tab stops.
 #[must_use]
 pub fn card_focus_order() -> Vec<i32> {
     vec![
         BTN_SETTINGS,
         BTN_PICKER_FIELD,
         BTN_PICKER_SEARCH,
-        BTN_PICKER_ALL,
-        BTN_PICKER_TV,
-        BTN_PICKER_MOVIE,
-        BTN_PICKER_ANIME_TV,
-        BTN_PICKER_ANIME_MOVIE,
         BTN_FIX_MATCH,
         BTN_PICKER_APPLY,
         BTN_ADVANCED,
@@ -1885,10 +1863,10 @@ pub fn compute_card_layout_with(
 }
 
 /// The approved narrow Card composition (460x680): 48px top bar, hero
-/// <=124px, 36px search, ONE 36px five-segment scope row, results panel to the
-/// 24px status bar. No tab strip, no Advanced disclosure, no payload knobs —
-/// those live in Settings under CARD. Wide (`>=1180x700`) keeps the split
-/// workspace below untouched.
+/// <=124px, 36px search, results panel to the 24px status bar. No tab strip,
+/// no scope row, no Advanced disclosure, no payload knobs — those live in
+/// Settings under CARD. Wide (`>=1180x700`) keeps the split workspace below
+/// untouched.
 #[must_use]
 pub fn compute_card_narrow(
     cw: i32,
@@ -1925,9 +1903,9 @@ pub fn compute_card_narrow(
     l.settings = gear;
 
     // Hero: 64x96 poster, title/meta/status, ghost Fix match on the status row.
-    // Tiny viewports cannot fit hero + search + scope + footer above the
+    // Tiny viewports cannot fit hero + search + footer above the
     // status bar: when the hero would collide with the pinned footer, the
-    // hero band collapses (search, scope and footer stay reachable instead of
+    // hero band collapses (search and footer stay reachable instead of
     // overlapping). The collapse is all-or-nothing so a half-height hero can
     // never clip the poster.
     let hero_top = topbar_h + gap;
@@ -1941,8 +1919,6 @@ pub fn compute_card_narrow(
         - sc(32)
         - sc(SP_2)
         - sc(SP_3)
-        - sc(SCOPE_H_L)
-        - sc(SP_2)
         - sc(BTN_H)
         - sc(SP_2)
         - hero_top;
@@ -2011,50 +1987,13 @@ pub fn compute_card_narrow(
         bottom: search_top + search_h,
     };
 
-    // ONE scope row: five equal segments, underline-selected, never red.
-    let scope_top = l.picker_bar.bottom + gap;
-    let scope_h = sc(SCOPE_H_L);
-    let scope_labels = ["All", "TV", "Movies", "Anime TV", "Anime Movies"];
-    let scope_ids = [
-        BTN_PICKER_ALL,
-        BTN_PICKER_TV,
-        BTN_PICKER_MOVIE,
-        BTN_PICKER_ANIME_TV,
-        BTN_PICKER_ANIME_MOVIE,
-    ];
-    let n = 5i32;
-    let seg_w = content_w / n;
-    let mut scope_btns = Vec::new();
-    let scope_filters = [
-        crate::search::KindFilter::All,
-        crate::search::KindFilter::Series,
-        crate::search::KindFilter::Movies,
-        crate::search::KindFilter::AnimeSeries,
-        crate::search::KindFilter::AnimeMovies,
-    ];
-    for (i, (id, label)) in scope_ids.iter().zip(scope_labels.iter()).enumerate() {
-        let i = i as i32;
-        let selected = state.filter == scope_filters[i as usize];
-        scope_btns.push(UiButton {
-            id: *id,
-            label: (*label).to_string(),
-            // Approved scope: text-colour underline when selected, muted when
-            // not; red never used here (TOGGLE paints a COL_TEXT indicator).
-            style: if selected { BTN_TOGGLE_ON } else { BTN_TOGGLE },
-            rc: Rect {
-                left: margin + i * seg_w,
-                top: scope_top,
-                right: if i == n - 1 { margin + content_w } else { margin + (i + 1) * seg_w },
-                bottom: scope_top + scope_h,
-            },
-        });
-    }
-
     // Results panel fills to the status bar; tiny viewports scroll below it.
-    let panel_top = scope_top + scope_h + gap;
+    // No scope row: universal search runs both chains for every query, so the
+    // list starts directly under the search row.
+    let panel_top = l.picker_bar.bottom + gap;
     let panel = if panel_top > status_top {
         // Pinned bands already exceed the client: extend the panel below the
-        // fold so footer controls never overlap the search/scope rows. The
+        // fold so footer controls never overlap the search row. The
         // pinned status bar overlays it (chrome, skipped in overlap checks).
         Rect {
             left: margin,
@@ -2125,7 +2064,6 @@ pub fn compute_card_narrow(
             rc: search_rc,
         },
     ];
-    l.btns.extend(scope_btns);
     // Hero ghost on the status row, right-aligned — present only while a live
     // title is playing (and the hero band is shown), absent (not
     // disabled) with nothing playing or when tiny clients collapse the hero.
@@ -2548,58 +2486,10 @@ pub fn compute_card_layout_state(
         },
     ];
     if advanced {
-        // Search scope: `All` by default. This shapes the SEARCH only --
-        // the record a row resolves owns the preview's kind, so this row can
-        // never relabel a series as a movie. It is never on screen at rest.
-        let filter_items = vec![
-            (
-                BTN_PICKER_ALL,
-                crate::search::KindFilter::All.label().to_string(),
-                if state.filter == crate::search::KindFilter::All { BTN_TOGGLE_ON } else { BTN_TOGGLE },
-            ),
-            (
-                BTN_PICKER_TV,
-                crate::search::KindFilter::Series.label().to_string(),
-                if state.filter == crate::search::KindFilter::Series { BTN_TOGGLE_ON } else { BTN_TOGGLE },
-            ),
-            (
-                BTN_PICKER_MOVIE,
-                crate::search::KindFilter::Movies.label().to_string(),
-                if state.filter == crate::search::KindFilter::Movies { BTN_TOGGLE_ON } else { BTN_TOGGLE },
-            ),
-        ];
-        l.btns.extend(segments(
-            l.advanced_panel.left,
-            l.advanced_panel.right,
-            l.advanced_panel.top,
-            sc(32),
-            &filter_items,
-        ));
-        let anime_items = vec![
-            (
-                BTN_PICKER_ANIME_TV,
-                crate::search::KindFilter::AnimeSeries.label().to_string(),
-                if state.filter == crate::search::KindFilter::AnimeSeries { BTN_TOGGLE_ON } else { BTN_TOGGLE },
-            ),
-            (
-                BTN_PICKER_ANIME_MOVIE,
-                crate::search::KindFilter::AnimeMovies.label().to_string(),
-                if state.filter == crate::search::KindFilter::AnimeMovies { BTN_TOGGLE_ON } else { BTN_TOGGLE },
-            ),
-        ];
-        l.btns.extend(segments(
-            l.advanced_panel.left,
-            l.advanced_panel.right,
-            l.advanced_panel.top + sc(32) + sc(SP_2),
-            sc(32),
-            &anime_items,
-        ));
+        // Universal search: no scope segments and no category words. The
+        // disclosure keeps the designer field toggles (covers are always on,
+        // so no artwork row) and the line-2 state presets.
         let field_items: Vec<(i32, String, i32)> = vec![
-            (
-                BTN_FIELD_ARTWORK,
-                "Artwork".to_string(),
-                if designer.artwork { BTN_TOGGLE_ON } else { BTN_TOGGLE },
-            ),
             (
                 BTN_FIELD_DETAILS,
                 "Details".to_string(),
@@ -2624,7 +2514,7 @@ pub fn compute_card_layout_state(
         l.btns.extend(segments(
             l.advanced_panel.left,
             l.advanced_panel.right,
-            l.advanced_panel.top + 2 * (sc(32) + sc(SP_2)),
+            l.advanced_panel.top,
             sc(32),
             &field_items,
         ));
@@ -2643,15 +2533,15 @@ pub fn compute_card_layout_state(
             id: "card.line2".into(),
             rc: Rect {
                 left: l.advanced_panel.left,
-                top: l.advanced_panel.top + 3 * (sc(32) + sc(SP_2)),
+                top: l.advanced_panel.top + (sc(32) + sc(SP_2)),
                 right: l.advanced_panel.right,
-                bottom: l.advanced_panel.top + 3 * (sc(32) + sc(SP_2)) + sc(18),
+                bottom: l.advanced_panel.top + (sc(32) + sc(SP_2)) + sc(18),
             },
         });
         l.btns.extend(segments(
             l.advanced_panel.left,
             l.advanced_panel.right,
-            l.advanced_panel.top + 3 * (sc(32) + sc(SP_2)) + sc(18),
+            l.advanced_panel.top + (sc(32) + sc(SP_2)) + sc(18),
             sc(32),
             &si,
         ));
@@ -2885,13 +2775,12 @@ pub fn compute_card_layout_shipped_v1(
                 if short { brief } else { long }.to_string(),
             )
         };
-        let (s_art, art) = name(designer.artwork, "Artwork", "Art");
         let (s_det, det) = name(designer.details, "Details", "Details");
         let (s_sta, sta) = name(designer.state, "State", "State");
         let (s_syn, syn) = name(designer.synopsis, "Synopsis", "Synopsis");
         let (s_tim, tim) = name(designer.timers, "Timers", "Time");
+        // Covers are always on: no artwork entry.
         vec![
-            (BTN_FIELD_ARTWORK, art, s_art),
             (BTN_FIELD_DETAILS, det, s_det),
             (BTN_FIELD_STATE, sta, s_sta),
             (BTN_FIELD_SYNOPSIS, syn, s_syn),
@@ -3073,10 +2962,11 @@ pub fn compute_card_layout_shipped_v1(
                 rc: l.settings,
             },
         ];
-        // The picker band: one query field, the explicit Movie/TV choice, and
-        // the one primary action. The field is the same single-input contract
-        // as the dialog; the layout carries no second year control.
-        let (pf, pm, pt, ps, pstat) = picker_items(
+        // The picker band: one query field and the one primary action. The
+        // field is the same single-input contract as the dialog; the layout
+        // carries no second year control and no kind choice: universal
+        // search runs both chains for every query.
+        let (pf, _pm, _pt, ps, pstat) = picker_items(
             l.picker_bar.left,
             l.picker_bar.right,
             l.picker_bar.top,
@@ -3087,18 +2977,6 @@ pub fn compute_card_layout_shipped_v1(
             label: String::new(),
             style: BTN_OUTLINE,
             rc: pf,
-        });
-        l.btns.push(UiButton {
-            id: BTN_PICKER_MOVIE,
-            label: "Movie".into(),
-            style: BTN_TOGGLE,
-            rc: pm,
-        });
-        l.btns.push(UiButton {
-            id: BTN_PICKER_TV,
-            label: "TV".into(),
-            style: BTN_TOGGLE,
-            rc: pt,
         });
         l.btns.push(UiButton {
             id: BTN_PICKER_SEARCH,
@@ -3326,7 +3204,7 @@ pub fn compute_card_layout_shipped_v1(
                 rc: l.settings,
             },
         ];
-        let (pf, pm, pt, ps, pstat) = picker_items(
+        let (pf, _pm, _pt, ps, pstat) = picker_items(
             l.picker_bar.left,
             l.picker_bar.right,
             l.picker_bar.top,
@@ -3337,18 +3215,6 @@ pub fn compute_card_layout_shipped_v1(
             label: String::new(),
             style: BTN_OUTLINE,
             rc: pf,
-        });
-        l.btns.push(UiButton {
-            id: BTN_PICKER_MOVIE,
-            label: "Movie".into(),
-            style: BTN_TOGGLE,
-            rc: pm,
-        });
-        l.btns.push(UiButton {
-            id: BTN_PICKER_TV,
-            label: "TV".into(),
-            style: BTN_TOGGLE,
-            rc: pt,
         });
         l.btns.push(UiButton {
             id: BTN_PICKER_SEARCH,
@@ -3555,10 +3421,10 @@ impl PreviewSurface {
     }
 }
 
-/// Which designer field a toggle button edits.
+/// Which designer field a toggle button edits. Covers are always on, so
+/// artwork has no toggle and no button id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DesignerField {
-    Artwork,
     Details,
     State,
     Synopsis,
@@ -3569,7 +3435,6 @@ pub enum DesignerField {
 #[must_use]
 pub fn designer_field_for_button(id: i32) -> Option<DesignerField> {
     match id {
-        BTN_FIELD_ARTWORK => Some(DesignerField::Artwork),
         BTN_FIELD_DETAILS => Some(DesignerField::Details),
         BTN_FIELD_STATE => Some(DesignerField::State),
         BTN_FIELD_SYNOPSIS => Some(DesignerField::Synopsis),
@@ -3582,7 +3447,6 @@ pub fn designer_field_for_button(id: i32) -> Option<DesignerField> {
 #[must_use]
 pub fn designer_field_label(field: DesignerField) -> &'static str {
     match field {
-        DesignerField::Artwork => "Artwork",
         DesignerField::Details => "Details",
         DesignerField::State => "State",
         DesignerField::Synopsis => "Synopsis",
@@ -3615,9 +3479,9 @@ pub struct SurfacePreview {
     /// The complete local synopsis (the Activity tab body). Empty when the
     /// designer's synopsis field is off; never sent as a Discord field.
     pub synopsis: String,
-    /// Whether a real cover is shown. The designer's artwork toggle AND a
-    /// decoded local image must both be true; a missing/not-yet-fetched URL
-    /// collapses the slot instead of painting a blank "poster" tile.
+    /// Whether a real cover is shown. Covers are always on: only a decoded
+    /// local image matters now; a missing/not-yet-fetched URL collapses the
+    /// slot instead of painting a blank "poster" tile.
     pub art: bool,
     /// The resolved https cover URL when the wire carries one. Empty when the
     /// card has no artwork.
@@ -9033,10 +8897,12 @@ impl UiState {
         self.invalidate();
     }
 
-    /// Seed the one query field from the playing file, apply the scope the
-    /// folder and filename imply, and -- when the preload cache holds this
-    /// title/year/scope -- fill the list from it immediately. Without a cache
-    /// hit nothing is opened: the user runs Search.
+    /// Seed the one query field from the playing file and -- when the preload
+    /// cache holds this title/year -- fill the list from it immediately.
+    /// Universal search: the backend still classifies the playing file (the
+    /// shape × class inference below), but every query runs both chains, so
+    /// the filter is always `All` and there is no user-selected scope.
+    /// Without a cache hit nothing is opened: the user runs Search.
     fn prime_picker(&mut self) {
         if self.picker.busy {
             return;
@@ -9048,10 +8914,11 @@ impl UiState {
             self.picker.set_query(fix_match_prefill_name(&now.raw_title, &now.path));
             self.picker_path = now.path.clone();
         }
-        let filter = crate::search::auto_filter(
+        let _inferred = crate::search::auto_filter(
             crate::search::detect_shape(&now.path),
             crate::search::detect_class(&now.path),
         );
+        let filter = crate::search::KindFilter::All;
         self.picker.set_filter(filter);
         let (title, year) = self.picker.parsed();
         if let Some(rows) = self.preload_rows_for(&title, year) {
@@ -9104,10 +8971,13 @@ impl UiState {
         if title.trim().is_empty() {
             return;
         }
-        let filter = crate::search::auto_filter(
+        // Universal search: the backend still classifies the playing file,
+        // but the search itself always runs both chains under `All`.
+        let _inferred = crate::search::auto_filter(
             crate::search::detect_shape(&now.path),
             crate::search::detect_class(&now.path),
         );
+        let filter = crate::search::KindFilter::All;
         let key = crate::search::search_cache_key(&title, year, filter);
         // A card opened before the poll loop published the playing title gets
         // its seed on the first poll that has one. One prime per preload key;
@@ -10398,28 +10268,6 @@ impl UiState {
             self.invalidate();
             return None;
         }
-        if id == BTN_PICKER_ALL
-            || id == BTN_PICKER_MOVIE
-            || id == BTN_PICKER_TV
-            || id == BTN_PICKER_ANIME_TV
-            || id == BTN_PICKER_ANIME_MOVIE
-        {
-            let filter = if id == BTN_PICKER_ALL {
-                crate::search::KindFilter::All
-            } else if id == BTN_PICKER_MOVIE {
-                crate::search::KindFilter::Movies
-            } else if id == BTN_PICKER_ANIME_TV {
-                crate::search::KindFilter::AnimeSeries
-            } else if id == BTN_PICKER_ANIME_MOVIE {
-                crate::search::KindFilter::AnimeMovies
-            } else {
-                crate::search::KindFilter::Series
-            };
-            self.picker.set_filter(filter);
-            self.focus_id = id;
-            self.invalidate();
-            return None;
-        }
         if id == BTN_PICKER_CLOSE {
             self.picker.close_results();
             self.invalidate();
@@ -10891,10 +10739,6 @@ impl UiState {
     pub fn toggle_designer_field(&mut self, field: DesignerField) {
         let mut spec = self.designer;
         let on = match field {
-            DesignerField::Artwork => {
-                spec.artwork = !spec.artwork;
-                spec.artwork
-            }
             DesignerField::Details => {
                 spec.details = !spec.details;
                 spec.details
@@ -13339,9 +13183,9 @@ fn paint_narrow_bar(hdc: Gdi::HDC, bar_rc: Rect, dpi: i32, gear_rc: Rect, gear_h
     narrow::bar(hdc, bar_rc, dpi, "Discord connected", gear_rc, gear_hovered);
 }
 
-/// Narrow Card: bar, hero, search, ONE scope row, results panel to the 24px
-/// status bar. No wordmark band, no tab strip, no Advanced disclosure, no
-/// field toggles/presets (they live in Settings under CARD).
+/// Narrow Card: bar, hero, search, results panel to the 24px
+/// status bar. No wordmark band, no tab strip, no scope row, no Advanced
+/// disclosure, no field toggles/presets (they live in Settings under CARD).
 fn paint_narrow_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &CardLayout) {
     let sc = |v: i32| scale_px(dpi, v);
     let button_font = brand::ui(sc(FS_CONTROL), brand::UI_WEIGHT);
@@ -13439,32 +13283,6 @@ fn paint_narrow_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &CardLa
             paint_button(hdc, &bb, dpi, button_font, st);
         }
     }
-    // ONE scope row: five equal segments, no borders.
-    let mut segs: Vec<UiButton> = Vec::new();
-    for id in [
-        BTN_PICKER_ALL,
-        BTN_PICKER_TV,
-        BTN_PICKER_MOVIE,
-        BTN_PICKER_ANIME_TV,
-        BTN_PICKER_ANIME_MOVIE,
-    ] {
-        if let Some(b) = l.card_btn(id) {
-            segs.push(UiButton {
-                rc: b,
-                ..l.btns
-                    .iter()
-                    .find(|x| x.id == id)
-                    .cloned()
-                    .unwrap_or(UiButton {
-                        id,
-                        label: String::new(),
-                        style: BTN_TOGGLE,
-                        rc: b,
-                    })
-            });
-        }
-    }
-    narrow::scope_row(hdc, &segs, dpi);
     // Results panel filling to the 24px status bar.
     fill_round_rect(hdc, l.stage, COL_CARD, sc(R_PANEL));
     stroke_round_rect_w(hdc, l.stage, COL_BORDER, sc(R_PANEL), sc(STROKE_HAIR));
@@ -13536,7 +13354,27 @@ fn paint_narrow_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &CardLa
             let is_movie = c.kind == Kind::MOVIE;
             let anime = crate::search::is_anime(c);
             let meta = narrow::result_meta(is_movie, anime, c.year, c.episode_count as i32);
-            narrow::result_row(hdc, rc_row, dpi, c.title.trim(), &meta, idx == st.picker.selected);
+            // Covers are always on: kick one background fetch per poster URL,
+            // then paint whatever bytes have landed. The hit geometry still
+            // reads from the layout table (`picker_row_rects` above).
+            #[cfg(not(test))]
+            if !c.poster.is_empty() && !crate::artwork::is_cached(&c.poster) {
+                crate::artwork::ensure_async(&c.poster);
+            }
+            let cover = if c.poster.is_empty() {
+                None
+            } else {
+                crate::artwork::Cover::load(&c.poster)
+            };
+            narrow::result_row(
+                hdc,
+                rc_row,
+                dpi,
+                c.title.trim(),
+                &meta,
+                cover.as_ref(),
+                idx == st.picker.selected,
+            );
         }
     }
     // Apply pinned to the panel bottom (disabled with no pick), Change filters
@@ -13682,11 +13520,6 @@ fn paint_narrow_settings(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &Se
                 "Run at startup",
                 "Launch Potflix when Windows starts",
                 narrow::NarrowCtl::Toggle(st.startup_state),
-            )),
-            BTN_FIELD_ARTWORK => Some((
-                "Artwork",
-                "Send the poster art to Discord",
-                narrow::NarrowCtl::Toggle(designer.artwork),
             )),
             BTN_FIELD_DETAILS => Some((
                 "Details",
@@ -13879,13 +13712,15 @@ fn card_preview_model(st: &UiState) -> (SurfacePreview, bool) {
         String::new()
     };
     let duration = parse_length_ms(&st.preview_length());
+    // Covers are always on: the artwork toggle is gone, so the model always
+    // carries art and the cached-bytes gate below decides the tile.
     let mut model = surface_preview(
         &act,
         have,
         &synopsis,
         preview_now_ms(),
         duration,
-        st.designer.artwork,
+        true,
     );
     // A URL is not a cover. Only a locally decodable image turns the slot on,
     // so the blank-tile failure cannot recur while a fetch is pending.
@@ -14798,7 +14633,7 @@ fn paint_card_view(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState) {
                 if act.details.is_empty() { "-" } else { &act.details },
                 if act.state.is_empty() { "-" } else { &act.state }
             ));
-            let art = if act.large_image.is_empty() || !st.designer.artwork {
+            let art = if act.large_image.is_empty() {
                 "none"
             } else if model.art {
                 "poster"
@@ -15947,10 +15782,11 @@ mod tests {
     #[test]
     fn settings_hit_test() {
         let l = compute_settings_layout(MAIN_CLIENT_W, MAIN_CLIENT_H, 96, false, "balanced", "amoled");
-        // Approved narrow: 7 behaviour (5 + Theme's 2 segments) + 9 CARD +
-        // 5 library + 3 scan + Card gear + 2 hidden wiring rects. The media
-        // folder group is gone by owner order (2026-11-03).
-        assert_eq!(l.btns.len(), 27);
+        // Approved narrow: 7 behaviour (5 + Theme's 2 segments) + 8 CARD (the
+        // artwork toggle is gone) + 5 library + 3 scan + Card gear + 2 hidden
+        // wiring rects. The media folder group is gone by owner order
+        // (2026-11-03).
+        assert_eq!(l.btns.len(), 26);
         for id in [
             BTN_DISCORD,
             BTN_CLOSE,
@@ -16136,26 +15972,29 @@ mod tests {
         assert!(!st.on_settings_key_down(NULL, VK_ESCAPE));
     }
 
-    /// Approved narrow: the scope row is always visible, Fix lives in the hero
-    /// and Apply is pinned (disabled until picked); fields/presets moved to
-    /// Settings CARD and never appear on the Card.
+    /// Approved narrow: no scope row and no artwork toggle. The Card is one
+    /// query field, one Search, one result list, hero Fix, pinned Apply and
+    /// Change filters; fields/presets moved to Settings CARD and never
+    /// appear on the Card.
     #[test]
     fn card_list_actions_are_tab_stops_with_advanced_closed() {
-        // The pure order: scopes always visible, both hero/panel actions Tab stops.
+        // The pure order: no scope segments, both hero/panel actions Tab stops.
         let closed = card_focus_order_for(false, true, true);
         for id in [
             BTN_FIX_MATCH,
             BTN_PICKER_APPLY,
-            BTN_PICKER_ALL,
-            BTN_PICKER_TV,
-            BTN_PICKER_MOVIE,
-            BTN_PICKER_ANIME_TV,
-            BTN_PICKER_ANIME_MOVIE,
         ] {
             assert!(closed.contains(&id), "a visible Card action {id} is a Tab stop");
         }
+        // The removed scope ids (85/81/82/87/88) are gone: no scope segment
+        // is ever a Tab stop again.
+        for id in [85, 81, 82, 87, 88] {
+            assert!(
+                !closed.contains(&id),
+                "removed scope id {id} is not a Tab stop"
+            );
+        }
         for id in [
-            BTN_FIELD_ARTWORK,
             BTN_FIELD_DETAILS,
             BTN_FIELD_STATE,
             BTN_FIELD_SYNOPSIS,
@@ -16249,8 +16088,8 @@ mod tests {
     fn focus_order_covers_rect_table() {
         for (order, want_len) in [
             (main_focus_order(), 4usize),
-            (settings_focus_order(), 25),
-            (card_focus_order(), 12usize),
+            (settings_focus_order(), 24),
+            (card_focus_order(), 7usize),
         ] {
             assert_eq!(order.len(), want_len);
             let mut seen = std::collections::HashSet::new();
@@ -16259,8 +16098,8 @@ mod tests {
             }
         }
         assert_eq!(focus_order_for_view(View::Main).len(), 4);
-        assert_eq!(focus_order_for_view(View::Settings).len(), 25);
-        assert_eq!(focus_order_for_view(View::Card).len(), 12);
+        assert_eq!(focus_order_for_view(View::Settings).len(), 24);
+        assert_eq!(focus_order_for_view(View::Card).len(), 7);
         for id in [BTN_REPORT, BTN_CLOSE, BTN_SETTINGS, BTN_CARD] {
             assert!(main_focus_order().contains(&id), "missing {id}");
         }
@@ -18203,9 +18042,9 @@ mod tests {
                 PreviewSurface::default(),
             );
             // Approved narrow at rest (nothing playing): gear, field, Search,
-            // ONE five-segment scope row, pinned Apply, Change filters; the
-            // hero Fix exists only while a title is playing. Card/Back stay
-            // wired but hidden (empty rects, never Tab stops).
+            // pinned Apply, Change filters — no scope row, no category
+            // words; the hero Fix exists only while a title is playing.
+            // Card/Back stay wired but hidden (empty rects, never Tab stops).
             let at_rest: Vec<i32> = l.btns.iter().map(|b| b.id).collect();
             assert_eq!(
                 at_rest,
@@ -18213,11 +18052,6 @@ mod tests {
                     BTN_SETTINGS,
                     BTN_PICKER_FIELD,
                     BTN_PICKER_SEARCH,
-                    BTN_PICKER_ALL,
-                    BTN_PICKER_TV,
-                    BTN_PICKER_MOVIE,
-                    BTN_PICKER_ANIME_TV,
-                    BTN_PICKER_ANIME_MOVIE,
                     BTN_PICKER_APPLY,
                     BTN_ADVANCED,
                     BTN_CARD_BACK,
@@ -18262,11 +18096,6 @@ mod tests {
                 BTN_PICKER_SEARCH,
                 BTN_ADVANCED,
                 BTN_PICKER_APPLY,
-                BTN_PICKER_ALL,
-                BTN_PICKER_TV,
-                BTN_PICKER_MOVIE,
-                BTN_PICKER_ANIME_TV,
-                BTN_PICKER_ANIME_MOVIE,
             ] {
                 let rc = open.card_btn(id).unwrap_or_else(|| panic!("id {id} missing"));
                 assert!(
@@ -18281,9 +18110,10 @@ mod tests {
                     id
                 );
             }
-            // Payload knobs never appear on the Card (Settings CARD owns them).
+            // Payload knobs never appear on the Card (Settings CARD owns
+            // them); the artwork toggle (70) and the scope ids
+            // (85/81/82/87/88) are gone entirely.
             for id in [
-                BTN_FIELD_ARTWORK,
                 BTN_FIELD_DETAILS,
                 BTN_FIELD_STATE,
                 BTN_FIELD_SYNOPSIS,
@@ -18296,6 +18126,14 @@ mod tests {
                 assert!(
                     open.card_btn(id).is_none(),
                     "payload {id} leaked onto the Card"
+                );
+            }
+            // The removed artwork toggle (70) and scope ids (85/81/82/87/88)
+            // are gone from every Card composition.
+            for id in [70, 85, 81, 82, 87, 88] {
+                assert!(
+                    open.card_btn(id).is_none() && l.card_btn(id).is_none(),
+                    "removed control {id} leaked onto the Card"
                 );
             }
             // Visible Card buttons never overlap (hidden wiring rects excluded).
@@ -18324,7 +18162,7 @@ mod tests {
                 l.labels.is_empty(),
                 "narrow Card carries no section labels"
             );
-            // Vertical order: top bar, hero, search, scope, panel, status.
+            // Vertical order: top bar, hero, search, panel, status.
             assert!(
                 l.header.bottom <= l.object.top
                     && l.object.bottom <= l.picker_bar.top
@@ -18568,6 +18406,36 @@ mod tests {
             },
         );
         assert_eq!(st.preview_synopsis(), long, "full stored synopsis");
+        // The stored note came from an episode pin: it must never ride the
+        // Discord tooltip, because it names what happens in the episode being
+        // watched (owner-safe rule, 2026-11-03).
+        let (card, _) = st.preview_activity();
+        assert!(
+            card.large_text.is_empty(),
+            "episode-sourced prose must never ride: {:?}",
+            card.large_text
+        );
+        // A work-level note is the only synopsis allowed on the card.
+        st.record_preview(
+            CardKind::Series,
+            "Breaking.Bad.S04E07.Problem.Dog.1080p.mkv - PotPlayer".to_string(),
+            Some(Action {
+                running: true,
+                has_start: true,
+                start: 999,
+                ct: 1000,
+                ..Action::default()
+            }),
+            Resolved {
+                series: "Breaking Bad".to_string(),
+                episode_name: "Problem Dog".to_string(),
+                season: 4,
+                number: 7,
+                synopsis: long.to_string(),
+                synopsis_is_work: true,
+                ..Resolved::default()
+            },
+        );
         let (card, _) = st.preview_activity();
         let snippet_body = card.large_text.trim_end_matches('\u{2026}');
         assert!(
@@ -18996,7 +18864,7 @@ mod tests {
     /// the segments from `picker.movie` (user state) and the match path never
     /// wrote the matched kind back -- so the first arm below fails against the
     /// old rule and the second arm is the shipped rule: the SELECTED RECORD owns
-    /// the preview's kind, and the Advanced row is a search scope that says so.
+    /// the preview's kind; there is no scope control left to say otherwise.
     #[test]
     fn card_kind_never_renders_movie_for_a_series_match() {
         let cand = metadata::Candidate {
@@ -19028,8 +18896,9 @@ mod tests {
         assert!(!st.preview_object().expect("preview object").2, "series");
         assert_eq!(st.displayed_card_kind(), CardKind::Series);
         assert!(!st.preview_activity().0.name.to_lowercase().contains("film"));
-        // And the painted scope control follows the FILTER, never the record:
-        // a series result under an "All types" search must not light "Movies".
+        // And no scope control exists to follow anything: the removed scope
+        // ids (85/81/82/87/88) are absent from every composition, whatever
+        // the engine's internal filter is.
         for filter in [
             crate::search::KindFilter::All,
             crate::search::KindFilter::Movies,
@@ -19052,33 +18921,12 @@ mod tests {
                     filter,
                 },
             );
-            let lit = |id: i32| {
-                l.btns
-                    .iter()
-                    .find(|b| b.id == id)
-                    .unwrap_or_else(|| panic!("kind control {id} missing"))
-                    .style
-                    == BTN_TOGGLE_ON
-            };
-            assert_eq!(lit(BTN_PICKER_ALL), filter == crate::search::KindFilter::All);
-            assert_eq!(
-                lit(BTN_PICKER_MOVIE),
-                filter == crate::search::KindFilter::Movies
-            );
-            assert_eq!(
-                lit(BTN_PICKER_TV),
-                filter == crate::search::KindFilter::Series
-            );
-            assert_eq!(
-                lit(BTN_PICKER_ANIME_TV),
-                filter == crate::search::KindFilter::AnimeSeries,
-                "the anime TV segment lights for the anime TV scope only"
-            );
-            assert_eq!(
-                lit(BTN_PICKER_ANIME_MOVIE),
-                filter == crate::search::KindFilter::AnimeMovies,
-                "the anime movies segment lights for the anime movies scope only"
-            );
+            for id in [85, 81, 82, 87, 88] {
+                assert!(
+                    l.btns.iter().all(|b| b.id != id),
+                    "removed scope id {id} laid out under {filter:?}"
+                );
+            }
         }
     }
 
@@ -19101,9 +18949,7 @@ mod tests {
                 .btns
                 .iter()
                 .filter(|b| {
-                    b.id == BTN_PICKER_MOVIE
-                        || b.id == BTN_PICKER_TV
-                        || (BTN_FIELD_ARTWORK..=BTN_FIELD_TIMERS).contains(&b.id)
+                    (BTN_FIELD_DETAILS..=BTN_FIELD_TIMERS).contains(&b.id)
                         || (BTN_CARD_STATE_AT..BTN_CARD_STATE_AT + 8).contains(&b.id)
                 })
                 .count();
@@ -19138,8 +18984,9 @@ mod tests {
                     "{cw}x{ch}: hero Fix missing while playing"
                 );
             }
-            // Approved narrow: scopes always on; payload lives in Settings CARD.
-            // Wide keeps the legacy disclosure.
+            // Approved narrow: no scope row — the removed scope ids
+            // (85/81/82/87/88) are absent; payload lives in Settings CARD.
+            // Wide keeps the legacy disclosure (minus scope and artwork).
             let open = compute_card_layout_with(
                 cw,
                 ch,
@@ -19151,23 +18998,14 @@ mod tests {
                 false,
             );
             if cw < 1000 {
-                for id in [
-                    BTN_PICKER_ALL,
-                    BTN_PICKER_TV,
-                    BTN_PICKER_MOVIE,
-                    BTN_PICKER_ANIME_TV,
-                    BTN_PICKER_ANIME_MOVIE,
-                ] {
+                for id in [85, 81, 82, 87, 88] {
                     assert!(
-                        open.card_btn(id).is_some(),
-                        "{cw}x{ch}: scope {id} missing"
+                        open.card_btn(id).is_none(),
+                        "{cw}x{ch}: removed scope {id} laid out"
                     );
                 }
             } else {
                 for id in [
-                    BTN_PICKER_MOVIE,
-                    BTN_PICKER_TV,
-                    BTN_FIELD_ARTWORK,
                     BTN_FIELD_DETAILS,
                     BTN_FIELD_STATE,
                     BTN_FIELD_SYNOPSIS,
@@ -19226,13 +19064,16 @@ mod tests {
                 CardKind::Series,
                 PreviewSurface::default(),
             );
+            // The v1 composition still carries the removed ids as raw numbers
+            // (81/82 kind buttons, 70 artwork toggle): the shipped-v1 layout
+            // is frozen history, so the count below keeps discriminating.
             let v1_knobs = v1
                 .btns
                 .iter()
                 .filter(|b| {
-                    b.id == BTN_PICKER_MOVIE
-                        || b.id == BTN_PICKER_TV
-                        || (BTN_FIELD_ARTWORK..=BTN_FIELD_TIMERS).contains(&b.id)
+                    b.id == 81
+                        || b.id == 82
+                        || (70..=BTN_FIELD_TIMERS).contains(&b.id)
                         || (BTN_CARD_STATE_AT..BTN_CARD_STATE_AT + 8).contains(&b.id)
                 })
                 .count();
@@ -19610,7 +19451,7 @@ mod tests {
     #[test]
     fn settings_scan_hit_test() {
         let l = compute_settings_layout(MAIN_CLIENT_W, MAIN_CLIENT_H, 96, false, "balanced", "amoled");
-        assert_eq!(l.btns.len(), 27);
+        assert_eq!(l.btns.len(), 26);
         for id in [BTN_SCAN_GENTLE, BTN_SCAN_BALANCED, BTN_SCAN_TURBO] {
             let rc = l
                 .settings_btn(id)
@@ -21793,18 +21634,20 @@ mod tests {
                 "{cw}x{ch}: exactly one search verb"
             );
             if cw < 1000 {
-                // Approved narrow: pinned Apply + five scopes at rest; the hero
-                // Fix joins only while a title is playing.
+                // Approved narrow: pinned Apply at rest, no hero Fix with
+                // nothing playing, and no scope row — the removed scope ids
+                // (85/81/82/87/88) are absent.
                 assert!(
                     l.card_btn(BTN_PICKER_APPLY).is_some()
                         && l.card_btn(BTN_FIX_MATCH).is_none(),
                     "{cw}x{ch}: pinned Apply at rest, no hero Fix with nothing playing"
                 );
-                assert!(
-                    l.card_btn(BTN_PICKER_ALL).is_some()
-                        && l.card_btn(BTN_PICKER_ANIME_MOVIE).is_some(),
-                    "{cw}x{ch}: scope row at rest"
-                );
+                for id in [85, 81, 82, 87, 88] {
+                    assert!(
+                        l.card_btn(id).is_none(),
+                        "{cw}x{ch}: removed scope {id} laid out at rest"
+                    );
+                }
             } else {
                 assert!(
                     l.btns
@@ -21812,12 +21655,14 @@ mod tests {
                         .all(|b| b.id != BTN_PICKER_APPLY && b.id != BTN_FIX_MATCH),
                     "{cw}x{ch}: an apply/repair control is visible at rest"
                 );
-                assert!(
-                    l.btns.iter().all(|b| b.id != BTN_PICKER_ALL
-                        && b.id != BTN_PICKER_MOVIE
-                        && b.id != BTN_PICKER_TV),
-                    "{cw}x{ch}: a kind control is visible at rest"
-                );
+                // Universal search: no kind control anywhere at rest — the
+                // removed ids are gone from the composition entirely.
+                for id in [85, 81, 82, 87, 88] {
+                    assert!(
+                        l.btns.iter().all(|b| b.id != id),
+                        "{cw}x{ch}: removed kind control {id} is visible at rest"
+                    );
+                }
             }
         }
         // And the same rule drives the real launch: with a player the window
@@ -22313,10 +22158,22 @@ mod tests {
         assert!(!st.picker.open, "the latch closed the list");
     }
 
-    /// The two anime segments map to their own scopes and the streamed rows are
-    /// filtered by kind and provider class, not by the provider's own label.
+    /// Universal search: no segment maps anywhere. The removed scope ids
+    /// (85/81/82/87/88) are not actionable and change no filter, and every
+    /// card search runs both chains (filter `All`) with no row filtered out
+    /// by scope — anime and regular rows share one list.
     #[test]
-    fn anime_segments_map_to_the_anime_scopes_and_filter_the_rows() {
+    fn no_scope_segment_selects_a_filter_and_every_search_runs_both_chains() {
+        let mut st = UiState::default();
+        st.cur_view = View::Card;
+        for id in [85, 81, 82, 87, 88] {
+            let _ = st.do_card_action(NULL, id);
+            assert_eq!(
+                st.picker.filter,
+                crate::search::KindFilter::All,
+                "removed scope id {id} changed the filter"
+            );
+        }
         let anime_movie = metadata::Candidate {
             kind: Kind::MOVIE,
             title: "Akira".to_string(),
@@ -22329,47 +22186,30 @@ mod tests {
             length: "2h 4m".to_string(),
             episode_count: 0,
         };
-        for (id, filter) in [
-            (BTN_PICKER_ANIME_TV, crate::search::KindFilter::AnimeSeries),
-            (BTN_PICKER_ANIME_MOVIE, crate::search::KindFilter::AnimeMovies),
-        ] {
-            let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let mut st = UiState::default();
-            st.cur_view = View::Card;
-            let _ = st.do_card_action(NULL, id);
-            assert_eq!(st.picker.filter, filter);
-            st.picker_search = stub_search(
-                calls.clone(),
-                Ok(vec![
-                    anime_series(),
-                    anime_movie.clone(),
-                    dune_movie(),
-                ]),
-            );
-            st.picker.set_query("Anime".to_string());
-            assert!(st.card_picker_search());
-            drive_picker_job(&mut st);
-            assert_eq!(st.picker.candidates.len(), 1, "{filter:?} shows one row");
-            assert_eq!(st.picker.candidates[0].kind, filter.kinds()[0]);
-            assert_eq!(calls.lock().unwrap()[0].2, filter);
-        }
-        // The live-action segments exclude the anime legs' rows.
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut st = UiState::default();
         st.cur_view = View::Card;
-        let _ = st.do_card_action(NULL, BTN_PICKER_TV);
         st.picker_search = stub_search(
             calls.clone(),
-            Ok(vec![anime_series(), dune_movie(), office_series()]),
+            Ok(vec![
+                anime_series(),
+                anime_movie.clone(),
+                dune_movie(),
+                office_series(),
+            ]),
         );
-        st.picker.set_query("Show".to_string());
+        st.picker.set_query("Mixed".to_string());
         assert!(st.card_picker_search());
         drive_picker_job(&mut st);
-        assert_eq!(st.picker.candidates.len(), 1);
-        assert!(!crate::search::is_anime(&st.picker.candidates[0]));
         assert_eq!(
             calls.lock().unwrap()[0].2,
-            crate::search::KindFilter::Series
+            crate::search::KindFilter::All,
+            "the worker always runs the universal scope"
+        );
+        assert_eq!(
+            st.picker.candidates.len(),
+            4,
+            "both chains share one list: no row is filtered by scope"
         );
     }
 
@@ -22687,7 +22527,7 @@ mod tests {
             .map(|b| b.id)
             .collect();
         assert!(
-            below.len() >= 10,
+            below.len() >= 6,
             "expected the below-fold tail, got {}: {below:?}",
             below.len()
         );
@@ -23242,7 +23082,10 @@ mod tests {
                     "{cw}x{ch}: an empty wide surface"
                 );
             } else {
-                // Approved narrow: results panel owns the list; hero owns rows.
+                // Approved narrow: results panel owns the list; hero owns
+                // rows. The one field, one Search and Change filters are at
+                // rest; the removed scope ids (85/88 here, all five in the
+                // layout test) are absent.
                 if !l.compact {
                     for id in [BTN_PICKER_FIELD, BTN_PICKER_SEARCH, BTN_ADVANCED] {
                         assert!(
@@ -23250,10 +23093,10 @@ mod tests {
                             "{cw}x{ch}: control {id} missing at rest"
                         );
                     }
-                    for id in [BTN_PICKER_ALL, BTN_PICKER_ANIME_MOVIE] {
+                    for id in [85, 88] {
                         assert!(
-                            l.card_btn(id).is_some(),
-                            "{cw}x{ch}: scope {id} missing at rest"
+                            l.card_btn(id).is_none(),
+                            "{cw}x{ch}: removed scope {id} laid out at rest"
                         );
                     }
                 }
@@ -23620,8 +23463,10 @@ mod tests {
     }
 
     /// A designer toggle publishes to the live mirror and the Card preview
-    /// recomposes immediately: details/art/synopsis/timers disappear from the
-    /// composed activity, not just from a paint flag.
+    /// recomposes immediately: details/synopsis/timers disappear from the
+    /// composed activity, not just from a paint flag. Covers are always on:
+    /// there is no artwork toggle, and the preview keeps the art while the
+    /// other fields flip.
     #[test]
     fn designer_toggles_publish_and_recompose_the_preview() {
         let _serial = UI_GLOBAL_SERIAL
@@ -23655,9 +23500,16 @@ mod tests {
         st.toggle_designer_field(DesignerField::Details);
         assert!(!presence::live_designer().details);
         assert!(st.preview_activity().0.details.is_empty());
-        st.toggle_designer_field(DesignerField::Artwork);
+        // Covers are always on: no artwork toggle exists, so the art survives
+        // every remaining toggle. The tooltip stays empty here because this
+        // note is episode-sourced, not work-sourced.
         let (off, _) = st.preview_activity();
-        assert!(off.large_image.is_empty() && off.large_text.is_empty());
+        assert!(!off.large_image.is_empty(), "covers are always on");
+        assert!(
+            off.large_text.is_empty(),
+            "episode-sourced prose never rides the tooltip: {:?}",
+            off.large_text
+        );
         st.toggle_designer_field(DesignerField::Timers);
         let (off, _) = st.preview_activity();
         assert!(!off.has_start && off.start == 0);
@@ -23827,7 +23679,11 @@ mod tests {
             assert_eq!(calls.lock().unwrap().len(), 1);
             st.open_card();
             assert!(st.picker.open, "the list opens on the preload");
-            assert_eq!(st.picker.filter, crate::search::KindFilter::Series);
+            assert_eq!(
+                st.picker.filter,
+                crate::search::KindFilter::All,
+                "universal search: the card always runs both chains"
+            );
             // Approved copy deletes "(cached)" from the Card.
             assert_eq!(st.picker.status, "1 match for \"The Office\"");
             assert_eq!(
@@ -23987,7 +23843,11 @@ mod tests {
             );
             drive_preload(&mut st);
             st.open_card();
-            assert_eq!(st.picker.filter, crate::search::KindFilter::Movies);
+            assert_eq!(
+                st.picker.filter,
+                crate::search::KindFilter::All,
+                "universal search: the card always runs both chains"
+            );
             assert!(st.picker.open);
             assert_eq!(st.picker.candidates[0].kind, Kind::MOVIE);
         });
@@ -24283,14 +24143,24 @@ mod tests {
         assert!(SearchCache::load_from(&path).get("show-9|2008|series").is_some());
     }
 
+    /// Covers are always on: the artwork toggle (70) is gone from Settings
+    /// and from the click table, while the rest of the field toggles stay.
     #[test]
-    fn click_settings_field_artwork_flips() {
-        let mut st = settings_click_state();
-        presence::set_live_designer(presence::DesignerSpec::default());
-        st.designer = presence::DesignerSpec::default();
+    fn artwork_toggle_is_gone_from_settings() {
+        let st = settings_click_state();
         let l = st.layout_settings_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        assert_eq!(click_settings_id(&mut st, &l, BTN_FIELD_ARTWORK), None);
-        assert!(!st.designer.artwork);
+        assert!(
+            l.btns.iter().all(|b| b.id != 70),
+            "no artwork row is laid out"
+        );
+        assert!(
+            l.settings_btn(70).is_none(),
+            "no artwork row is hit-testable"
+        );
+        assert!(
+            presence::DesignerSpec::default().artwork,
+            "covers stay on: nothing can flip the artwork field off"
+        );
         presence::set_live_designer(presence::DesignerSpec::default());
     }
 
@@ -24396,50 +24266,28 @@ mod tests {
         assert_eq!(st.cur_view, View::Card);
     }
 
+    /// Universal search: the removed scope ids (85/82/81/87/88) are absent
+    /// from the Card layout and change no filter — every query runs both
+    /// chains under `All`.
     #[test]
-    fn click_card_scope_all_selects_filter() {
+    fn click_card_scope_ids_are_gone_and_change_no_filter() {
         let mut st = UiState::default();
         st.cur_view = View::Card;
         st.picker.set_filter(crate::search::KindFilter::Movies);
-        let l = st.layout_card_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        assert_eq!(card_click_id(&mut st, &l, BTN_PICKER_ALL), None);
-        assert_eq!(st.picker.filter, crate::search::KindFilter::All);
-    }
-
-    #[test]
-    fn click_card_scope_tv_selects_series() {
-        let mut st = UiState::default();
-        st.cur_view = View::Card;
-        let l = st.layout_card_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        assert_eq!(card_click_id(&mut st, &l, BTN_PICKER_TV), None);
-        assert_eq!(st.picker.filter, crate::search::KindFilter::Series);
-    }
-
-    #[test]
-    fn click_card_scope_movies_selects_movies() {
-        let mut st = UiState::default();
-        st.cur_view = View::Card;
-        let l = st.layout_card_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        assert_eq!(card_click_id(&mut st, &l, BTN_PICKER_MOVIE), None);
+        // The engine still accepts the scope internally, but no control can
+        // select it: the layout carries no such button.
         assert_eq!(st.picker.filter, crate::search::KindFilter::Movies);
-    }
-
-    #[test]
-    fn click_card_scope_anime_tv_selects() {
-        let mut st = UiState::default();
-        st.cur_view = View::Card;
+        st.picker.set_filter(crate::search::KindFilter::All);
         let l = st.layout_card_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        assert_eq!(card_click_id(&mut st, &l, BTN_PICKER_ANIME_TV), None);
-        assert_eq!(st.picker.filter, crate::search::KindFilter::AnimeSeries);
-    }
-
-    #[test]
-    fn click_card_scope_anime_movies_selects() {
-        let mut st = UiState::default();
-        st.cur_view = View::Card;
-        let l = st.layout_card_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        assert_eq!(card_click_id(&mut st, &l, BTN_PICKER_ANIME_MOVIE), None);
-        assert_eq!(st.picker.filter, crate::search::KindFilter::AnimeMovies);
+        for id in [85, 82, 81, 87, 88] {
+            assert!(
+                l.card_btn(id).is_none(),
+                "removed scope id {id} is laid out"
+            );
+        }
+        // Clicking where a scope segment used to be is a no-op: the filter
+        // stays universal.
+        assert_eq!(st.picker.filter, crate::search::KindFilter::All);
     }
 
     #[test]

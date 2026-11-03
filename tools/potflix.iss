@@ -27,15 +27,17 @@ DisableProgramGroupPage=yes
 
 [Files]
 Source: "..\dist\potflix.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\build\potflix.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\client-id.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 
 [Icons]
-Name: "{autoprograms}\Potflix"; Filename: "{app}\potflix.exe"; WorkingDir: "{app}"; IconFilename: "{app}\potflix.ico"
-Name: "{autodesktop}\Potflix"; Filename: "{app}\potflix.exe"; WorkingDir: "{app}"; IconFilename: "{app}\potflix.ico"; Tasks: desktopicon
+Name: "{autoprograms}\Potflix"; Filename: "{app}\potflix.exe"; WorkingDir: "{app}"; IconFilename: "{app}\potflix.exe"
+Name: "{autodesktop}\Potflix"; Filename: "{app}\potflix.exe"; WorkingDir: "{app}"; IconFilename: "{app}\potflix.exe"; Tasks: desktopicon
+
+[InstallDelete]
+Type: files; Name: "{app}\potflix.ico"
 
 [Run]
 Filename: "{app}\potflix.exe"; Description: "{cm:LaunchProgram,Potflix}"; Flags: nowait postinstall skipifsilent
@@ -43,4 +45,5 @@ Filename: "{app}\potflix.exe"; Description: "{cm:LaunchProgram,Potflix}"; Flags:
 [UninstallDelete]
 Type: files; Name: "{app}\potflix-debug*.log*"
 Type: files; Name: "{app}\m1-selftest.out"
+Type: files; Name: "{app}\potflix.ico"
 Type: dirifempty; Name: "{app}"

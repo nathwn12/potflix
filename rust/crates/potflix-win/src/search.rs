@@ -15,18 +15,18 @@ use metadata::{Candidate, Kind, Media, Override, Scope};
 /// paste can never produce a title the user did not see.
 pub const MAX_QUERY_CHARS: usize = 128;
 
-/// The explicit search scope. `All` is the default and the main flow's scope:
-/// the search is never constrained by a hidden kind flag left over from a
-/// previous title. The other four are a deliberately chosen Advanced filter and
-/// each names one kind AND one provider class: the anime legs answer both
-/// movies and series, so "anime" is never a kind of its own.
+/// The search scope. `All` is the only scope the UI ever uses: every query
+/// runs both chains (regular + anime) and merges into one ranked list, so
+/// there is no user-selected scope and no category control. The remaining
+/// variants stay for the engine's own bookkeeping (cache keys, provider
+/// legs, candidate classification), but no UI id may select them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum KindFilter {
     #[default]
     All,
-    /// Regular (live-action) TV.
+    /// Regular (live-action) TV leg.
     Series,
-    /// Regular (live-action) movies.
+    /// Regular (live-action) movie leg.
     Movies,
     /// Anime TV: the anime legs' series answers.
     AnimeSeries,
@@ -52,22 +52,9 @@ impl KindFilter {
         }
     }
 
-    /// The segment label, so the control and its tests read one string.
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            KindFilter::All => "All",
-            KindFilter::Series => "TV",
-            KindFilter::Movies => "Movies",
-            KindFilter::AnimeSeries => "Anime TV",
-            KindFilter::AnimeMovies => "Anime Movies",
-        }
-    }
-
     /// The providers this scope actually uses, in leg order. A search passes
-    /// this list to the provider layer, so a TV-only search never calls an
-    /// anime or movie leg and a retry can never include a provider the filter
-    /// does not use.
+    /// this list to the provider layer. `All` runs both chains (regular then
+    /// anime legs); the narrower legs exist for the engine's own passes.
     #[must_use]
     pub fn providers(self) -> &'static [&'static str] {
         match self {
@@ -227,17 +214,20 @@ pub fn query_issue(query: &str) -> Option<QueryIssue> {
     None
 }
 
-/// The Card workspace's one search model. It owns the single title/year query,
-/// the explicit search scope, and the result set. The Fix match dialog seeds
-/// its own widgets from this model when it opens and writes the edited query
-/// back when it closes, so there is one canonical query on the main surface
-/// rather than two independent search states.
+/// The Card workspace's one search model. It owns the single title/year query
+/// and the result set. The scope is always `All`: every query runs both
+/// chains (regular + anime) and merges into one ranked list, so there is no
+/// user-selected scope. The Fix match dialog seeds its own widgets from this
+/// model when it opens and writes the edited query back when it closes, so
+/// there is one canonical query on the main surface rather than two
+/// independent search states.
 #[derive(Clone, Debug, Default)]
 pub struct MediaPicker {
     /// The one input: a title, or a title with a trailing year.
     pub query: String,
-    /// The explicit scope. `All` by default, so nothing the user chose for an
-    /// earlier title can narrow the next one.
+    /// The search scope. Always `All`: universal search has no user-selected
+    /// scope, and the engine's narrower legs are selected internally per
+    /// pass, never by a control.
     pub filter: KindFilter,
     pub candidates: Vec<Candidate>,
     pub selected: usize,
@@ -334,10 +324,11 @@ impl MediaPicker {
         self.invalidate_results();
     }
 
-    /// Apply the explicit scope filter and drop results that belonged to
-    /// another scope. An in-flight search for the old scope is abandoned here:
-    /// its completion no longer matches the generation, so it can never publish
-    /// rows into the new scope's list.
+    /// Reset the scope to `All`. A no-op when already universal: the model
+    /// carries no user-selected scope, so a new search never inherits one.
+    /// An in-flight search for the old generation is abandoned here: its
+    /// completion no longer matches the generation, so it can never publish
+    /// rows into the new list.
     pub fn set_filter(&mut self, filter: KindFilter) {
         if self.filter == filter {
             return;
@@ -958,11 +949,21 @@ mod tests {
         assert_eq!(KindFilter::AnimeMovies.kinds(), &[Kind::MOVIE]);
         assert!(KindFilter::All.includes(Kind::MOVIE) && KindFilter::All.includes(Kind::SERIES));
         assert!(!KindFilter::Movies.includes(Kind::SERIES));
-        assert_eq!(KindFilter::All.label(), "All");
-        assert_eq!(KindFilter::Series.label(), "TV");
-        assert_eq!(KindFilter::Movies.label(), "Movies");
-        assert_eq!(KindFilter::AnimeSeries.label(), "Anime TV");
-        assert_eq!(KindFilter::AnimeMovies.label(), "Anime Movies");
+        // Universal search has no user-visible scope words: no label API, no
+        // segment control. `All` is the whole search: both chains, every kind.
+        assert_eq!(
+            KindFilter::All.providers(),
+            &[
+                "tvmaze",
+                "anilist",
+                "tenrai",
+                "kitsu",
+                "animeschedule",
+                "cinemeta",
+                "imdb"
+            ],
+            "All runs both chains in one query"
+        );
 
         let series = vec![Candidate {
             kind: Kind::SERIES,

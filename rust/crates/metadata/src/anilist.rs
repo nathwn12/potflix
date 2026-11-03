@@ -88,8 +88,9 @@ struct AnilistStreaming {
     title: String,
     #[serde(default, deserialize_with = "null_default")]
     url: String,
-    #[serde(default, deserialize_with = "null_default")]
-    thumbnail: String,
+    // No `thumbnail`: `streamingEpisodes[].thumbnail` is a frame of the
+    // episode being watched (spoiler plus burned-in subtitles), so episode
+    // artwork is the series cover and the still is never even stored.
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -504,6 +505,11 @@ impl crate::resolver::Source for AnilistSource {
             return Ok(None);
         }
         let mut out = anilist_media(media, title, Kind::SERIES);
+        // The episode artwork is the series cover, never the streaming still:
+        // `streamingEpisodes[].thumbnail` is a frame of the episode being
+        // watched (spoiler plus burned-in subtitles), so it must never stand
+        // in as art.
+        let cover = out.artwork.clone();
         let mut episodes: Vec<Episode> = Vec::with_capacity(media.streaming.len());
         for (i, entry) in media.streaming.iter().enumerate() {
             let (number, title) = parse_anilist_episode(&entry.title, i as i32 + 1);
@@ -511,7 +517,7 @@ impl crate::resolver::Source for AnilistSource {
                 season: 0,
                 number,
                 title,
-                artwork: entry.thumbnail.trim().to_string(),
+                artwork: cover.clone(),
                 url: normalize_url(&entry.url),
                 ..Episode::default()
             });
