@@ -1,4 +1,4 @@
-//! Embeds the Potflix icon into every binary as a Win32 resource.
+//! Embeds the Potflix icon, manifest, and version into every binary.
 //!
 //! Replaces Go's `go\rsrc_windows_amd64.syso` (see `go\README.md` § Windows exe
 //! icon). The icon source is the repo's shared `..\..\..\assets\icon.ico`; it is
@@ -6,8 +6,14 @@
 //! `$OUT_DIR` and referenced by bare filename so `rc.exe` finds it either next
 //! to the `.rc` or through the `/I $OUT_DIR` that `embed-resource` passes.
 //!
+//! The `VERSIONINFO` resource is derived from `CARGO_PKG_VERSION` (the
+//! workspace version, `rust\Cargo.toml`): `ProductName` is `Potflix`,
+//! `CompanyName`/legal/trademark stay empty, and the numeric + string
+//! `FileVersion`/`ProductVersion` carry the crate version. Dependency-free
+//! (std only): the `.rc` text is written by hand, no new crate.
+//!
 //! Strict on purpose: if `rc.exe` is missing or fails, the build fails rather
-//! than silently shipping an icon-less exe.
+//! than silently shipping an icon-less or version-less exe.
 
 use std::env;
 use std::fs;
@@ -53,6 +59,32 @@ fn main() {
         .join("icon.ico");
     println!("cargo:rerun-if-changed={}", icon.display());
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=CARGO_PKG_VERSION");
+
+    // The single version fact: `rust\Cargo.toml` workspace version via
+    // `CARGO_PKG_VERSION`. Numeric `FILEVERSION`/`PRODUCTVERSION` need four
+    // 16-bit parts, so `x.y.z` pads to `x,y,z,0`; anything past four parts is
+    // cut. Pre-release/build suffixes (`-`, `+`) never reach the numeric
+    // fields; the display strings keep the full `CARGO_PKG_VERSION`.
+    let pkg_version =
+        env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION is set by cargo");
+    let core = pkg_version
+        .split(['-', '+'])
+        .next()
+        .unwrap_or(&pkg_version);
+    let mut nums: Vec<u16> = core
+        .split('.')
+        .map(|part| {
+            part.parse::<u16>().unwrap_or_else(|_| {
+                panic!("CARGO_PKG_VERSION {pkg_version} is not numeric x.y.z")
+            })
+        })
+        .collect();
+    while nums.len() < 4 {
+        nums.push(0);
+    }
+    nums.truncate(4);
+    let (v1, v2, v3, v4) = (nums[0], nums[1], nums[2], nums[3]);
 
     if !icon.is_file() {
         panic!("icon resource missing: {}", icon.display());
@@ -70,15 +102,50 @@ fn main() {
     // client area gets real per-monitor pixels at 100-200% instead of a
     // bitmap-stretched frame. Go declares no manifest (system-default
     // awareness); the layout math is DPI-parameterised either way, so this
-    // changes crispness, not layout or behaviour.
+    // changes crispness, not layout or behaviour. Resource id 1 type
+    // VERSIONINFO carries the workspace version (numeric + string
+    // FileVersion/ProductVersion, ProductName `Potflix`, empty CompanyName and
+    // legal fields) so `(Get-Item dist\potflix.exe).VersionInfo` reports the
+    // build's version; a DISTINCT type id shares numeric id 1 safely.
     let manifest = out_dir.join("potflix.manifest");
     fs::write(&manifest, MANIFEST_XML).expect("cannot write the generated manifest");
     let rc = out_dir.join("potflix.rc");
-    fs::write(&rc, "1 ICON \"icon.ico\"\n1 24 \"potflix.manifest\"\n")
-        .expect("cannot write the generated .rc");
+    let rc_text = format!(
+        "1 ICON \"icon.ico\"\n1 24 \"potflix.manifest\"\n\
+1 VERSIONINFO\n\
+FILEVERSION {v1},{v2},{v3},{v4}\n\
+PRODUCTVERSION {v1},{v2},{v3},{v4}\n\
+FILEFLAGSMASK 0x3fL\n\
+FILEFLAGS 0x0L\n\
+FILEOS 0x40004L\n\
+FILETYPE 0x1L\n\
+FILESUBTYPE 0x0L\n\
+BEGIN\n\
+    BLOCK \"StringFileInfo\"\n\
+    BEGIN\n\
+        BLOCK \"040904b0\"\n\
+        BEGIN\n\
+            VALUE \"CompanyName\", \"\\0\"\n\
+            VALUE \"FileDescription\", \"Potflix\\0\"\n\
+            VALUE \"FileVersion\", \"{pkg_version}\\0\"\n\
+            VALUE \"InternalName\", \"potflix\\0\"\n\
+            VALUE \"LegalCopyright\", \"\\0\"\n\
+            VALUE \"LegalTrademarks\", \"\\0\"\n\
+            VALUE \"OriginalFilename\", \"potflix.exe\\0\"\n\
+            VALUE \"ProductName\", \"Potflix\\0\"\n\
+            VALUE \"ProductVersion\", \"{pkg_version}\\0\"\n\
+        END\n\
+    END\n\
+    BLOCK \"VarFileInfo\"\n\
+    BEGIN\n\
+        VALUE \"Translation\", 0x409, 1200\n\
+    END\n\
+END\n"
+    );
+    fs::write(&rc, rc_text).expect("cannot write the generated .rc");
 
     match embed_resource::compile(&rc, embed_resource::NONE) {
         embed_resource::CompilationResult::Ok => {}
-        other => panic!("icon embedding failed: {other}"),
+        other => panic!("resource embedding failed: {other}"),
     }
 }

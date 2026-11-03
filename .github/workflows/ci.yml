@@ -1,8 +1,9 @@
-# nathwn12 house CI — stack: rust (copy to .github/workflows/ci.yml)
-# NOTE: `on:` is held at `workflow_dispatch` only per the owner's standing
-# directive stopping GitHub Actions estate-wide (2026-10-12); jobs and steps
-# are byte-identical to the house rust template except `working-directory: rust`
-# on the cargo steps (the workspace manifest lives in `rust/`).
+# nathwn12 house CI — stack: rust.
+# Triggers on `pull_request` + `workflow_dispatch` (see `on:` below). The cargo
+# steps mirror the local gate `tools\check.ps1` (clippy + release tests,
+# `working-directory: rust` because the workspace manifest lives in `rust/`).
+# Parity is deliberately absent: its corpora are gitignored, so the parity
+# step fails closed in a fresh clone and runs only in the local gate.
 name: ci
 on:
   pull_request:
@@ -13,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --locked
+      - run: cargo clippy --workspace --all-targets -- -D warnings
         working-directory: rust
-      - run: cargo test --locked
+      - run: cargo test --workspace --release --locked
         working-directory: rust

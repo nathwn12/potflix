@@ -5,7 +5,12 @@
 ; ArchitecturesInstallIn64BitMode unset: minimal and version-proof.
 
 #define MyAppName "Potflix"
-#define MyAppVersion "1.1.0"
+#ifndef MyAppVersion
+#define MyAppVersion GetVersionNumbersString("..\dist\potflix.exe")
+#endif
+#if MyAppVersion == ""
+#error "MyAppVersion is empty: build dist\potflix.exe first so its VERSIONINFO carries the workspace version"
+#endif
 #define MyAppPublisher "nathwn12"
 #define MyAppExeName "potflix.exe"
 
@@ -17,7 +22,7 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\Potflix
 PrivilegesRequired=lowest
 OutputDir=..\dist
-OutputBaseFilename=Potflix-Setup
+OutputBaseFilename=Potflix-Setup-{#MyAppVersion}
 SetupIconFile=..\build\potflix.ico
 UninstallDisplayIcon={app}\potflix.exe
 Compression=lzma2
