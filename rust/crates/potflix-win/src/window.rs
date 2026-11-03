@@ -10777,7 +10777,7 @@ impl UiState {
         if !cfg.remove_dir(&self.ui_dirs[idx as usize]) {
             return;
         }
-        if let Err(e) = app_support::config::save_config(&cfg) {
+        if let Err(e) = app_support::config::save_config_to(&self.cfg_path(), &cfg) {
             app_logf(&format!("config: save failed: {e}"));
             return;
         }
@@ -10807,7 +10807,7 @@ impl UiState {
             ));
             return;
         }
-        if let Err(e) = app_support::config::save_config(&cfg) {
+        if let Err(e) = app_support::config::save_config_to(&self.cfg_path(), &cfg) {
             app_logf(&format!("config: save failed: {e}"));
             return;
         }
@@ -11539,12 +11539,11 @@ impl UiState {
             return;
         }
         self.startup_state = (self.startup_get)();
-        if self.test_config_path.is_none() {
-            let mut cfg = app_support::config::load_config();
-            cfg.start_with_windows = self.startup_state;
-            if let Err(e) = app_support::config::save_config(&cfg) {
-                app_logf(&format!("startup: save failed: {e}"));
-            }
+        let mut cfg =
+            app_support::config::load_config_for_update(&self.cfg_path()).unwrap_or_default();
+        cfg.start_with_windows = self.startup_state;
+        if let Err(e) = app_support::config::save_config_to(&self.cfg_path(), &cfg) {
+            app_logf(&format!("startup: save failed: {e}"));
         }
         if self.startup_state {
             self.set_status_text("Start with Windows: on");
