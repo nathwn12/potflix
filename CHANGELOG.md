@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-04
+
 ### Changed
 
 - the test gate builds the workspace test binaries once (`cargo test --workspace --release --locked --no-run --message-format=json`) and runs each binary concurrently from its own package root via `tools\rust-test.ps1` (cap 8; potflix-win alone runs `--test-threads=1` because its window tests share process-global UI state and race under parallel threads), keeping the same proved set with a required `test result:` line per binary; `tools\check.ps1` calls the new runner instead of serial `cargo test --workspace`.
@@ -14,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - the icon renderer boxed the P's bowl arc from its start point instead of the ellipse centre, so the bowl was drawn one radius too wide and the mark sat off-centre, the play notch riding the bowl's left half; `tools\make-icons.ps1` now boxes the bowl from its centre and fails when a mark is not centred.
+- Fix match searches movies, TV and anime in one list and ranks the closest work first; a filename year is carried into the search.
+- The resolver prefers the exact title across providers, and local folder, sibling and season evidence breaks near-ties.
 
 ## [1.2.0] - 2026-11-03
 
