@@ -381,6 +381,7 @@ fn imdb_media(entity: &ImdbEntity, title: String, kind: Kind) -> Media {
         },
         trailer_url: String::new(),
         episodes: Vec::new(),
+        episode_count: 0,
         fetched_at: crate::timefmt::now_rfc3339(),
     }
 }

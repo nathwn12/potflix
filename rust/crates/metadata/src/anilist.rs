@@ -113,6 +113,10 @@ struct AnilistMedia {
     genres: Vec<String>,
     #[serde(default)]
     duration: Option<i32>,
+    /// The entry's total episode count (`episodes` in ANILIST_QUERY): a search
+    /// row carries the number without fetching a table.
+    #[serde(default)]
+    episodes: Option<i32>,
     #[serde(rename = "siteUrl", default, deserialize_with = "null_default")]
     site_url: String,
     #[serde(default, deserialize_with = "null_default")]
@@ -606,6 +610,7 @@ fn anilist_media(media: &AnilistMedia, title: String, kind: Kind) -> Media {
         movie_url: String::new(),
         trailer_url: String::new(),
         episodes: Vec::new(),
+        episode_count: media.episodes.unwrap_or(0).max(0),
         fetched_at: crate::timefmt::now_rfc3339(),
     }
 }
@@ -646,5 +651,36 @@ mod content_token_tests {
             "Dragon Ball Z Kai: The Final Chapters",
             "Dragon Ball Kai (2014)"
         ));
+    }
+}
+
+#[cfg(test)]
+mod episode_count_tests {
+    use super::{AnilistResp, Kind, anilist_items, anilist_media};
+
+    /// The query already asks for `episodes`; the integer becomes the search
+    /// row's count without fetching a table.
+    #[test]
+    fn anilist_episodes_integer_fills_the_search_count() {
+        let json = r#"{"data":{"Page":{"media":[
+            {"id":1,"title":{"romaji":"Show"},"format":"TV","episodes":25}
+        ]}}}"#;
+        let parsed: AnilistResp = serde_json::from_str(json).expect("fixture");
+        let items = anilist_items(parsed).expect("items");
+        let media = anilist_media(&items[0], "Show".to_string(), Kind::SERIES);
+        assert_eq!(media.episode_count, 25);
+        assert!(media.episodes.is_empty(), "no table is fetched");
+    }
+
+    /// A null/missing count is 0, which the ranker treats as neutral.
+    #[test]
+    fn anilist_missing_episodes_is_zero() {
+        let json = r#"{"data":{"Page":{"media":[
+            {"id":1,"title":{"romaji":"Show"},"format":"TV","episodes":null}
+        ]}}}"#;
+        let parsed: AnilistResp = serde_json::from_str(json).expect("fixture");
+        let items = anilist_items(parsed).expect("items");
+        let media = anilist_media(&items[0], "Show".to_string(), Kind::SERIES);
+        assert_eq!(media.episode_count, 0);
     }
 }

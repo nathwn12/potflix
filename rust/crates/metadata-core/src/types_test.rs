@@ -144,6 +144,7 @@ fn every_optional_tag_verbatim() {
             url: "https://example.com/ep1".into(),
             length: "45 min".into(),
         }],
+        episode_count: 0,
         fetched_at: "2026-01-01T00:00:00Z".into(),
     };
     let encoded = serde_json::to_string(&media).expect("encode");
@@ -155,6 +156,15 @@ fn every_optional_tag_verbatim() {
     assert_eq!(encoded, expected);
     let got: Media = serde_json::from_str(&encoded).expect("decode");
     assert_eq!(got, media);
+}
+
+#[test]
+fn media_without_an_episode_count_loads_zero() {
+    let media: Media = serde_json::from_str(r#"{"source":"tvmaze","title":"Show"}"#).expect("decode");
+    assert_eq!(
+        media.episode_count, 0,
+        "an old cache record has no episodeCount key"
+    );
 }
 
 // Additions: no Go test covers these helpers directly, and the brief names each

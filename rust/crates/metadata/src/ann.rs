@@ -364,6 +364,7 @@ impl crate::resolver::Source for AnnSource {
             movie_url: String::new(),
             trailer_url: String::new(),
             episodes,
+            episode_count: 0,
             fetched_at: crate::timefmt::now_rfc3339(),
         }))
     }

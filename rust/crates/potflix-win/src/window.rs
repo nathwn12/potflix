@@ -6171,6 +6171,9 @@ enum FixJob {
         gate_year: i32,
         /// The playing file's shape/kind as a SOFT prior (`None` when unknown).
         prefer: Option<Kind>,
+        /// The playing file's local evidence (folder show, sibling prefix,
+        /// file counts): SOFT rank terms, never filters.
+        evidence: crate::search::LocalEvidence,
         only: Vec<String>,
         cache_key: Option<String>,
     },
@@ -6229,6 +6232,7 @@ fn fix_match_worker(job: FixJob) -> FixOutcome {
             year,
             gate_year,
             prefer,
+            evidence,
             only,
             cache_key,
         } => {
@@ -6295,8 +6299,15 @@ fn fix_match_worker(job: FixJob) -> FixOutcome {
             }
             failed.sort();
             // Same ranking the Card list paints, so the dialog's live rows and
-            // a later cache replay agree on provider and order.
-            let rows = crate::search::merge_candidates_for(&name, year, prefer, vec![rows]);
+            // a later cache replay agree on provider and order; the local
+            // evidence is the same one the dialog opened with.
+            let rows = crate::search::merge_candidates_evidenced(
+                &name,
+                year,
+                prefer,
+                Some(&evidence),
+                vec![rows],
+            );
             if let Some(key) = cache_key.as_deref()
                 && !rows.is_empty()
             {
@@ -7813,9 +7824,15 @@ impl FixMatchState {
         // re-ordered with the newly chosen kind as the soft prior.
         if !self.candidates.is_empty() {
             let (name, year) = self.parsed_query();
+            let evidence = crate::search::LocalEvidence::from_path(&self.path);
             let rows = std::mem::take(&mut self.candidates);
-            self.candidates =
-                crate::search::merge_candidates_for(&name, year, Some(self.latch_kind()), vec![rows]);
+            self.candidates = crate::search::merge_candidates_evidenced(
+                &name,
+                year,
+                Some(self.latch_kind()),
+                Some(&evidence),
+                vec![rows],
+            );
             self.repopulate_list();
         }
         if self.screen == FixScreen::Search {
@@ -8175,6 +8192,7 @@ impl FixMatchState {
         if name.is_empty() && year <= 0 {
             return;
         }
+        let evidence = crate::search::LocalEvidence::from_path(&self.path);
         let cache_on = ui().cache_enabled;
         let filter = crate::search::KindFilter::All;
         let key = crate::search::search_cache_key(&name, year, filter);
@@ -8183,11 +8201,13 @@ impl FixMatchState {
         if cache_on && let Some(cached) = cached_search(&key) {
             // An `All` entry already carries both kinds: every row is listed,
             // never narrowed to the radio's kind, and re-ranked with this
-            // file's own shape so the instant paint matches the worker's.
-            let rows = crate::search::merge_candidates_for(
+            // file's own shape and local evidence so the instant paint matches
+            // the worker's.
+            let rows = crate::search::merge_candidates_evidenced(
                 &name,
                 year,
                 self.shape_prior(),
+                Some(&evidence),
                 vec![cached.rows],
             );
             if !rows.is_empty() {
@@ -8208,6 +8228,7 @@ impl FixMatchState {
             year,
             gate_year: self.gate_year(),
             prefer: self.shape_prior(),
+            evidence,
             only,
             cache_key,
         });
@@ -8256,10 +8277,12 @@ impl FixMatchState {
         let Some(cached) = cached_search(&key) else {
             return;
         };
-        let rows: Vec<Candidate> = crate::search::merge_candidates_for(
+        let evidence = crate::search::LocalEvidence::from_path(&self.path);
+        let rows: Vec<Candidate> = crate::search::merge_candidates_evidenced(
             &title,
             year,
             self.shape_prior(),
+            Some(&evidence),
             vec![cached.rows],
         );
         if rows.is_empty() {
@@ -8943,6 +8966,8 @@ impl UiState {
                 .set_query(fix_match_prefill_name(&now.raw_title, &now.path));
         }
         self.picker_path = now.path.clone();
+        self.picker
+            .set_local(Some(crate::search::LocalEvidence::from_path(&now.path)));
         let _inferred = crate::search::auto_filter(
             crate::search::detect_shape(&now.path),
             crate::search::detect_class(&now.path),
@@ -8978,20 +9003,29 @@ impl UiState {
         let narrowed = rows_for_year(pre.rows.clone(), year);
         // A year the file carried must not empty the instant paint: providers
         // disagree about release years, so a strict narrow is allowed to fall
-        // back to the preload's own rank, with the file's shape as the prior.
-        let rows = if narrowed.is_empty() && year > 0 {
-            let prefer = if self.picker_path.trim().is_empty() {
-                None
-            } else {
-                Some(match crate::search::detect_shape(&self.picker_path) {
-                    crate::search::MediaShape::Series => Kind::SERIES,
-                    crate::search::MediaShape::Movie => Kind::MOVIE,
-                })
-            };
-            crate::search::merge_candidates_for(title, year, prefer, vec![pre.rows.clone()])
+        // back to the preload's own rows. Either way the local evidence
+        // re-ranks them, so the instant paint matches the dialog's order.
+        let prefer = if self.picker_path.trim().is_empty() {
+            None
+        } else {
+            Some(match crate::search::detect_shape(&self.picker_path) {
+                crate::search::MediaShape::Series => Kind::SERIES,
+                crate::search::MediaShape::Movie => Kind::MOVIE,
+            })
+        };
+        let base = if narrowed.is_empty() && year > 0 {
+            pre.rows.clone()
         } else {
             narrowed
         };
+        let evidence = crate::search::LocalEvidence::from_path(&self.picker_path);
+        let rows = crate::search::merge_candidates_evidenced(
+            title,
+            year,
+            prefer,
+            Some(&evidence),
+            vec![base],
+        );
         (!rows.is_empty()).then_some(rows)
     }
 

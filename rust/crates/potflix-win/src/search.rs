@@ -229,6 +229,9 @@ pub struct MediaPicker {
     /// scope, and the engine's narrower legs are selected internally per
     /// pass, never by a control.
     pub filter: KindFilter,
+    /// The playing file's local evidence when the card has one. It is a soft
+    /// rank term only; a query typed over another file can still set None.
+    pub local: Option<LocalEvidence>,
     pub candidates: Vec<Candidate>,
     pub selected: usize,
     /// The first visible row of the scrolled picker viewport. The paint and the
@@ -337,6 +340,13 @@ impl MediaPicker {
         self.invalidate_results();
     }
 
+    /// Replace the playing file's local evidence without touching the query.
+    /// The next merge uses it; the current rows are re-ranked by the caller
+    /// when the path actually changes.
+    pub fn set_local(&mut self, local: Option<LocalEvidence>) {
+        self.local = local;
+    }
+
     /// Mark a search running and return the worker input. A query that fails
     /// [`query_issue`] (or a running job) returns `None` and starts nothing.
     pub fn begin_search(&mut self) -> Option<(u64, String, i32, KindFilter)> {
@@ -377,7 +387,13 @@ impl MediaPicker {
         }
         let (title, year) = self.parsed();
         let existing = std::mem::take(&mut self.candidates);
-        let mut merged = merge_candidates_for(&title, year, None, vec![existing, rows]);
+        let mut merged = merge_candidates_evidenced(
+            &title,
+            year,
+            None,
+            self.local.as_ref(),
+            vec![existing, rows],
+        );
         // A stream of batches must not grow past the metadata cap; the ranked
         // head is what the keyboard can reach.
         merged.truncate(metadata::search::SEARCH_LIMIT);
@@ -494,6 +510,21 @@ pub fn merge_candidates_for(
     prefer: Option<Kind>,
     passes: Vec<Vec<Candidate>>,
 ) -> Vec<Candidate> {
+    merge_candidates_evidenced(query, year, prefer, None, passes)
+}
+
+/// [`merge_candidates_for`] with the playing file's local evidence: the folder
+/// show, sibling prefix, season extent and file counts join the title closeness
+/// as SOFT terms. The rank is still [`metadata::search::rank_rows_with`]'s one
+/// order, so a cache replay and a live list agree.
+#[must_use]
+pub fn merge_candidates_evidenced(
+    query: &str,
+    year: i32,
+    prefer: Option<Kind>,
+    evidence: Option<&LocalEvidence>,
+    passes: Vec<Vec<Candidate>>,
+) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = Vec::new();
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     for pass in passes {
@@ -504,7 +535,15 @@ pub fn merge_candidates_for(
             }
         }
     }
-    let out = metadata::search::rank_rows(query, year, prefer, out);
+    let out = metadata::search::rank_rows_with(
+        query,
+        year,
+        prefer,
+        evidence
+            .filter(|evidence| evidence.applies())
+            .map(LocalEvidence::rank_evidence),
+        out,
+    );
     metadata::merge_same_work(out)
 }
 
@@ -698,6 +737,329 @@ pub fn auto_filter(shape: MediaShape, class: ClassHint) -> KindFilter {
         (ClassHint::Regular, MediaShape::Movie) => KindFilter::Movies,
         (ClassHint::Unknown, _) => KindFilter::All,
     }
+}
+
+/// What one file and its neighbours say about the work, with no network: the
+/// folder show, the sibling-files' common prefix, the season markers, how many
+/// video files sit in the season folder and the show tree, and the episode
+/// title the filename carries. Every field is evidence, never a filter.
+///
+/// The counts are bounded by [`DETECT_SHAPE_CAP`] and a depth of three, so a
+/// huge library can never turn a lookup into a full walk.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LocalEvidence {
+    /// The folder show, cleaned; falls back to the sibling prefix.
+    pub show: String,
+    /// The longest token prefix shared by the sibling video filenames (empty
+    /// when there are fewer than two siblings).
+    pub sibling_prefix: String,
+    /// The season the path itself names (`0` when none).
+    pub season: i64,
+    /// The highest season marker in the path: `S1-S2` -> 2, `Season 1` -> 1.
+    pub season_extent: i32,
+    /// Video files directly in the file's folder (the season folder).
+    pub season_files: usize,
+    /// Video files across the show tree, bounded.
+    pub show_files: usize,
+    /// The filename's own episode title, when `titleclean` finds one.
+    pub episode_title: String,
+    pub shape: MediaShape,
+    pub class: ClassHint,
+}
+
+impl LocalEvidence {
+    /// Read the local evidence for `path`. Missing folders are not an error:
+    /// the path string still carries the show, season and extent markers.
+    #[must_use]
+    pub fn from_path(path: &str) -> Self {
+        let (raw_show, season) = metadata_core::context::context_from_path(path);
+        let folder_show = {
+            let cleaned = titleclean::clean(&raw_show).title.trim().to_string();
+            if cleaned.is_empty() {
+                raw_show.trim().to_string()
+            } else {
+                cleaned
+            }
+        };
+        let sibling_prefix = sibling_prefix(path);
+        let show = if folder_show.is_empty() {
+            sibling_prefix.clone()
+        } else {
+            folder_show
+        };
+        let mut season_budget = DETECT_SHAPE_CAP;
+        let season_files = count_videos(
+            std::path::Path::new(path).parent(),
+            false,
+            0,
+            &mut season_budget,
+        );
+        let show_files = count_show_tree(path);
+        let episode_title = std::path::Path::new(path)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .map(|name| titleclean::clean(name).episode_name.trim().to_string())
+            .unwrap_or_default();
+        Self {
+            show,
+            sibling_prefix,
+            season,
+            season_extent: season_extent(path).max(i32::try_from(season).unwrap_or(0)),
+            season_files,
+            show_files,
+            episode_title,
+            shape: detect_shape(path),
+            class: detect_class(path),
+        }
+    }
+
+    /// The current season folder's video count; the extent term compares a
+    /// candidate's episode count against it. The show-tree count stays in
+    /// [`Self::show_files`] as context.
+    #[must_use]
+    pub fn local_count(&self) -> usize {
+        self.season_files
+    }
+
+    /// Local evidence is only allowed to break a near-tie for a SERIES with at
+    /// least three sibling video files. A movie path has no season extent and
+    /// gets no local bonus or penalty.
+    #[must_use]
+    pub fn applies(&self) -> bool {
+        self.shape == MediaShape::Series && self.season_files >= 3
+    }
+
+    /// The primitive evidence [`metadata::search::rank_rows_with`] consumes.
+    #[must_use]
+    pub fn rank_evidence(&self) -> metadata::search::LocalRankEvidence<'_> {
+        metadata::search::LocalRankEvidence {
+            show: &self.show,
+            sibling_prefix: &self.sibling_prefix,
+            local_count: self.local_count(),
+            season_extent: self.season_extent,
+        }
+    }
+}
+
+/// [`LocalEvidence::from_path`] as a free function for the UI seams.
+#[must_use]
+pub fn local_evidence(path: &str) -> LocalEvidence {
+    LocalEvidence::from_path(path)
+}
+
+/// The longest common token prefix of the video filenames beside `path`,
+/// after `titleclean`. Requires at least two siblings, so a lone episode title
+/// never masquerades as a show.
+fn sibling_prefix(path: &str) -> String {
+    let Some(parent) = std::path::Path::new(path).parent() else {
+        return String::new();
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return String::new();
+    };
+    let mut titles: Vec<Vec<String>> = Vec::new();
+    for entry in entries.take(DETECT_SHAPE_CAP).flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_video_name(name) {
+            continue;
+        }
+        let cleaned = titleclean::clean(name).title;
+        let normalized = metadata_core::match_::normalize_title(&cleaned);
+        let tokens: Vec<String> = normalized
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        if !tokens.is_empty() {
+            titles.push(tokens);
+        }
+    }
+    if titles.len() < 2 {
+        return String::new();
+    }
+    let first = &titles[0];
+    let mut shared = first.len();
+    for other in &titles[1..] {
+        let mut at = 0;
+        while at < shared && at < other.len() && first[at] == other[at] {
+            at += 1;
+        }
+        shared = at;
+    }
+    if shared == 0 {
+        String::new()
+    } else {
+        first[..shared].join(" ")
+    }
+}
+
+/// The highest season marker on the path: `S1`, `S01`, `S01-S04`,
+/// `Season 1`, `Season 1-2`. The marker must start at a word boundary, so a
+/// show name like `Severance.S01` still parses and `S` inside a word does not.
+fn season_extent(path: &str) -> i32 {
+    let mut extent = 0;
+    for component in path.split(['\\', '/']) {
+        extent = extent.max(season_marker(component));
+    }
+    extent
+}
+
+fn season_marker(component: &str) -> i32 {
+    let bytes = component.as_bytes();
+    let mut best = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at..].starts_with(b"season") {
+            let mut cursor = at + "season".len();
+            while cursor < bytes.len() && !bytes[cursor].is_ascii_digit() {
+                cursor += 1;
+            }
+            if let Some((first, end)) = digits(bytes, cursor) {
+                best = best.max(first);
+                let mut tail = end;
+                while tail < bytes.len()
+                    && (bytes[tail] == b' ' || bytes[tail] == b'-' || bytes[tail] == b'_')
+                {
+                    tail += 1;
+                }
+                if bytes[tail..].starts_with(b"season") {
+                    tail += "season".len();
+                    while tail < bytes.len() && !bytes[tail].is_ascii_digit() {
+                        tail += 1;
+                    }
+                }
+                if let Some((last, _)) = digits(bytes, tail) {
+                    best = best.max(last);
+                }
+                at = end;
+                continue;
+            }
+        }
+        if (bytes[at] == b's' || bytes[at] == b'S')
+            && (at == 0 || !bytes[at - 1].is_ascii_alphanumeric())
+            && at + 1 < bytes.len()
+            && bytes[at + 1].is_ascii_digit()
+            && let Some((first, end)) = digits(bytes, at + 1)
+        {
+            best = best.max(first);
+            let mut tail = end;
+            while tail < bytes.len()
+                && (bytes[tail] == b' ' || bytes[tail] == b'-' || bytes[tail] == b'_')
+            {
+                tail += 1;
+            }
+            if tail < bytes.len() && (bytes[tail] == b's' || bytes[tail] == b'S') {
+                tail += 1;
+            }
+            if let Some((last, _)) = digits(bytes, tail) {
+                best = best.max(last);
+            }
+            at = end;
+            continue;
+        }
+        at += 1;
+    }
+    best
+}
+
+fn digits(bytes: &[u8], mut at: usize) -> Option<(i32, usize)> {
+    let start = at;
+    let mut value: i64 = 0;
+    while at < bytes.len() && bytes[at].is_ascii_digit() {
+        value = value.saturating_mul(10).saturating_add(i64::from(bytes[at] - b'0'));
+        at += 1;
+        if value > 10_000 {
+            break;
+        }
+    }
+    if at == start {
+        None
+    } else {
+        Some((i32::try_from(value).unwrap_or(i32::MAX), at))
+    }
+}
+
+/// Whether a folder name is a season container (`Season 1`, `S01`, `S01-S04`).
+fn is_season_folder(name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    name.starts_with("season ")
+        || (name.len() >= 2 && name.as_bytes()[0] == b's' && name.as_bytes()[1].is_ascii_digit())
+}
+
+/// Count video files in `dir`, optionally through season subfolders, bounded
+/// by `budget` and three levels.
+fn count_videos(
+    dir: Option<&std::path::Path>,
+    recursive: bool,
+    depth: usize,
+    budget: &mut usize,
+) -> usize {
+    let Some(dir) = dir else {
+        return 0;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut count = 0;
+    for entry in entries.flatten() {
+        if *budget == 0 || depth > 3 {
+            break;
+        }
+        let path = entry.path();
+        if path.is_file() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if is_video_name(name) {
+                count += 1;
+                *budget = budget.saturating_sub(1);
+            }
+        } else if recursive && path.is_dir() {
+            count += count_videos(Some(&path), true, depth + 1, budget);
+        }
+    }
+    count
+}
+
+/// The show-tree file count: recurse from the show root when the file sits in
+/// a season folder or the parent has season subfolders; otherwise count the
+/// containing folder only, so a bare movie never counts the whole library.
+fn count_show_tree(path: &str) -> usize {
+    let Some(parent) = std::path::Path::new(path).parent() else {
+        return 0;
+    };
+    let parent_name = parent
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("");
+    let (root, recursive) = if is_season_folder(parent_name) {
+        (parent.parent().unwrap_or(parent), true)
+    } else if has_season_subdir(parent) {
+        (parent, true)
+    } else {
+        (parent, false)
+    };
+    let mut budget = DETECT_SHAPE_CAP;
+    count_videos(Some(root), recursive, 0, &mut budget)
+}
+
+fn has_season_subdir(dir: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.take(64).flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        if name.to_str().is_some_and(is_season_folder) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether `name` carries a video extension the library walk collects.
@@ -1722,5 +2084,242 @@ mod tests {
             log_lines.is_empty(),
             "a cached second search shows zero new leg lines"
         );
+    }
+
+    fn row(
+        title: &str,
+        provider: &str,
+        provider_id: &str,
+        year: i32,
+        episode_count: usize,
+    ) -> Candidate {
+        Candidate {
+            kind: Kind::SERIES,
+            title: title.to_string(),
+            year,
+            provider: provider.to_string(),
+            provider_id: provider_id.to_string(),
+            poster: String::new(),
+            synopsis: String::new(),
+            genres: String::new(),
+            length: String::new(),
+            episode_count,
+        }
+    }
+
+    /// The owner's sample 10: the folder says ReZero, the siblings say
+    /// `Re Zero - NN`, and the provider rows are dominated by the main title's
+    /// `Starting` branch. The one-word PETIT spin-off must not lead.
+    #[test]
+    fn local_evidence_puts_the_re_zero_main_over_the_petit_spinoff() {
+        use super::{LocalEvidence, merge_candidates_evidenced};
+
+        crate::test_env::EnvGuard::with_scratch("local-rezero", |dir| {
+            let season = dir.join("ReZero [S1-S2]").join("Season 1");
+            std::fs::create_dir_all(&season).unwrap();
+            for n in 1..=12 {
+                std::fs::write(season.join(format!("Re Zero - {n:02}.mkv")), "x").unwrap();
+            }
+            let path = season
+                .join("Re Zero - 01.mkv")
+                .to_string_lossy()
+                .into_owned();
+            let evidence = LocalEvidence::from_path(&path);
+            assert!(
+                evidence.show.contains("ReZero"),
+                "folder show = {:?}",
+                evidence.show
+            );
+            assert_eq!(evidence.season_extent, 2, "[S1-S2] span");
+            assert_eq!(evidence.sibling_prefix, "re zero");
+            assert!(evidence.local_count() >= 12, "12 season files");
+
+            let petit = row("Re:ZERO PETIT", "tenrai", "33569", 2016, 12);
+            let english = row(
+                "Re:ZERO -Starting Life in Another World-",
+                "tvmaze",
+                "1",
+                2016,
+                25,
+            );
+            let break_time = row(
+                "Re:ZERO ~Starting Break Time From Zero~",
+                "anilist",
+                "2",
+                2016,
+                4,
+            );
+            let season_two = row(
+                "Re:ZERO -Starting Life in Another World- Season 2",
+                "anilist",
+                "3",
+                2020,
+                12,
+            );
+            let season_three = row(
+                "Re:ZERO -Starting Life in Another World- Season 3",
+                "anilist",
+                "4",
+                2024,
+                12,
+            );
+            let japanese = row(
+                "Re:Zero kara Hajimeru Isekai Seikatsu",
+                "animeschedule",
+                "5",
+                2016,
+                25,
+            );
+            let japanese_two = row(
+                "Re:Zero kara Hajimeru Isekai Seikatsu 2",
+                "animeschedule",
+                "6",
+                2020,
+                12,
+            );
+            let ranked = merge_candidates_evidenced(
+                "Re Zero",
+                0,
+                Some(Kind::SERIES),
+                Some(&evidence),
+                vec![vec![
+                    petit,
+                    english,
+                    break_time,
+                    season_two,
+                    season_three,
+                    japanese,
+                    japanese_two,
+                ]],
+            );
+            assert!(
+                ranked[0].title.contains("Starting Life in Another World")
+                    || ranked[0].title.contains("Re:Zero kara Hajimeru Isekai Seikatsu"),
+                "main first, got {:?}",
+                ranked[0].title
+            );
+            assert_ne!(ranked[0].title, "Re:ZERO PETIT");
+        });
+    }
+
+    /// A movie path gets NO local episode/sibling bonus: the typed exact work
+    /// still wins, and the sibling prefix cannot lift another movie.
+    #[test]
+    fn movie_paths_get_no_local_evidence_bonus() {
+        use super::{LocalEvidence, merge_candidates_evidenced};
+
+        crate::test_env::EnvGuard::with_scratch("local-dune", |dir| {
+            let folder = dir.join("Dune Part Two");
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("Dune Part Two.mkv"), "x").unwrap();
+            std::fs::write(folder.join("Dune Part Two - Feature.mkv"), "x").unwrap();
+            std::fs::write(folder.join("Dune Part Two - Trailer.mkv"), "x").unwrap();
+            let path = folder.join("Dune Part Two.mkv").to_string_lossy().into_owned();
+            let evidence = LocalEvidence::from_path(&path);
+            assert!(!evidence.applies(), "a movie path never applies local rank");
+            let mut first = row("Dune", "cinemeta", "tt1", 2021, 0);
+            first.kind = Kind::MOVIE;
+            let mut sequel = row("Dune: Part Two", "cinemeta", "tt2", 2024, 0);
+            sequel.kind = Kind::MOVIE;
+            let ranked = merge_candidates_evidenced(
+                "Dune",
+                2021,
+                Some(Kind::MOVIE),
+                Some(&evidence),
+                vec![vec![sequel, first]],
+            );
+            assert_eq!(ranked[0].title, "Dune", "the typed exact movie wins");
+        });
+    }
+
+    /// `S1-S2`, `Season 2`, `S01` and `S01-S04` all parse to the highest
+    /// season on the path.
+    #[test]
+    fn local_evidence_parses_season_extents() {
+        use super::LocalEvidence;
+
+        for (path, want) in [
+            (r"D:\2ANIMES\ReZero [S1-S2]\Season 1\ep.mkv", 2),
+            (r"D:\TV\Show\Season 3\ep.mkv", 3),
+            (r"D:\TV\Show\S01\ep.mkv", 1),
+            (r"D:\TV\Show S01-S04\ep.mkv", 4),
+        ] {
+            assert_eq!(
+                LocalEvidence::from_path(path).season_extent,
+                want,
+                "{path}"
+            );
+        }
+    }
+
+    /// A too-small candidate is penalized when the local tree has more files;
+    /// an unknown count stays neutral.
+    #[test]
+    fn local_extent_penalizes_a_too_small_candidate() {
+        use metadata::search::{LocalRankEvidence, rank_rows_with};
+
+        let small = row("Show", "tvmaze", "1", 2008, 12);
+        let full = row("Show", "cinemeta", "2", 2008, 30);
+        let local = LocalRankEvidence {
+            show: "Show",
+            sibling_prefix: "",
+            local_count: 24,
+            season_extent: 2,
+        };
+        let ranked = rank_rows_with(
+            "Show",
+            0,
+            Some(Kind::SERIES),
+            Some(local),
+            vec![small.clone(), full],
+        );
+        assert_eq!(ranked[0].provider, "cinemeta", "30 covers 24 files");
+
+        let unknown = row("Show", "cinemeta", "2", 2008, 0);
+        let ranked = rank_rows_with(
+            "Show",
+            0,
+            Some(Kind::SERIES),
+            Some(local),
+            vec![small, unknown],
+        );
+        assert_eq!(
+            ranked[0].episode_count, 0,
+            "an unknown count is neutral, not too small"
+        );
+    }
+
+    /// Generality: an episode-title query with a Baki folder still finds the
+    /// main `Baki`, not `Baki Hanma`.
+    #[test]
+    fn local_evidence_rescues_an_episode_title_with_the_folder_show() {
+        use super::{LocalEvidence, merge_candidates_evidenced};
+
+        crate::test_env::EnvGuard::with_scratch("local-baki", |dir| {
+            let folder = dir.join("Baki");
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(
+                folder.join("Baki - S02E01 - Begin! The Centennial Tournament.mkv"),
+                "x",
+            )
+            .unwrap();
+            std::fs::write(folder.join("Baki - S02E02.mkv"), "x").unwrap();
+            std::fs::write(folder.join("Baki - S02E03.mkv"), "x").unwrap();
+            let path = folder
+                .join("Baki - S02E01 - Begin! The Centennial Tournament.mkv")
+                .to_string_lossy()
+                .into_owned();
+            let evidence = LocalEvidence::from_path(&path);
+            let main = row("Baki", "tvmaze", "1", 2018, 26);
+            let hanma = row("Baki Hanma", "tvmaze", "2", 2021, 12);
+            let ranked = merge_candidates_evidenced(
+                "The Centennial Tournament",
+                0,
+                Some(Kind::SERIES),
+                Some(&evidence),
+                vec![vec![hanma, main]],
+            );
+            assert_eq!(ranked[0].title, "Baki");
+        });
     }
 }

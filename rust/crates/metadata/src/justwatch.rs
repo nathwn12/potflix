@@ -269,6 +269,7 @@ impl crate::resolver::Source for JustWatchSource {
                 movie_url: String::new(),
                 trailer_url: String::new(),
                 episodes: Vec::new(),
+                episode_count: 0,
                 fetched_at: crate::timefmt::now_rfc3339(),
             }));
         }
@@ -288,6 +289,7 @@ impl crate::resolver::Source for JustWatchSource {
                 movie_url: String::new(),
                 trailer_url: String::new(),
                 episodes: Vec::new(),
+                episode_count: 0,
                 fetched_at: crate::timefmt::now_rfc3339(),
             }));
         }

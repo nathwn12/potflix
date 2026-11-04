@@ -67,7 +67,7 @@
 //! hits already found stand -- and propagates from a fetch, never
 //! masquerading as a miss.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use metadata_core::match_::normalize_title;
@@ -474,7 +474,7 @@ fn leg_candidates(
             synopsis: media.synopsis,
             genres: media.genres,
             length: media.length,
-            episode_count: media.episodes.len(),
+            episode_count: media.episodes.len().max(media.episode_count.max(0) as usize),
         })
         .collect())
 }
@@ -527,9 +527,24 @@ struct Closeness {
     /// 0 = the query year is exact, 1 = the row's year is unknown, 2 = known
     /// and different. Every row is 0 when the query has no year.
     year_rank: u8,
+    /// 0 when the row's episode count covers the local sibling count (or
+    /// either is unknown), 1 when the row is too small for the files on disk.
+    extent_miss: u8,
     /// 0 when the row's kind matches the shape prior, 1 when it does not.
     shape_miss: u8,
     provider: usize,
+}
+
+/// The local, offline evidence a caller can add to the closeness rank: the
+/// folder's show name, the sibling files' common prefix, how many video files
+/// sit in the show tree, and the highest season marker on the path. All are
+/// SOFT terms; none drops a row.
+#[derive(Clone, Copy, Default)]
+pub struct LocalRankEvidence<'a> {
+    pub show: &'a str,
+    pub sibling_prefix: &'a str,
+    pub local_count: usize,
+    pub season_extent: i32,
 }
 
 /// The provider precedence used by the rank's final tie-break: the built-in
@@ -570,6 +585,132 @@ fn closeness(query: &str, year: i32, prefer: Option<Kind>, cand: &Candidate) -> 
     Closeness {
         similarity: std::cmp::Reverse((similarity.clamp(0.0, 1.0) * 1_000_000.0).round() as i64),
         year_rank,
+        extent_miss: 0,
+        shape_miss,
+        provider: provider_rank(&cand.provider),
+    }
+}
+
+/// The branch a candidate takes after the query, when the query is a prefix of
+/// the candidate's normalized title: up to the next three tokens, joined. It
+/// separates the main run (`starting life in`) from a `starting break time`
+/// spin-off, while the same branch across providers still reinforces itself.
+fn branch_after_query(query: &str, title: &str) -> Option<String> {
+    let query = normalize_title(query);
+    let query_tokens: Vec<&str> = query.split_whitespace().collect();
+    if query_tokens.is_empty() {
+        return None;
+    }
+    let title = normalize_title(title);
+    let title_tokens: Vec<&str> = title.split_whitespace().collect();
+    if title_tokens.len() <= query_tokens.len()
+        || title_tokens[..query_tokens.len()] != query_tokens
+    {
+        return None;
+    }
+    let end = (query_tokens.len() + 3).min(title_tokens.len());
+    Some(title_tokens[query_tokens.len()..end].join(" "))
+}
+
+/// How many rows share each post-query branch. The main work keeps one branch
+/// across providers; a one-word spin-off sits alone.
+fn prefix_clusters(query: &str, rows: &[Candidate]) -> HashMap<String, u32> {
+    let mut clusters: HashMap<String, u32> = HashMap::new();
+    for row in rows {
+        if let Some(branch) = branch_after_query(query, &row.title) {
+            *clusters.entry(branch).or_insert(0) += 1;
+        }
+    }
+    clusters
+}
+
+/// [`Closeness`] with the local evidence folded in: the best title similarity
+/// over the typed query, the folder show and the sibling prefix; a bounded
+/// bonus when the candidate shares its post-query branch token with other
+/// rows; and an extent penalty when the candidate's episode count is smaller
+/// than the local file count.
+fn closeness_evidenced(
+    query: &str,
+    year: i32,
+    prefer: Option<Kind>,
+    local: Option<LocalRankEvidence<'_>>,
+    clusters: &HashMap<String, u32>,
+    top_typed: f64,
+    cand: &Candidate,
+) -> Closeness {
+    let typed = metadata_core::match_::title_similarity(query, &cand.title);
+    let mut similarity = typed;
+    let mut extent_miss = 0;
+    if let Some(local) = local {
+        // The local terms only break a near-tie: a candidate more than 0.10
+        // below the best typed title is never lifted by the folder or the
+        // siblings. The whole local BONUS is capped at +0.05; penalties for a
+        // spin-off branch and a too-small episode count are separate.
+        let near = typed + 0.10 + 1e-9 >= top_typed;
+        if near {
+            let alt = [
+                metadata_core::match_::title_similarity(local.show, &cand.title),
+                metadata_core::match_::title_similarity(local.sibling_prefix, &cand.title),
+            ]
+            .into_iter()
+            .fold(0.0_f64, f64::max);
+            let gain = (alt - typed).max(0.0);
+            let mut bonus = (0.05 * gain / (1.0 - typed).max(0.01)).min(0.05);
+            let largest = clusters.values().copied().max().unwrap_or(1);
+            if let Some(branch) = branch_after_query(query, &cand.title) {
+                let group = clusters.get(&branch).copied().unwrap_or(1);
+                if group >= 2 {
+                    // A larger branch is stronger evidence; the cap is +0.05.
+                    let scaled = 0.05 * f64::from(group - 1) / f64::from(largest - 1).max(1.0);
+                    bonus = bonus.max(scaled.min(0.05));
+                } else if largest >= 3 {
+                    // A lone branch inside a real multi-row franchise is the
+                    // one-word spin-off (PETIT/Break Time): nudge it down.
+                    similarity -= 0.10;
+                }
+            }
+            // The file is a series: a movie answer is a shape miss, not the
+            // work. The prior is bounded so a genuinely better movie title is
+            // still allowed to win.
+            if cand.kind != Kind::SERIES {
+                similarity -= 0.10;
+            }
+            similarity += bonus;
+
+            // A `S1-S2` / `Season 2` marker says at least a short cour per
+            // season. A series far below the local season count is a partial
+            // season or a spin-off; the bounded penalty keeps it under the
+            // full run. An unknown count stays neutral; a movie has no
+            // episode extent at all.
+            let expected = if local.season_extent > 1 {
+                local
+                    .local_count
+                    .max((local.season_extent as usize).saturating_mul(6))
+            } else {
+                local.local_count
+            };
+            if expected > 0 && cand.kind == Kind::SERIES {
+                if cand.episode_count == 0 {
+                    extent_miss = 1;
+                } else if cand.episode_count < (expected * 2 / 3).max(1) {
+                    extent_miss = 2;
+                    similarity -= 0.12;
+                }
+            }
+        }
+    }
+    let year_rank = if year <= 0 || cand.year == year {
+        0
+    } else if cand.year <= 0 {
+        1
+    } else {
+        2
+    };
+    let shape_miss = u8::from(prefer.is_some_and(|kind| cand.kind != kind));
+    Closeness {
+        similarity: std::cmp::Reverse((similarity.clamp(0.0, 1.0) * 1_000_000.0).round() as i64),
+        year_rank,
+        extent_miss,
         shape_miss,
         provider: provider_rank(&cand.provider),
     }
@@ -588,9 +729,34 @@ pub fn rank_rows(
     prefer: Option<Kind>,
     rows: Vec<Candidate>,
 ) -> Vec<Candidate> {
+    rank_rows_with(query, year, prefer, None, rows)
+}
+
+/// [`rank_rows`] with the local evidence a playing file carries: the folder
+/// show and sibling prefix widen the title match, a shared post-query branch
+/// token boosts the rows it appears in, and a too-small episode count is
+/// penalized. Every term is SOFT; no row is dropped.
+#[must_use]
+pub fn rank_rows_with(
+    query: &str,
+    year: i32,
+    prefer: Option<Kind>,
+    local: Option<LocalRankEvidence<'_>>,
+    rows: Vec<Candidate>,
+) -> Vec<Candidate> {
+    let clusters = prefix_clusters(query, &rows);
+    let top_typed = rows
+        .iter()
+        .map(|cand| metadata_core::match_::title_similarity(query, &cand.title))
+        .fold(0.0_f64, f64::max);
     let mut keyed: Vec<(Closeness, Candidate)> = rows
         .into_iter()
-        .map(|cand| (closeness(query, year, prefer, &cand), cand))
+        .map(|cand| {
+            (
+                closeness_evidenced(query, year, prefer, local, &clusters, top_typed, &cand),
+                cand,
+            )
+        })
         .collect();
     keyed.sort_by_key(|a| a.0);
     keyed.into_iter().map(|(_, cand)| cand).collect()

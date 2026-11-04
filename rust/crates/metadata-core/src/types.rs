@@ -162,6 +162,15 @@ pub struct Media {
     pub trailer_url: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub episodes: Vec<Episode>,
+    /// The provider's TOTAL episode count when its search row carries one but
+    /// no table (AniList's `episodes` integer). `0` when unknown; additive and
+    /// cache-compatible, so an old record loads with no count.
+    #[serde(
+        rename = "episodeCount",
+        default,
+        skip_serializing_if = "is_zero"
+    )]
+    pub episode_count: i32,
     /// RFC3339 UTC, as Go's `time.Time` writes it.
     #[serde(rename = "fetchedAt", default)]
     pub fetched_at: String,
