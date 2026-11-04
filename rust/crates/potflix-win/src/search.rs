@@ -358,8 +358,8 @@ impl MediaPicker {
     }
 
     /// Apply one streamed batch: merge it into the rows already on screen
-    /// (deduplicated on provider + provider id, ranked by [`merge_candidates`]),
-    /// open the list, and report the running count while the job keeps
+    /// (deduplicated on provider + provider id, ranked by the shared closeness
+    /// rank), open the list, and report the running count while the job keeps
     /// running. `generation` rejects a stale worker post.
     pub fn push_search(&mut self, generation: u64, rows: Vec<Candidate>) -> bool {
         if generation != self.generation {
@@ -375,9 +375,9 @@ impl MediaPicker {
         if rows.is_empty() {
             return true;
         }
-        let (title, _) = self.parsed();
+        let (title, year) = self.parsed();
         let existing = std::mem::take(&mut self.candidates);
-        let mut merged = merge_candidates(&title, vec![existing, rows]);
+        let mut merged = merge_candidates_for(&title, year, None, vec![existing, rows]);
         // A stream of batches must not grow past the metadata cap; the ranked
         // head is what the keyboard can reach.
         merged.truncate(metadata::search::SEARCH_LIMIT);
@@ -462,12 +462,16 @@ impl MediaPicker {
 /// Merge the per-kind provider passes of a search into one list.
 ///
 /// The providers are kind-scoped, so a mixed search is two passes; this is the
-/// one place they are joined, and it is pure so the ordering is pinnable:
-///   1. an exact (case-insensitive) title match first - the user typed it;
-///   2. then newest year first (`0`/unknown last);
-///   3. then title, then provider - a total order, so the row indices the
-///      selection points at never shuffle between identical answers.
-///   4. Exact duplicates (same provider + provider id) are dropped, so a leg
+/// one place they are joined, and it is pure so the ordering is pinnable. The
+/// order is [`metadata::search::rank_rows`]'s one closeness rank -- the same
+/// rank the engine itself uses -- so a live list and a cache replay agree:
+///   1. title similarity first, so an exact normalized title is strongest;
+///   2. a known query year above an unknown one above a known mismatch;
+///   3. the file's own shape/kind as a soft prior, never a filter;
+///   4. provider leg order, then the newer year, then the title and id, so the
+///      order is total and the row indices the selection points at never
+///      shuffle between identical answers.
+///   5. Exact duplicates (same provider + provider id) are dropped, so a leg
 ///      that answers twice cannot produce two identical rows.
 ///
 /// The ranked order is then spliced by [`metadata::merge_same_work`]: one work
@@ -476,7 +480,20 @@ impl MediaPicker {
 /// mixed-and-matched result carries every provider's best field.
 #[must_use]
 pub fn merge_candidates(query: &str, passes: Vec<Vec<Candidate>>) -> Vec<Candidate> {
-    let want = query.trim().to_lowercase();
+    merge_candidates_for(query, 0, None, passes)
+}
+
+/// [`merge_candidates`] with the query's own year and the playing file's shape
+/// as extra evidence: the year is a ranking signal (never a filter here) and
+/// the shape lifts the matching kind without dropping the other, so a movie
+/// query and a series answer still meet in one list.
+#[must_use]
+pub fn merge_candidates_for(
+    query: &str,
+    year: i32,
+    prefer: Option<Kind>,
+    passes: Vec<Vec<Candidate>>,
+) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = Vec::new();
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     for pass in passes {
@@ -487,14 +504,7 @@ pub fn merge_candidates(query: &str, passes: Vec<Vec<Candidate>>) -> Vec<Candida
             }
         }
     }
-    out.sort_by(|a, b| {
-        let exact = |c: &Candidate| usize::from(c.title.trim().to_lowercase() != want);
-        exact(a)
-            .cmp(&exact(b))
-            .then(b.year.cmp(&a.year))
-            .then(a.title.cmp(&b.title))
-            .then(a.provider.cmp(&b.provider))
-    });
+    let out = metadata::search::rank_rows(query, year, prefer, out);
     metadata::merge_same_work(out)
 }
 
@@ -792,6 +802,121 @@ mod tests {
             length: "2h 46m".to_string(),
             episode_count: 0,
         }
+    }
+
+    /// The shared closeness rank, end to end through the merge the dialog and
+    /// the card both paint: the real 2019 film beats a 2020 comedy riff that
+    /// merely contains every query word, even though the query is punctuated
+    /// (`avengers - endgame`).
+    #[test]
+    fn closeness_puts_the_exact_work_first_regardless_of_year() {
+        use super::{merge_candidates, merge_candidates_for};
+
+        let riff = Candidate {
+            kind: Kind::MOVIE,
+            title: "Rifftrax: Avengers: Endgame".to_string(),
+            year: 2020,
+            provider: "tvmaze".to_string(),
+            provider_id: "riff-1".to_string(),
+            poster: String::new(),
+            synopsis: String::new(),
+            genres: String::new(),
+            length: String::new(),
+            episode_count: 0,
+        };
+        let real = Candidate {
+            kind: Kind::MOVIE,
+            title: "Avengers: Endgame".to_string(),
+            year: 2019,
+            provider: "cinemeta".to_string(),
+            provider_id: "tt4154796".to_string(),
+            poster: String::new(),
+            synopsis: String::new(),
+            genres: String::new(),
+            length: String::new(),
+            episode_count: 0,
+        };
+        // Arrival order is deliberately against the answer: the riff arrives
+        // first, from the higher-precedence leg, and is newer.
+        for merged in [
+            merge_candidates("avengers - endgame", vec![vec![riff.clone(), real.clone()]]),
+            merge_candidates_for(
+                "avengers - endgame",
+                0,
+                None,
+                vec![vec![riff.clone()], vec![real.clone()]],
+            ),
+        ] {
+            assert_eq!(
+                merged[0].title, "Avengers: Endgame",
+                "the exact normalized title is the strongest signal: {merged:?}"
+            );
+            assert_eq!(merged[0].provider_id, "tt4154796");
+        }
+        // A known year is a bonus, not the whole rank: with the query's year
+        // given, the matching release still leads and a mismatch follows.
+        let merged = merge_candidates_for(
+            "avengers - endgame",
+            2019,
+            None,
+            vec![vec![riff, real]],
+        );
+        assert_eq!(merged[0].year, 2019);
+    }
+
+    /// Universal results: the file's shape is a SOFT prior, so a movie answer
+    /// and a series answer both survive the merge and only their order moves.
+    #[test]
+    fn a_series_file_keeps_movie_answers_ranked_below_shows() {
+        use super::{Candidate, merge_candidates_for};
+
+        let cand = |kind: Kind, id: &str| Candidate {
+            kind,
+            title: "Dune".to_string(),
+            year: 0,
+            // One provider, so the leg order cannot decide the tie: only the
+            // shape prior can.
+            provider: "cinemeta".to_string(),
+            provider_id: id.to_string(),
+            poster: String::new(),
+            synopsis: String::new(),
+            genres: String::new(),
+            length: String::new(),
+            episode_count: 0,
+        };
+        let show = cand(Kind::SERIES, "tt-show");
+        let film = cand(Kind::MOVIE, "tt-film");
+        let with_prior = merge_candidates_for(
+            "Dune",
+            0,
+            Some(Kind::SERIES),
+            vec![vec![film.clone(), show.clone()]],
+        );
+        assert_eq!(with_prior.len(), 2, "no kind is filtered out");
+        assert_eq!(with_prior[0].kind, Kind::SERIES, "the shape prior lifts the show");
+        let no_prior = merge_candidates_for("Dune", 0, None, vec![vec![film, show]]);
+        assert_eq!(
+            no_prior[0].kind, Kind::MOVIE,
+            "without a prior, arrival order holds"
+        );
+    }
+
+    /// The dialog's universal scope is both kinds, and its provider precedence
+    /// is the rank's final tie-break: one list, never a kind filter.
+    #[test]
+    fn universal_scope_runs_both_kinds_in_the_ranks_provider_order() {
+        use super::KindFilter;
+
+        assert_eq!(
+            KindFilter::All.kinds(),
+            [Kind::SERIES, Kind::MOVIE],
+            "every search asks both kind-scoped chains"
+        );
+        assert_eq!(
+            KindFilter::All.providers(),
+            metadata::search::PROVIDER_ORDER,
+            "the picker's All order is the ranker's final tie-break"
+        );
     }
 
     #[test]

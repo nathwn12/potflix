@@ -4471,6 +4471,10 @@ pub struct PreloadCache {
     pub title: String,
     pub year: i32,
     pub filter: crate::search::KindFilter,
+    /// The playing file this entry was prefetched for. The next episode keeps
+    /// the key but changes the path, and that is a re-latch: the entry stops
+    /// counting as consumed so the card re-seeds from the new file.
+    pub path: String,
     pub rows: Vec<Candidate>,
     /// True once a finished preload wrote this entry. An empty prefetch leaves
     /// it false, so the list stays closed for a manual search.
@@ -4487,6 +4491,9 @@ pub struct PreloadResult {
     pub title: String,
     pub year: i32,
     pub filter: crate::search::KindFilter,
+    /// The playing file this pass was for, carried through so a poll that
+    /// lands after a switch cannot mark the new file's entry consumed.
+    pub path: String,
     pub rows: Vec<Candidate>,
     pub elapsed_ms: u128,
 }
@@ -4718,11 +4725,12 @@ fn picker_search_run(
         }
     }
     rows.retain(|cand| filter.includes_candidate(cand));
-    // The stored answer uses the same ranking the list paints
-    // ([`crate::search::merge_candidates`], which the streamed batches merge
-    // through): a finished live search and its cache replay then paint
-    // identical rows in the identical order, whatever provider answered first.
-    let rows = crate::search::merge_candidates(title, vec![rows]);
+        // The dialog's stored rows use the same ranking the live list paints
+        // ([`crate::search::merge_candidates_for`], which the streamed batches
+        // merge through): a finished live search and its cache replay then
+        // paint identical rows in the identical order, whatever provider
+        // answered first.
+        let rows = crate::search::merge_candidates_for(title, year, None, vec![rows]);
     let rows: Vec<Candidate> = rows
         .into_iter()
         .take(metadata::search::SEARCH_LIMIT)
@@ -5184,39 +5192,124 @@ pub fn fix_match_no_target_reason(path: &str, is_movie: bool) -> Option<&'static
 
 /// The name field's starting text: the folder-aware query for what's playing,
 /// the same [`metadata_core::context::resolve_query`] merge the repair path
-/// and the card path use. A series filename rarely carries the show (an
-/// episode-only file like `S01E02-A Warm View Together [..].mkv` parses to the
-/// EPISODE title), so for a series the folder's show name wins: the user sees
-/// `Atri`, never `A Warm View Together`. The folder show runs through the
-/// card path's own [`titleclean::clean`] pass (episode tag dropped) so a
-/// release-junk folder (`Atri S01 1080p BDRip 10 bits DD+ ...`) prefills the
-/// searchable show title (`Atri`), never the folder string. A movie filename
-/// already carries its own title, so it keeps the resolver's parse (`Dune
-/// Part Two`, never the dotted filename); unknown kinds keep the old
-/// cleaned-filename text. With no usable folder show the prefill falls back
-/// to the resolver's own parse of the raw window title, and then to the card
-/// path's titleclean pass. [`metadata_core::context::context_from_path`]
-/// yields no show for a bare filename, so a movie with no folder context
-/// still prefills its own title.
+/// and the card path use.
+///
+/// A series filename rarely carries the show (an episode-only file like
+/// `S01E02-A Warm View Together [..].mkv` parses to the EPISODE title), so for
+/// a series the folder's show name wins -- but only when the resolver's title
+/// is NOT the same work as the folder show. A release-junk folder
+/// (`Severance.S01.1080p.WEBRip.DS4K.AV1...`) cleans to `Severance S01 DS4K`,
+/// and the resolver's own `Severance` is the searchable show, so the shorter,
+/// overlapping name wins; a folder whose show is absent from the filename
+/// (`Atri`) still supplies it.
+///
+/// A movie filename already carries its own title, so it keeps the resolver's
+/// parse (`Dune Part Two`, never the dotted filename), with the release-junk
+/// tail a dotted name leaves behind removed: a release year followed by more
+/// words ends the title (`A Silent Voice 2016 Opus2 0` -> `A Silent Voice`),
+/// and a word repeated back to back collapses (`2012 2012` -> `2012`). The
+/// parsed year is carried in the field as `Title (Year)`, because the search's
+/// own year signal is what ranks the right release above a remake.
+///
+/// With no usable folder show the prefill falls back to the resolver's own
+/// parse of the raw window title, and then to the card path's titleclean pass.
+/// [`metadata_core::context::context_from_path`] yields no show for a bare
+/// filename, so a movie with no folder context still prefills its own title.
 #[must_use]
 pub fn fix_match_prefill_name(raw_title: &str, path: &str) -> String {
     let q = metadata_core::context::resolve_query(raw_title, path);
     if q.kind == Kind::SERIES {
         let (show, _) = metadata_core::context::context_from_path(path);
-        if !show.trim().is_empty() {
-            let cleaned = titleclean::clean(&show).title;
-            let trimmed = cleaned.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
+        let folder = if show.trim().is_empty() {
+            String::new()
+        } else {
+            let cleaned = titleclean::clean(&show).title.trim().to_string();
+            if cleaned.is_empty() {
+                show.trim().to_string()
+            } else {
+                cleaned
             }
-            return show;
+        };
+        let parsed = q.title.trim();
+        if !parsed.is_empty() && !folder.is_empty() && same_work_name(parsed, &folder) {
+            return parsed.to_string();
+        }
+        if !folder.is_empty() {
+            return folder;
         }
     }
-    let title = q.title.trim();
+    let title = if q.kind == Kind::MOVIE {
+        movie_search_title(&q.title, q.year)
+    } else {
+        q.title.trim().to_string()
+    };
     if !title.is_empty() {
-        return title.to_string();
+        if q.kind == Kind::MOVIE && q.year > 0 {
+            return format!("{title} ({})", q.year);
+        }
+        return title;
     }
     titleclean::clean(raw_title).title.trim().to_string()
+}
+
+/// The name field's starting text when the dialog opens: the card's own query
+/// only when that query belongs to the file that is playing now. A query the
+/// user typed for another file (a switch, or the next episode of the same show)
+/// is not this file's query -- the file seeds itself, carrying its own year,
+/// and its own season/episode comes from the path.
+#[must_use]
+pub fn fix_match_seed_query(
+    card_query: &str,
+    card_is_this_file: bool,
+    raw_title: &str,
+    path: &str,
+) -> String {
+    if card_is_this_file && !card_query.trim().is_empty() {
+        return card_query.trim().to_string();
+    }
+    fix_match_prefill_name(raw_title, path)
+}
+
+/// Whether two cleaned names are the same work: one's compacted alphanumeric
+/// form contains the other's. `Re Zero`/`ReZero` and `Severance`/`Severance
+/// S01 DS4K` are the same work, so the file's own parse is the title; `Atri`
+/// and `A Warm View Together` are not, so the folder's show wins.
+fn same_work_name(a: &str, b: &str) -> bool {
+    fn compact(s: &str) -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+    let (a, b) = (compact(a), compact(b));
+    !a.is_empty() && !b.is_empty() && (a.contains(&b) || b.contains(&a))
+}
+
+/// A movie's searchable title from the resolver's parse, with the release-junk
+/// tail a dotted release name leaves behind removed: a token equal to the known
+/// release year followed by more words ends the title there (`A Silent Voice
+/// 2016 Opus2 0` -> `A Silent Voice`; `Blade Runner 2049` is untouched because
+/// its year is 2017), and a word repeated back to back collapses (`2012 2012`
+/// -> `2012`).
+fn movie_search_title(title: &str, year: i32) -> String {
+    let mut words: Vec<&str> = title.split_whitespace().collect();
+    if year > 0
+        && let Some(at) = words.iter().position(|w| w.parse::<i32>().ok() == Some(year))
+        && at + 1 < words.len()
+    {
+        words.truncate(at);
+    }
+    let mut out: Vec<&str> = Vec::with_capacity(words.len());
+    for word in words {
+        if out
+            .last()
+            .is_some_and(|last| last.eq_ignore_ascii_case(word))
+        {
+            continue;
+        }
+        out.push(word);
+    }
+    out.join(" ").trim().to_string()
 }
 
 /// The provider id as the dialog shows it ("anilist" -> "AniList").
@@ -6070,8 +6163,14 @@ enum FixJob {
     /// this pass may store its merged rows under that key.
     Search {
         name: String,
+        /// The year the FIELD carried (ranking evidence and the cache key).
         year: i32,
-        want: Kind,
+        /// The year the ENGINE may gate on: the field's year only when the
+        /// user typed it, else `0`, so a filename-derived year ranks but never
+        /// hides a provider whose year differs.
+        gate_year: i32,
+        /// The playing file's shape/kind as a SOFT prior (`None` when unknown).
+        prefer: Option<Kind>,
         only: Vec<String>,
         cache_key: Option<String>,
     },
@@ -6121,14 +6220,6 @@ enum FixOutcome {
     ProvisionalKept(String),
 }
 
-/// The provider list one kind asks for in the dialog's own kind-only search.
-fn kind_providers(want: Kind) -> Vec<String> {
-    crate::search::KindFilter::providers_for_kind(want)
-        .iter()
-        .map(|p| (*p).to_string())
-        .collect()
-}
-
 /// The worker body: one bounded pass, then publish. Never touches the UI.
 fn fix_match_worker(job: FixJob) -> FixOutcome {
     let cancel = metadata_http::cancel::Cancel::with_deadline(FIX_MATCH_DEADLINE);
@@ -6136,7 +6227,8 @@ fn fix_match_worker(job: FixJob) -> FixOutcome {
         FixJob::Search {
             name,
             year,
-            want,
+            gate_year,
+            prefer,
             only,
             cache_key,
         } => {
@@ -6145,30 +6237,70 @@ fn fix_match_worker(job: FixJob) -> FixOutcome {
                 .and_then(cached_search)
                 .map(|c| c.rows)
                 .unwrap_or_default();
+            // Universal search: both kinds, every leg `All` names, ONE list.
+            // The file's shape is only a ranking prior from here on -- a movie
+            // answer is still a row for a series file, never filtered out.
             let providers: Vec<String> = if only.is_empty() {
-                kind_providers(want)
+                crate::search::KindFilter::All
+                    .providers()
+                    .iter()
+                    .map(|p| (*p).to_string())
+                    .collect()
             } else {
-                only
+                only.into_iter()
+                    .filter(|p| {
+                        crate::search::KindFilter::All
+                            .providers()
+                            .contains(&p.as_str())
+                    })
+                    .collect()
             };
-            let out = metadata::search_stream_only_with_log(
-                &cancel,
-                &name,
-                year,
-                want,
-                &providers,
-                &|_| {},
-                &app_logf,
-            );
             let mut rows = prior;
-            rows.extend(out.rows);
-            rows.retain(|cand| cand.kind == want);
+            let outcomes: std::sync::Mutex<Vec<metadata::SearchOutcome>> =
+                std::sync::Mutex::new(Vec::new());
+            std::thread::scope(|scope| {
+                for kind in crate::search::KindFilter::All.kinds() {
+                    let cancel = &cancel;
+                    let name = &name;
+                    let providers = &providers;
+                    let outcomes = &outcomes;
+                    scope.spawn(move || {
+                        let out = metadata::search_stream_only_with_log(
+                            cancel,
+                            name,
+                            gate_year,
+                            *kind,
+                            providers,
+                            &|_| {},
+                            &app_logf,
+                        );
+                        outcomes
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(out);
+                    });
+                }
+            });
+            let mut failed: Vec<String> = Vec::new();
+            for out in outcomes
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
+                rows.extend(out.rows);
+                for provider in out.failed {
+                    if !failed.contains(&provider) {
+                        failed.push(provider);
+                    }
+                }
+            }
+            failed.sort();
             // Same ranking the Card list paints, so the dialog's live rows and
             // a later cache replay agree on provider and order.
-            let rows = crate::search::merge_candidates(&name, vec![rows]);
+            let rows = crate::search::merge_candidates_for(&name, year, prefer, vec![rows]);
             if let Some(key) = cache_key.as_deref()
                 && !rows.is_empty()
             {
-                store_search(key, &rows, &out.failed);
+                store_search(key, &rows, &failed);
             }
             FixOutcome::Search(rows)
         }
@@ -6294,6 +6426,10 @@ struct FixMatchState {
     dpi: i32,
     raw_title: String,
     path: String,
+    /// The text the name field was SEEDED with (the playing file's prefill, or
+    /// the card's own query). A year that only came from this seed is the
+    /// file's, not the user's, so it ranks but never gates.
+    seed: String,
     /// The explicit Movie/TV choice. Seeded from the filename query at `open`;
     /// the kind radios are its only later writer, and it drives the provider
     /// search and the latch scope (owner direction 2026-10-29).
@@ -6588,23 +6724,26 @@ impl FixMatchState {
             return Err("fix match: RegisterClassExW failed".into());
         }
         let q = metadata_core::context::resolve_query(&now.raw_title, &now.path);
-        let (seed_query, seed_movie) = {
+        let (seed_query, seed_from_card, seed_movie) = {
             let st = ui();
             // The dialog opens on the kind of the record that is actually
             // selected (else the shown card's kind, else the filename's), never
-            // on a stale search choice.
+            // on a stale search choice. The card's query belongs to the file it
+            // was seeded for: playing a DIFFERENT file (a switch, or a next
+            // episode) re-seeds from that file instead of reusing the old one.
+            let same_file = st.picker_path == now.path;
             let movie = st
                 .picker
                 .selected_candidate()
                 .map(crate::search::matched_kind_is_movie)
                 .unwrap_or_else(|| st.displayed_card_kind().is_movie());
-            (st.picker.query.clone(), movie)
+            (st.picker.query.clone(), same_file, movie)
         };
-        let is_movie = if seed_query.trim().is_empty() {
-            // No selected record: the folder decides the movie-vs-series
-            // intent (a file beside its own episode siblings is an episode),
-            // and only a folder with no episode siblings falls back to the
-            // filename's own kind.
+        let is_movie = if !seed_from_card || seed_query.trim().is_empty() {
+            // No selected record for THIS file: the folder decides the
+            // movie-vs-series intent (a file beside its own episode siblings is
+            // an episode), and only a folder with no episode siblings falls
+            // back to the filename's own kind.
             match crate::search::detect_shape(&now.path) {
                 crate::search::MediaShape::Series => false,
                 crate::search::MediaShape::Movie => q.kind == Kind::MOVIE,
@@ -6628,6 +6767,7 @@ impl FixMatchState {
             dpi: 96,
             raw_title: now.raw_title.clone(),
             path: now.path.clone(),
+            seed: String::new(),
             is_movie,
             matched,
             choices,
@@ -6697,13 +6837,11 @@ impl FixMatchState {
             return Err(message);
         }
         // The name field starts from the resolver's own parse of the raw
-        // title; the user edits from there.
-        let seed = if seed_query.trim().is_empty() {
-            fix_match_prefill_name(&now.raw_title, &now.path)
-        } else {
-            seed_query
-        };
+        // title; the user edits from there. A query typed for ANOTHER file is
+        // not this file's query, so a switch re-seeds.
+        let seed = fix_match_seed_query(&seed_query, seed_from_card, &now.raw_title, &now.path);
         state.set_text(FM_ID_NAME, &seed);
+        state.seed = seed.clone();
         state.apply_screen();
         // Same cache path as the card: a title the poll already prefetched
         // opens the dialog populated, with no network wait.
@@ -7647,7 +7785,10 @@ impl FixMatchState {
         parse_title_year(&self.find_text())
     }
 
-    /// The provider kind the manual Movie/TV choice asks for.
+    /// The provider kind the manual Movie/TV choice names. Kept for the latch
+    /// scope's own vocabulary; the SEARCH is universal and no longer asks one
+    /// kind, so nothing here reaches the provider pass.
+    #[cfg(test)]
     fn search_want(&self) -> Kind {
         if self.is_movie {
             Kind::MOVIE
@@ -7657,26 +7798,41 @@ impl FixMatchState {
     }
 
     /// Apply the manual Movie/TV choice (owner direction 2026-10-29). The
-    /// choice drives the provider search and the latch scope; switching kinds
-    /// drops the old candidates (they belong to the other kind) and rebuilds
-    /// the scope table. Returns whether anything changed. Headless-safe: the
-    /// radio check is skipped when the controls do not exist.
+    /// choice scopes the LATCH and picks the default radio; it does not scope
+    /// the search, which is universal, so the rows on screen stay and the list
+    /// is re-ranked with the new kind as its soft prior. Returns whether
+    /// anything changed. Headless-safe: the radio check is skipped when the
+    /// controls do not exist.
     fn apply_pick_kind(&mut self, is_movie: bool) -> bool {
         if self.is_movie == is_movie {
             return false;
         }
         self.is_movie = is_movie;
         self.choices = fix_match_scope_choices(&self.path, is_movie);
-        self.candidates.clear();
-        self.searched = false;
-        self.status = None;
-        self.status_error = false;
+        // A Movie/TV switch re-latches, it never re-searches: the same rows are
+        // re-ordered with the newly chosen kind as the soft prior.
+        if !self.candidates.is_empty() {
+            let (name, year) = self.parsed_query();
+            let rows = std::mem::take(&mut self.candidates);
+            self.candidates =
+                crate::search::merge_candidates_for(&name, year, Some(self.latch_kind()), vec![rows]);
+            self.repopulate_list();
+        }
         if self.screen == FixScreen::Search {
             self.apply_screen();
         } else {
             self.update_actions();
         }
         true
+    }
+
+    /// The kind the Movie/TV radios choose, as the row kind the list prefers.
+    fn latch_kind(&self) -> Kind {
+        if self.is_movie {
+            Kind::MOVIE
+        } else {
+            Kind::SERIES
+        }
     }
 
     /// The one-target note: the single choice's note when the folder is both
@@ -7999,10 +8155,18 @@ impl FixMatchState {
     /// `Search`: one bounded pass over the one query field (title, or title and
     /// year in the same field).
     ///
-    /// The persistent cache answers first, keyed on the auto filter the path
-    /// implies: a complete entry fills the list with the cached status and no
-    /// network; a partial entry fills it at once and retries only its failed
-    /// providers, so the legs that already answered are never re-asked.
+    /// Universal: both kinds are searched and both are KEPT, so a movie answer
+    /// and a series answer meet in one closeness-ranked list. The file's own
+    /// shape is a ranking prior only, and the Movie/TV radios scope the latch,
+    /// never the search. The field's year ranks every row; it GATES the
+    /// provider pass only when the user typed it, because a year the prefill
+    /// took from the filename must not hide a provider whose release year
+    /// differs (`Fallout` is 2023 on disk and 2024 at TVmaze).
+    ///
+    /// The persistent cache answers first, keyed on `All`: a complete entry
+    /// fills the list with the cached status and no network; a partial entry
+    /// fills it at once and retries only its failed providers, so the legs that
+    /// already answered are never re-asked.
     fn start_search(&mut self) {
         if self.busy {
             return;
@@ -8011,23 +8175,21 @@ impl FixMatchState {
         if name.is_empty() && year <= 0 {
             return;
         }
-        let want = self.search_want();
         let cache_on = ui().cache_enabled;
-        let filter = crate::search::auto_filter(
-            crate::search::detect_shape(&self.path),
-            crate::search::detect_class(&self.path),
-        );
+        let filter = crate::search::KindFilter::All;
         let key = crate::search::search_cache_key(&name, year, filter);
-        // Only a scope that asks this one kind may store the dialog's rows:
-        // writing a one-kind list under a two-kind key would poison it.
-        let cache_key = (cache_on && filter.kinds() == [want]).then(|| key.clone());
+        let cache_key = cache_on.then(|| key.clone());
         let mut only: Vec<String> = Vec::new();
         if cache_on && let Some(cached) = cached_search(&key) {
-            let rows: Vec<Candidate> = cached
-                .rows
-                .into_iter()
-                .filter(|cand| cand.kind == want)
-                .collect();
+            // An `All` entry already carries both kinds: every row is listed,
+            // never narrowed to the radio's kind, and re-ranked with this
+            // file's own shape so the instant paint matches the worker's.
+            let rows = crate::search::merge_candidates_for(
+                &name,
+                year,
+                self.shape_prior(),
+                vec![cached.rows],
+            );
             if !rows.is_empty() {
                 self.candidates = rows;
                 self.searched = true;
@@ -8044,33 +8206,62 @@ impl FixMatchState {
         self.spawn_job(FixJob::Search {
             name,
             year,
-            want,
+            gate_year: self.gate_year(),
+            prefer: self.shape_prior(),
             only,
             cache_key,
         });
     }
 
+    /// The year the ENGINE may gate on: the field's year only when the user
+    /// produced it. The seeded text is the filename's own prefill, so its
+    /// trailing `(Year)` is evidence to rank by, not an instruction to filter.
+    fn gate_year(&self) -> i32 {
+        let (_, year) = self.parsed_query();
+        if year <= 0 {
+            return 0;
+        }
+        let typed = self.find_text();
+        let seeded = self.seed.trim();
+        if seeded.is_empty() || !typed.eq_ignore_ascii_case(seeded) {
+            year
+        } else {
+            0
+        }
+    }
+
+    /// The playing file's own shape as the search's soft kind prior: a series
+    /// file's list leads with shows, a movie file's with movies, and neither
+    /// list ever drops the other kind.
+    fn shape_prior(&self) -> Option<Kind> {
+        if self.path.trim().is_empty() {
+            return None;
+        }
+        Some(match crate::search::detect_shape(&self.path) {
+            crate::search::MediaShape::Series => Kind::SERIES,
+            crate::search::MediaShape::Movie => Kind::MOVIE,
+        })
+    }
+
     /// Fill the dialog from the persistent cache before any network: the same
-    /// auto filter key the card uses. A hit shows its rows and the cached
-    /// status; a partial entry leaves Search to retry only the failed legs.
+    /// `All` key the card uses. A hit shows its rows and the cached status; a
+    /// partial entry leaves Search to retry only the failed legs.
     fn seed_from_cache(&mut self, seeded: &str) {
         let (title, year) = parse_title_year(seeded);
         if title.is_empty() {
             return;
         }
-        let filter = crate::search::auto_filter(
-            crate::search::detect_shape(&self.path),
-            crate::search::detect_class(&self.path),
-        );
+        let filter = crate::search::KindFilter::All;
         let key = crate::search::search_cache_key(&title, year, filter);
         let Some(cached) = cached_search(&key) else {
             return;
         };
-        let rows: Vec<Candidate> = cached
-            .rows
-            .into_iter()
-            .filter(|cand| cand.kind == self.search_want())
-            .collect();
+        let rows: Vec<Candidate> = crate::search::merge_candidates_for(
+            &title,
+            year,
+            self.shape_prior(),
+            vec![cached.rows],
+        );
         if rows.is_empty() {
             return;
         }
@@ -8742,10 +8933,16 @@ impl UiState {
         let Some(now) = app_support::config::live_now_playing() else {
             return;
         };
-        if self.picker.query.trim().is_empty() {
-            self.picker.set_query(fix_match_prefill_name(&now.raw_title, &now.path));
-            self.picker_path = now.path.clone();
+        // The field follows the playing file: an empty field is seeded, and a
+        // path change (a switch, or the next episode) re-seeds even when the
+        // title is unchanged. A query the user typed for THIS file survives
+        // every later poll; a query for the previous file does not.
+        let switched = !self.picker_path.is_empty() && self.picker_path != now.path;
+        if self.picker.query.trim().is_empty() || switched {
+            self.picker
+                .set_query(fix_match_prefill_name(&now.raw_title, &now.path));
         }
+        self.picker_path = now.path.clone();
         let _inferred = crate::search::auto_filter(
             crate::search::detect_shape(&now.path),
             crate::search::detect_class(&now.path),
@@ -8778,7 +8975,23 @@ impl UiState {
         if !(pre.year == 0 || year == 0 || pre.year == year) {
             return None;
         }
-        let rows = rows_for_year(pre.rows.clone(), year);
+        let narrowed = rows_for_year(pre.rows.clone(), year);
+        // A year the file carried must not empty the instant paint: providers
+        // disagree about release years, so a strict narrow is allowed to fall
+        // back to the preload's own rank, with the file's shape as the prior.
+        let rows = if narrowed.is_empty() && year > 0 {
+            let prefer = if self.picker_path.trim().is_empty() {
+                None
+            } else {
+                Some(match crate::search::detect_shape(&self.picker_path) {
+                    crate::search::MediaShape::Series => Kind::SERIES,
+                    crate::search::MediaShape::Movie => Kind::MOVIE,
+                })
+            };
+            crate::search::merge_candidates_for(title, year, prefer, vec![pre.rows.clone()])
+        } else {
+            narrowed
+        };
         (!rows.is_empty()).then_some(rows)
     }
 
@@ -8786,9 +8999,10 @@ impl UiState {
     /// already populated when the card opens.
     ///
     /// The key is title|year|scope, never the file path: the next episode of
-    /// the same show is a hit. A changed work cancels the in-flight preload
-    /// (stale providers stop being asked) and, while no search runs, drops the
-    /// stale query so [`Self::prime_picker`] can seed the new title. The
+    /// the same show is a hit, and a path change re-latches the card to the
+    /// new file without re-searching. A changed work cancels the in-flight
+    /// preload (stale providers stop being asked) and, while no search runs,
+    /// drops the stale query so [`Self::prime_picker`] can seed the new title. The
     /// persistent cache answers first; only a miss or a partial entry with
     /// failed providers starts the one background thread.
     pub fn prefetch_now_playing(&mut self) {
@@ -8811,6 +9025,18 @@ impl UiState {
         );
         let filter = crate::search::KindFilter::All;
         let key = crate::search::search_cache_key(&title, year, filter);
+        // A path change is a re-latch even when the work's key is unchanged:
+        // the next episode keeps the show identity and re-derives its own
+        // season/episode, and a switch to another file behind the same title
+        // must not keep a consumed preload.
+        let path_changed = !self.preload.path.is_empty() && self.preload.path != now.path;
+        if path_changed {
+            self.preload.path = now.path.clone();
+            self.preload.applied = false;
+            if self.cur_view == View::Card && !self.picker.busy {
+                self.prime_picker();
+            }
+        }
         // A card opened before the poll loop published the playing title gets
         // its seed on the first poll that has one. One prime per preload key;
         // a query the user clears afterwards is never re-seeded.
@@ -8840,6 +9066,7 @@ impl UiState {
             title: title.clone(),
             year,
             filter,
+            path: now.path.clone(),
             rows: Vec::new(),
             ready: false,
             applied: false,
@@ -8875,6 +9102,7 @@ impl UiState {
         let cancel = metadata_http::cancel::Cancel::with_deadline(FIX_MATCH_DEADLINE);
         self.preload_cancel = Some(cancel.clone());
         let hwnd = self.main_hwnd;
+        let path = now.path.clone();
         std::thread::spawn(move || {
             let start = Instant::now();
             // A failed or cancelled pass still publishes (with no rows): that
@@ -8889,6 +9117,7 @@ impl UiState {
                 title,
                 year,
                 filter,
+                path,
                 rows,
                 elapsed_ms: start.elapsed().as_millis(),
             };
@@ -8926,6 +9155,7 @@ impl UiState {
             title: result.title.clone(),
             year: result.year,
             filter: result.filter,
+            path: result.path,
             rows: result.rows,
             ready: row_count > 0,
             applied: false,
@@ -19636,15 +19866,60 @@ mod tests {
     }
 
     #[test]
-    fn fix_match_prefill_bare_movie_keeps_cleaned_title() {
+    fn fix_match_prefill_bare_movie_carries_the_year() {
         let raw = "Dune.Part.Two.2024.1080p.mkv - PotPlayer";
         for path in ["", "Dune.Part.Two.2024.1080p.mkv"] {
             assert_eq!(
                 fix_match_prefill_name(raw, path),
-                "Dune Part Two",
-                "no folder context, cleaned filename wins (path {path:?})"
+                "Dune Part Two (2024)",
+                "no folder context, the parsed movie year rides the field (path {path:?})"
             );
         }
+        // The parse inverts the Card's own `Title (Year)` rendering.
+        assert_eq!(
+            parse_title_year(&fix_match_prefill_name(raw, "")),
+            ("Dune Part Two".to_string(), 2024),
+            "start_search reads the carried year back"
+        );
+    }
+
+    /// A dotted release name leaves its year and quality tags in the resolver's
+    /// parse: the tail after the release year is not part of the title, and a
+    /// name the resolver repeats collapses.
+    #[test]
+    fn fix_match_prefill_drops_the_release_junk_tail() {
+        let junk = "A.Silent.Voice.2016.1080p.BluRay.Opus2.0.H.265-LYS1TH3A.mkv";
+        let raw = format!("{junk} - PotPlayer");
+        assert_eq!(
+            fix_match_prefill_name(&raw, ""),
+            "A Silent Voice (2016)",
+            "the year ends the title"
+        );
+        assert_eq!(movie_search_title("2012 2012", 2009), "2012");
+        assert_eq!(
+            movie_search_title("Blade Runner 2049", 2017),
+            "Blade Runner 2049",
+            "a title numeral that is not the release year survives"
+        );
+        assert_eq!(
+            movie_search_title("2001 A Space Odyssey", 1968),
+            "2001 A Space Odyssey",
+            "a leading numeral survives when it is not the release year"
+        );
+    }
+
+    /// A series docker that adds only release junk to the resolver's own show
+    /// yields the show, never the junk; a folder that is the only place the
+    /// show is named still supplies it.
+    #[test]
+    fn fix_match_prefill_series_prefers_the_resolvers_show_over_junk() {
+        let path = format!(
+            "{}:{}",
+            'D',
+            r"\1MOVIES\Severance.S01.1080p.WEBRip.DS4K.AV1.DDP.5.1-dAV1nci\Severance.S01E01.1080p.WEBRip.DS4K.AV1.DDP.5.1-dAV1nci.mkv"
+        );
+        let raw = "Severance.S01E01.1080p.WEBRip.DS4K.AV1.DDP.5.1-dAV1nci.mkv - PotPlayer";
+        assert_eq!(fix_match_prefill_name(raw, &path), "Severance");
     }
 
     #[test]
@@ -19834,6 +20109,7 @@ mod tests {
             dpi: 96,
             raw_title: String::new(),
             path,
+            seed: String::new(),
             is_movie,
             matched: None,
             choices: Vec::new(),
@@ -22186,7 +22462,10 @@ mod tests {
             painted.push(p.candidates.clone());
         }
         assert_eq!(painted[0], painted[1], "live batches agree whatever leg answered first");
-        assert_eq!(painted[0][0].provider, "tenrai", "the exact title keeps the identity");
+        // Both spellings normalize to the same exact title, so the closeness
+        // rank is tied and the provider leg order decides: AniList is the
+        // higher-precedence anime leg, so its identity is kept.
+        assert_eq!(painted[0][0].provider, "anilist", "the tied rank keeps the better leg");
         // The cache round-trips the painted answer, and replaying it paints the
         // same provider in the same order.
         let _guard = arm_cache();
@@ -22206,7 +22485,7 @@ mod tests {
         assert!(replay.push_search(generation, cached.rows.clone()));
         assert!(replay.finish_search_now(generation));
         assert_eq!(replay.candidates, painted[0], "replay paints the live rows");
-        assert_eq!(replay.candidates[0].provider, "tenrai");
+        assert_eq!(replay.candidates[0].provider, "anilist");
         // Finishing invalidates a late batch: it is refused and the final
         // status stands instead of flipping back to a running count.
         let mut p = crate::search::MediaPicker::default();
@@ -23584,6 +23863,95 @@ mod tests {
         });
         app_support::config::set_live_now_playing(None);
         cache_off();
+    }
+
+    /// A path change is a re-latch even when the work is unchanged: the next
+    /// episode keeps the show identity (one preload key, one search) and
+    /// re-seeds the card from its own file instead of staying consumed.
+    #[test]
+    fn the_next_episode_keeps_the_show_and_re_latches_its_own_file() {
+        let _guard = arm_cache();
+        crate::test_env::EnvGuard::with_scratch("picker-next-episode", |dir| {
+            let season = dir.join("TV").join("The Office").join("Season 1");
+            std::fs::create_dir_all(&season).unwrap();
+            let e1 = season.join("The Office S01E01.mkv");
+            let e2 = season.join("The Office S01E02.mkv");
+            std::fs::write(&e1, "x").unwrap();
+            std::fs::write(&e2, "x").unwrap();
+            let e1 = e1.to_string_lossy().into_owned();
+            let e2 = e2.to_string_lossy().into_owned();
+            let playing = |path: &str, name: &str| {
+                app_support::config::set_live_now_playing(Some(app_support::config::NowPlaying {
+                    raw_title: format!("{name} - PotPlayer"),
+                    path: path.to_string(),
+                }));
+            };
+            playing(&e1, "The Office S01E01.mkv");
+            let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut st = UiState::default();
+            st.cur_view = View::Card;
+            st.cache_enabled = true;
+            st.picker_search = stub_search(calls.clone(), Ok(vec![office_series()]));
+            st.prefetch_now_playing();
+            drive_preload(&mut st);
+            assert!(st.preload.ready);
+            let key = st.preload.key.clone();
+            st.open_card();
+            assert_eq!(st.picker.query, "The Office");
+            assert_eq!(st.picker_path, e1);
+
+            // A query typed for episode one belongs to episode one: the switch
+            // re-seeds from the new file even though the user touched the field.
+            st.picker.set_query("The Office typed".to_string());
+            // The next episode: the same show, a different file.
+            playing(&e2, "The Office S01E02.mkv");
+            st.prefetch_now_playing();
+            assert_eq!(st.preload.key, key, "the show identity is kept");
+            assert_eq!(st.preload.path, e2, "the preload follows the new file");
+            assert_eq!(st.picker_path, e2, "the card re-latches the new file");
+            assert_eq!(
+                st.picker.query, "The Office",
+                "a switch re-seeds even a typed query"
+            );
+            assert!(
+                calls.lock().unwrap().len() <= 1,
+                "the same work is never searched twice for one episode step"
+            );
+        });
+        app_support::config::set_live_now_playing(None);
+        cache_off();
+    }
+
+    /// The Fix match dialog seeds from the playing file when the card's query
+    /// belongs to a different one.
+    #[test]
+    fn fix_match_seeds_from_the_playing_file_on_a_switch() {
+        let raw = "Severance.S01E02.1080p.WEBRip.DS4K.AV1.DDP.5.1-dAV1nci.mkv - PotPlayer";
+        let path = format!(
+            "{}:{}",
+            'D',
+            r"\1MOVIES\Severance S01\Severance.S01E02.1080p.WEBRip.DS4K.AV1.DDP.5.1-dAV1nci.mkv"
+        );
+        assert_eq!(
+            fix_match_seed_query("Severance 2022", true, raw, &path),
+            "Severance 2022",
+            "the card's own query for THIS file is kept"
+        );
+        assert_eq!(
+            fix_match_seed_query("The Office", false, raw, &path),
+            "Severance",
+            "a query for another file never survives the switch"
+        );
+        assert_eq!(
+            fix_match_seed_query(
+                "The Office",
+                false,
+                "Dune.Part.Two.2024.1080p.mkv - PotPlayer",
+                &format!("{}:{}", 'D', r"\Films\Dune.Part.Two.2024.1080p.mkv")
+            ),
+            "Dune Part Two (2024)",
+            "the new file seeds itself, year included"
+        );
     }
 
     // -- One-table click proof (owner-reported dead Settings/Card rows). -----

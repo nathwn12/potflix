@@ -143,7 +143,7 @@ fn sequel_numeral(token: &str) -> Option<u32> {
 /// fall back to a character-level score so `你好，李焕英` and `你好李焕英`
 /// still clear the floor. Both
 /// denominators are DEDUPED token sets.
-pub(crate) fn title_similarity(query: &str, candidate: &str) -> f64 {
+pub fn title_similarity(query: &str, candidate: &str) -> f64 {
     let nq = normalize_title(query);
     let nc = normalize_title(candidate);
     if nq == nc {

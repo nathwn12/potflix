@@ -25,12 +25,12 @@
 //! finishes; the returned vector is deduplicated by (provider, provider_id),
 //! merged by work ([`merge_same_work`], so one work is one row), ranked and
 //! capped at [`SEARCH_LIMIT`], and is the same sequence on every run whatever
-//! order the threads complete in. The rank: the wanted kind
-//! first, then a year match above a mismatch, then the entry whose title best
-//! matches the typed name, then provider order. The title order reuses the
-//! crate's own matcher ([`pick_best_show`]) with its weight/episode-count
-//! tie-breaks neutralized, so the order is pure title strength; entries the
-//! matcher declines to rank (below its similarity floor) keep provider order.
+//! order the threads complete in. The rank is the shared closeness order
+//! ([`rank_rows`]): the title closest to the typed name first (an exact
+//! normalized title is strongest), then a known query year exact above unknown
+//! above a mismatch, then the wanted kind as a soft prior, then provider order.
+//! No kind is ever filtered out by the rank; the caller's per-kind pass is what
+//! scopes a leg.
 //! A leg's failure is recorded by provider name in [`SearchOutcome::failed`]
 //! (an EMPTY answer is a success), so [`search_stream_only`] can run the
 //! picker's next pass over exactly the legs that did not answer; a cancelled
@@ -70,7 +70,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use metadata_core::match_::{ShowCand, normalize_title, pick_best_show};
+use metadata_core::match_::normalize_title;
 use metadata_core::types::{Episode, Kind, Media, Query};
 use metadata_http::cancel::Cancel;
 use serde::{Deserialize, Serialize};
@@ -487,67 +487,115 @@ fn year_admits(candidate_year: i32, year: i32) -> bool {
     year <= 0 || candidate_year == year
 }
 
-/// The ranking of [`search`]: the wanted kind first, then a year match (only
-/// when a year was given) above a mismatch, then the crate's title order, then
-/// provider order. Provider order is part of the key, so the order is total
-/// and the same fixtures reproduce the same sequence.
+/// The ranking of [`search`]: the crate's own closeness order (see
+/// [`rank_rows`]), then the leg that answered as the final tie-break, so the
+/// order is total and the same fixtures reproduce the same sequence.
 fn rank_hits(
     hits: Vec<(usize, Candidate)>,
     name: &str,
     year: i32,
     want: Kind,
 ) -> Vec<Candidate> {
-    let shows: Vec<ShowCand> = hits
-        .iter()
-        .map(|(_, cand)| ShowCand {
-            name: cand.title.clone(),
-            weight: 0,
-            episode_count: 0,
-            aliases: Vec::new(),
-        })
-        .collect();
-    let ranked = title_rank(name, &shows);
-    let mut title_pos = vec![0usize; hits.len()];
-    for (pos, hit) in ranked.into_iter().enumerate() {
-        title_pos[hit] = pos;
-    }
-    let mut keyed: Vec<((bool, bool, usize, usize), Candidate)> = hits
+    let mut keyed: Vec<(Closeness, usize, Candidate)> = hits
         .into_iter()
-        .enumerate()
-        .map(|(hit, (order, cand))| {
-            let key = (
-                cand.kind != want,
-                year > 0 && cand.year != year,
-                title_pos[hit],
-                order,
-            );
-            (key, cand)
-        })
+        .map(|(order, cand)| (closeness(name, year, Some(want), &cand), order, cand))
         .collect();
-    keyed.sort_by_key(|(key, _)| *key);
+    keyed.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    keyed.into_iter().map(|(_, _, cand)| cand).collect()
+}
+
+/// One row's distance from the typed query, smallest first. This is the ONE
+/// closeness order every picker paints by: the engine's per-leg rank here and
+/// a merged list in `potflix-win::search::merge_candidates` both come through
+/// it, so a search result and its cache replay agree.
+///
+/// The key, in order:
+///   1. title similarity ([`metadata_core::match_::title_similarity`], higher
+///      first, so an exact normalized title is strongest) -- a title beats a
+///      category, always;
+///   2. a known query year: exact above unknown above a known mismatch;
+///   3. the file's own shape/kind as a SOFT prior only (never a filter);
+///   4. the provider's leg order ([`PROVIDER_ORDER`]) -- the final tie-break.
+///
+/// Rows still tied keep their input order, which is the provider's own
+/// relevance order: the sort is stable and nothing below the evidence keys
+/// re-orders a leg's own answer.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Closeness {
+    /// Higher similarity sorts first: the negated millionths.
+    similarity: std::cmp::Reverse<i64>,
+    /// 0 = the query year is exact, 1 = the row's year is unknown, 2 = known
+    /// and different. Every row is 0 when the query has no year.
+    year_rank: u8,
+    /// 0 when the row's kind matches the shape prior, 1 when it does not.
+    shape_miss: u8,
+    provider: usize,
+}
+
+/// The provider precedence used by the rank's final tie-break: the built-in
+/// chain's leg order, regular and anime interleaved exactly as
+/// [`crate::resolver::default_sources`] ranks them.
+pub const PROVIDER_ORDER: &[&str] = &[
+    "tvmaze",
+    "anilist",
+    "tenrai",
+    "kitsu",
+    "animeschedule",
+    "cinemeta",
+    "imdb",
+];
+
+/// The position of `provider` in [`PROVIDER_ORDER`]; an unknown leg sorts after
+/// every known one and keeps its own name order through the other keys.
+fn provider_rank(provider: &str) -> usize {
+    let provider = provider.trim().to_ascii_lowercase();
+    PROVIDER_ORDER
+        .iter()
+        .position(|known| *known == provider)
+        .unwrap_or(PROVIDER_ORDER.len())
+}
+
+/// [`Closeness`] for one row against `query`, `year` and the file's own shape
+/// (`prefer`, `None` when the caller has no shape evidence).
+fn closeness(query: &str, year: i32, prefer: Option<Kind>, cand: &Candidate) -> Closeness {
+    let similarity = metadata_core::match_::title_similarity(query, &cand.title);
+    let year_rank = if year <= 0 || cand.year == year {
+        0
+    } else if cand.year <= 0 {
+        1
+    } else {
+        2
+    };
+    let shape_miss = u8::from(prefer.is_some_and(|kind| cand.kind != kind));
+    Closeness {
+        similarity: std::cmp::Reverse((similarity.clamp(0.0, 1.0) * 1_000_000.0).round() as i64),
+        year_rank,
+        shape_miss,
+        provider: provider_rank(&cand.provider),
+    }
+}
+
+/// Re-order `rows` closest-first for `query`: the shared closeness rank the
+/// engine and the UI both use. `year` is the query's own year (`0` when
+/// unknown) and is only a ranking signal here -- the hard year gate lives in
+/// the per-leg filter, so the caller decides whether a typed year is a filter
+/// or a preference. `prefer` is the file's own shape/kind as a SOFT prior: a
+/// row of the other kind is ranked lower, never dropped.
+#[must_use]
+pub fn rank_rows(
+    query: &str,
+    year: i32,
+    prefer: Option<Kind>,
+    rows: Vec<Candidate>,
+) -> Vec<Candidate> {
+    let mut keyed: Vec<(Closeness, Candidate)> = rows
+        .into_iter()
+        .map(|cand| (closeness(query, year, prefer, &cand), cand))
+        .collect();
+    keyed.sort_by_key(|a| a.0);
     keyed.into_iter().map(|(_, cand)| cand).collect()
 }
 
-/// The order in which the crate's own title matcher would take `cands` one at
-/// a time, best first. `weight`/`episode_count` are neutralized by the caller,
-/// so within the matcher's similarity window the higher similarity wins and an
-/// exact normalized title outranks every near match; entries the matcher
-/// declines to rank (below its similarity floor) keep their input order,
-/// which is provider order.
-fn title_rank(query: &str, cands: &[ShowCand]) -> Vec<usize> {
-    let mut left: Vec<usize> = (0..cands.len()).collect();
-    let mut out: Vec<usize> = Vec::with_capacity(cands.len());
-    while !left.is_empty() {
-        let sub: Vec<ShowCand> = left.iter().map(|&i| cands[i].clone()).collect();
-        let Some(best) = pick_best_show(query, &sub) else {
-            out.extend(left.iter().copied());
-            break;
-        };
-        let at = sub.iter().position(|cand| *cand == best).unwrap_or(0);
-        out.push(left.remove(at));
-    }
-    out
-}
 
 /// Splice duplicate rows for the SAME work into the first (best-ranked) one.
 ///
