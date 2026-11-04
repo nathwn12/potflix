@@ -39,6 +39,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
 use metadata_core::alternate::alternate_query;
+use metadata_core::match_::{ShowCand, pick_best_show, title_similarity};
 use metadata_core::types::{Button, Episode, Kind, Media, Query, Resolution, normalize_url};
 use metadata_http::cancel::Cancel;
 use metadata_http::http::{DEFAULT_HTTP_TIMEOUT, HttpClient};
@@ -65,6 +66,17 @@ const ARTWORK_BUDGET: usize = 300;
 /// The cap on rows one provider's [`Source::find_all`] returns: a picker page's
 /// worth of entries, never the provider's whole answer.
 pub(crate) const FIND_ALL_LIMIT: usize = 12;
+
+/// A title this close to the query is a STRONG answer: the chain settles on it
+/// at once instead of walking the remaining providers. A weaker eligible answer
+/// is kept and compared across providers after the walk, so an exact title from
+/// a later leg still wins.
+const CHAIN_STRONG_TITLE: f64 = 0.98;
+
+/// The top weight a collected candidate can carry. The provider's position in
+/// the ordered chain subtracts from it, so an earlier provider wins a
+/// within-band title tie.
+const CHAIN_WEIGHT_BASE: i32 = 100;
 
 /// The search path a provider belongs to: `Regular` (live-action) or `Anime`.
 /// A Regular scope asks only Regular legs, an Anime scope only Anime legs,
@@ -856,21 +868,25 @@ impl Resolver {
     }
 
     /// `fetchChain`: iterate the ordered sources; an error is recorded and the
-    /// walk continues (the FIRST error is kept), a `None` answer continues, a
-    /// movie answer returns immediately when it is complete, and a series
-    /// answer returns immediately on a number-exact episode match with a
-    /// synopsis. Completeness beats order: an answer that matches but carries
-    /// no synopsis is kept as the fallback while the walk continues, so a
-    /// later provider carrying the episode AND a synopsis wins; only when no
-    /// later source answers complete does the bare match settle. Cover and
-    /// length are preferred, never gating (a missing cover degrades to the
-    /// app logo downstream); year never gates at all.
+    /// walk continues (the FIRST error is kept), a `None` answer continues, and
+    /// an eligible movie/series answer is judged by its TITLE. An exact
+    /// normalized title (or one scoring at least 0.98) is strong and settles at
+    /// once; a weaker title is kept as a candidate and the walk continues, so a
+    /// later provider with the exact title still wins. After the walk the
+    /// candidates are compared by [`pick_best_show`]: exact title first, then a
+    /// 0.1 title band broken by provider order then episode count. Completeness
+    /// still beats order: an answer that matches but carries no synopsis is
+    /// kept as the `bare` fallback while the walk continues, and only settles
+    /// when no eligible candidate exists. Cover and length are preferred, never
+    /// gating (a missing cover degrades to the app logo downstream); year never
+    /// gates.
     fn fetch_chain(&self, cancel: &Cancel, q: &Query) -> Chain {
         let mut saw_error = false;
         let mut saw_ok = false;
         let mut first_err: Option<Error> = None;
         let mut bare: Option<Media> = None;
-        for source in self.ordered_sources(q) {
+        let mut candidates: Vec<(i32, Media)> = Vec::new();
+        for (rank, source) in self.ordered_sources(q).into_iter().enumerate() {
             match source.find(cancel, q) {
                 Err(err) => {
                     self.log(&format!("metadata: source {} error: {err}", source.name()));
@@ -889,55 +905,71 @@ impl Resolver {
                         media.source = source.name().to_string();
                     }
                     if media.kind == Kind::MOVIE || q.kind == Kind::MOVIE {
-                        if !media.synopsis.trim().is_empty() {
-                            return Chain::found(media);
+                        if media.synopsis.trim().is_empty() {
+                            // A bare title must not settle the lookup when a
+                            // later source may hold the synopsis: keep it and
+                            // walk on.
+                            self.log(&format!(
+                                "metadata: source {} answers {:?} without a synopsis, trying next",
+                                source.name(),
+                                q.title
+                            ));
+                            if bare.is_none() {
+                                bare = Some(media);
+                            }
+                            saw_ok = true;
+                            continue;
                         }
-                        // A bare title must not settle the lookup when a later
-                        // source may hold the synopsis: keep it and walk on.
+                    } else if match_episode(&media.episodes, q).is_some() {
+                        if !episode_complete(&media, q) {
+                            // The episode matches but neither it nor the show
+                            // carries a synopsis: a later provider with the
+                            // complete record wins; this stays the fallback.
+                            self.log(&format!(
+                                "metadata: source {} answers episode {} for {:?} without a synopsis, trying next",
+                                source.name(),
+                                q.episode,
+                                q.title
+                            ));
+                            if bare.is_none() {
+                                bare = Some(media);
+                            }
+                            saw_ok = true;
+                            continue;
+                        }
+                    } else {
+                        // The show matched but its Numbers lack the requested
+                        // episode: fall through to the next source rather than
+                        // caching/returning a wrong (positional) title. The leg
+                        // did answer, so a lone error elsewhere must not turn
+                        // this genuine not-found into Unavailable.
                         self.log(&format!(
-                            "metadata: source {} answers {:?} without a synopsis, trying next",
-                            source.name(),
-                            q.title
-                        ));
-                        if bare.is_none() {
-                            bare = Some(media);
-                        }
-                        saw_ok = true;
-                        continue;
-                    }
-                    if match_episode(&media.episodes, q).is_some() {
-                        if episode_complete(&media, q) {
-                            return Chain::found(media);
-                        }
-                        // The episode matches but neither it nor the show
-                        // carries a synopsis: a later provider with the
-                        // complete record wins; this stays the fallback.
-                        self.log(&format!(
-                            "metadata: source {} answers episode {} for {:?} without a synopsis, trying next",
+                            "metadata: source {} lacks episode {} for {:?}, trying next",
                             source.name(),
                             q.episode,
                             q.title
                         ));
-                        if bare.is_none() {
-                            bare = Some(media);
-                        }
                         saw_ok = true;
                         continue;
                     }
-                    // The show matched but its Numbers lack the requested
-                    // episode: fall through to the next source rather than
-                    // caching/returning a wrong (positional) title. The leg
-                    // did answer, so a lone error elsewhere must not turn
-                    // this genuine not-found into Unavailable.
+                    saw_ok = true;
+                    // A strong title settles here; a weaker eligible answer is
+                    // kept so an exact title from a later provider can win.
+                    if title_similarity(&q.title, &media.title) >= CHAIN_STRONG_TITLE {
+                        return Chain::found(media);
+                    }
                     self.log(&format!(
-                        "metadata: source {} lacks episode {} for {:?}, trying next",
+                        "metadata: source {} answers {:?} with a weaker title, keeping it for the cross-source pick",
                         source.name(),
-                        q.episode,
                         q.title
                     ));
-                    saw_ok = true;
+                    candidates.push((CHAIN_WEIGHT_BASE - rank as i32, media));
                 }
             }
+        }
+        if !candidates.is_empty() {
+            let at = pick_chain_candidate(&q.title, &candidates).unwrap_or(0);
+            return Chain::found(candidates.swap_remove(at).1);
         }
         if let Some(media) = bare {
             return Chain::found(media);
@@ -953,6 +985,39 @@ impl Resolver {
             return Chain::transient(Some(Error::Cancelled(reason)));
         }
         Chain::missed()
+    }
+}
+
+/// Pick the best collected cross-provider answer with [`pick_best_show`]: an
+/// exact normalized title excludes near matches; otherwise candidates within a
+/// 0.1 title band tie, broken by higher provider weight then a fuller episode
+/// table. `None` only when every candidate is below the matcher's floor; the
+/// caller then keeps the first eligible answer.
+pub(crate) fn pick_chain_candidate(query: &str, cands: &[(i32, Media)]) -> Option<usize> {
+    let shows: Vec<ShowCand> = cands
+        .iter()
+        .map(|(weight, media)| ShowCand {
+            name: media.title.clone(),
+            weight: *weight,
+            episode_count: media.episodes.len() as i32,
+            aliases: chain_aliases(&media.title),
+        })
+        .collect();
+    let winner = pick_best_show(query, &shows)?;
+    shows.iter().position(|cand| *cand == winner)
+}
+
+/// The franchise head a provider puts before a ` -Subtitle` tail
+/// (`Re:ZERO -Starting Life in Another World-` -> `Re:ZERO`). It lets a short
+/// query match the main entry as an alias without inventing a title: the
+/// provider's own string is the only source, and the colon form
+/// (`Erased: WW2's Heroes of Color`) is deliberately not split.
+fn chain_aliases(title: &str) -> Vec<String> {
+    match title.split_once(" -") {
+        Some((head, tail)) if !head.trim().is_empty() && !tail.trim().is_empty() => {
+            vec![head.trim().to_string()]
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -1182,4 +1247,187 @@ fn child_scope(parent: &Cancel, timeout: Duration) -> Cancel {
         }
     });
     child
+}
+
+#[cfg(test)]
+mod chain_pick_tests {
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+    use crate::testsupport::{FakeSource, TempDir, resolver_with};
+    use crate::timefmt::now_rfc3339;
+
+    /// One provider answer with a synopsis and a number-exact first episode.
+    fn chain_media(source: &str, kind: Kind, title: &str, episodes: usize) -> Media {
+        let table: Vec<Episode> = if kind == Kind::MOVIE {
+            Vec::new()
+        } else {
+            (1..=episodes)
+                .map(|number| Episode {
+                    season: 1,
+                    number: number as i32,
+                    title: format!("Episode {number}"),
+                    ..Episode::default()
+                })
+                .collect()
+        };
+        Media {
+            source: source.to_string(),
+            source_id: title.to_string(),
+            kind,
+            title: title.to_string(),
+            synopsis: format!("{title} synopsis"),
+            artwork: "https://example.com/poster.jpg".to_string(),
+            episodes: table,
+            fetched_at: now_rfc3339(),
+            ..Media::default()
+        }
+    }
+
+    fn series_query(title: &str) -> Query {
+        Query {
+            kind: Kind::SERIES,
+            title: title.to_string(),
+            episode: 1,
+            absolute: true,
+            ..Query::default()
+        }
+    }
+
+    fn movie_query(title: &str, year: i32) -> Query {
+        Query {
+            kind: Kind::MOVIE,
+            title: title.to_string(),
+            year,
+            ..Query::default()
+        }
+    }
+
+    fn lookup(resolver: &Resolver, q: &Query) -> Resolution {
+        resolver
+            .lookup_now(&Cancel::background(), q)
+            .expect("LookupNow")
+    }
+
+    /// The two automatic misses: a later exact title must beat the earlier
+    /// fuzzy answer the chain used to settle on.
+    #[test]
+    fn exact_later_answer_beats_earlier_weak_answer() {
+        let dir = TempDir::new();
+        let weak = FakeSource::with_media(
+            "tvmaze",
+            chain_media("tvmaze", Kind::SERIES, "Erased: WW2's Heroes of Color", 1),
+        );
+        let exact = FakeSource::with_media(
+            "anilist",
+            chain_media("anilist", Kind::SERIES, "ERASED", 1),
+        );
+        let weak_calls = weak.counter();
+        let exact_calls = exact.counter();
+        let resolver = resolver_with(&dir.path(), vec![weak.shared(), exact.shared()]);
+
+        let res = lookup(&resolver, &series_query("Erased"));
+        assert!(res.found, "resolution = {res:?}, want ERASED found");
+        assert_eq!(res.series, "ERASED");
+        assert_eq!(weak_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(exact_calls.load(Ordering::SeqCst), 1);
+
+        let dir = TempDir::new();
+        let weak = FakeSource::with_media(
+            "cinemeta",
+            chain_media("cinemeta", Kind::MOVIE, "They Talk to Me", 0),
+        );
+        let exact = FakeSource::with_media(
+            "imdb",
+            chain_media("imdb", Kind::MOVIE, "Talk to Me", 0),
+        );
+        let resolver = resolver_with(&dir.path(), vec![weak.shared(), exact.shared()]);
+
+        let res = lookup(&resolver, &movie_query("Talk to Me", 2022));
+        assert!(res.found && res.is_movie, "resolution = {res:?}");
+        assert_eq!(res.series, "Talk to Me");
+    }
+
+    /// Within the 0.1 title band, the earlier provider wins the tie.
+    #[test]
+    fn within_band_tie_prefers_earlier_provider() {
+        let first = chain_media("tvmaze", Kind::SERIES, "Erased Extra", 1);
+        let second = chain_media("anilist", Kind::SERIES, "Erased Special", 1);
+        let a = title_similarity("Erased", &first.title);
+        let b = title_similarity("Erased", &second.title);
+        assert!((a - b).abs() < 0.1, "fixture must tie: {a} vs {b}");
+        assert_eq!(
+            pick_chain_candidate("Erased", &[(100, first), (99, second)]),
+            Some(0)
+        );
+    }
+
+    /// Within the band at equal weight, the fuller episode table wins.
+    #[test]
+    fn within_band_tie_prefers_fuller_episode_table() {
+        let small = chain_media("tvmaze", Kind::SERIES, "Erased", 1);
+        let full = chain_media("anilist", Kind::SERIES, "Erased", 12);
+        assert_eq!(
+            pick_chain_candidate("Erased", &[(100, small), (100, full)]),
+            Some(1)
+        );
+    }
+
+    /// A strong TVmaze answer still settles at once: Fallout is exact, so the
+    /// later leg is never asked.
+    #[test]
+    fn fallout_exact_tvmaze_is_not_displaced() {
+        let dir = TempDir::new();
+        let first = FakeSource::with_media(
+            "tvmaze",
+            chain_media("tvmaze", Kind::SERIES, "Fallout", 8),
+        );
+        let later = FakeSource::with_media(
+            "anilist",
+            chain_media("anilist", Kind::SERIES, "Fallout: The Series", 4),
+        );
+        let later_calls = later.counter();
+        let resolver = resolver_with(&dir.path(), vec![first.shared(), later.shared()]);
+
+        let res = lookup(&resolver, &series_query("Fallout"));
+        assert!(res.found, "resolution = {res:?}");
+        assert_eq!(res.series, "Fallout");
+        assert_eq!(
+            later_calls.load(Ordering::SeqCst),
+            0,
+            "an exact title settles before the weaker later leg"
+        );
+    }
+
+    /// The main Re:ZERO must survive the PETIT spinoff: within the band, the
+    /// earlier TVmaze provider wins.
+    #[test]
+    fn re_zero_main_show_is_not_displaced_by_the_spinoff() {
+        let dir = TempDir::new();
+        let first = FakeSource::with_media(
+            "tvmaze",
+            chain_media(
+                "tvmaze",
+                Kind::SERIES,
+                "Re:ZERO -Starting Life in Another World-",
+                25,
+            ),
+        );
+        let later = FakeSource::with_media(
+            "anilist",
+            chain_media("anilist", Kind::SERIES, "Re:ZERO PETIT", 12),
+        );
+        let resolver = resolver_with(&dir.path(), vec![first.shared(), later.shared()]);
+
+        let res = lookup(&resolver, &series_query("Re Zero"));
+        assert!(res.found, "resolution = {res:?}");
+        assert_eq!(res.series, "Re:ZERO -Starting Life in Another World-");
+    }
+
+    /// The helper is only a view over `pick_best_show`; an empty list has no
+    /// winner.
+    #[test]
+    fn no_candidates_has_no_chain_winner() {
+        assert_eq!(pick_chain_candidate("Erased", &[]), None);
+    }
 }

@@ -38,6 +38,10 @@ pub struct ShowCand {
 /// similarity form a tie group broken by Weight then EpisodeCount.
 pub(crate) const MATCH_MIN_SIMILARITY: f64 = 0.5;
 pub(crate) const MATCH_TIE_MARGIN: f64 = 0.1;
+/// A float tolerance on the band edge: a candidate exactly 0.1 below the top
+/// must stay in the tie group even when the two computed scores differ by one
+/// ulp (0.8 vs 0.9 - 0.1 is the motivating case).
+const MATCH_TIE_EPSILON: f64 = 1e-9;
 
 /// `foldedAccent` maps a lowercased accented/special Latin rune to ASCII.
 /// `None` means the rune is not a special case.
@@ -203,7 +207,8 @@ fn is_cjk(c: char) -> bool {
 /// within [`MATCH_TIE_MARGIN`] of it (an INCLUSIVE `>= top - margin` window),
 /// in which case the tie group breaks by higher Weight then higher
 /// EpisodeCount then higher similarity, with a full tie keeping the earliest
-/// index. Exact normalized matches always outrank near matches: ONE `sim == 1`
+/// index. The window carries a 1e-9 float tolerance at its edge, so a
+/// candidate exactly on the band is not excluded by rounding. Exact normalized matches always outrank near matches: ONE `sim == 1`
 /// title (name or alias) anywhere excludes every candidate whose best is not
 /// exact. `None` when the list is empty or the best similarity is below
 /// [`MATCH_MIN_SIMILARITY`], so the resolver falls through.
@@ -232,7 +237,7 @@ pub fn pick_best_show(query: &str, cands: &[ShowCand]) -> Option<ShowCand> {
             if sims[i] != 1.0 {
                 continue;
             }
-        } else if sims[i] < top - MATCH_TIE_MARGIN {
+        } else if sims[i] < top - MATCH_TIE_MARGIN - MATCH_TIE_EPSILON {
             continue;
         }
         let Some(j) = idx else {
