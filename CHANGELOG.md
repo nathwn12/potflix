@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-13
+
+### Changed
+
+- The README screenshots show the current window, in the AMOLED theme it ships with.
+
+### Fixed
+
+- Result thumbnails are one shape again: every poster scales to cover its tile and centre-crops, and each row is tall enough to hold the whole tile. A tile taller than its row had its bottom edge painted over by the next row, so every result but the last lost its rounded corner and a sliver of artwork.
+- Every status bar paints the version, including the wide workspace and Main, which both read a blank corner.
+- The wide object card carries the runtime again (`2021 · Film · 2h 35m`, not `2021 · Film`).
+- `Fix match` seeds the name without the file extension, so a playing `Night of the Living Dead (1968).wav` reads `Night of the Living Dead (1968)` in the field instead of carrying an extension no provider has.
+- `Clear metadata` also drops the picker's saved search answers, so "Drop every saved match" no longer looks like it did nothing until the search cache happened to be replaced.
+- Closing the window when the tray icon could not be installed ends the process instead of hiding it with no way back, which left the single-instance port held and a relaunch answering `already running`.
+
 ## [1.2.1] - 2026-11-04
 
 ### Changed
