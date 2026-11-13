@@ -23162,6 +23162,133 @@ mod tests {
         }
     }
 
+    /// QA wide item: the wide workspace at **1180x760** -- 60 px taller than the
+    /// 1180x700 floor every existing gate pins. No size above the floor was
+    /// asserted anywhere, so a regression that only shows above it (a band
+    /// pinned to a 700-derived coordinate, a surface that stops growing, a
+    /// control that leaves the client) would have shipped unseen.
+    ///
+    /// Red when the wide branch is not taken at this size, when a control
+    /// leaves the client or two controls/surfaces intersect, when the extra
+    /// height does not reach the stage and the lower band, or when a presence
+    /// surface paints no panel at all.
+    #[test]
+    fn wide_workspace_at_1180x760_holds_every_control_and_paints_three_surfaces() {
+        let (cw, ch) = (1180, 760);
+        let mut st = UiState::default();
+        st.cur_view = View::Card;
+        st.picker.candidates = vec![office_series(), dune_movie(), anime_series()];
+        st.picker.searched = true;
+        assert!(st.select_candidate(0), "the row selects");
+        let layout = |cw: i32, ch: i32| {
+            compute_card_layout_state(
+                cw,
+                ch,
+                96,
+                &st.card_specs_state,
+                st.displayed_card_kind(),
+                st.preview_surface,
+                &st.card_layout_state(),
+            )
+        };
+        let l = layout(cw, ch);
+        let floor = layout(cw, 700);
+        assert!(l.wide, "1180x760 is the wide workspace");
+        assert!(floor.wide, "fixture: 1180x700 is the approved wide floor");
+
+        // Every laid-out control stays inside the client, and no two intersect.
+        for b in &l.btns {
+            if b.rc.right <= b.rc.left || b.rc.bottom <= b.rc.top {
+                continue;
+            }
+            assert!(
+                b.rc.left >= 0 && b.rc.right <= cw && b.rc.top >= 0 && b.rc.bottom <= ch,
+                "button {} outside the client: {:?}",
+                b.id,
+                b.rc
+            );
+        }
+        for (i, a) in l.btns.iter().enumerate() {
+            for b in l.btns.iter().skip(i + 1) {
+                if a.rc.right <= a.rc.left
+                    || a.rc.bottom <= a.rc.top
+                    || b.rc.right <= b.rc.left
+                    || b.rc.bottom <= b.rc.top
+                {
+                    continue;
+                }
+                assert!(
+                    !rects_intersect(a.rc, b.rc),
+                    "buttons {} {:?} and {} {:?} overlap",
+                    a.id,
+                    a.rc,
+                    b.id,
+                    b.rc
+                );
+            }
+        }
+
+        // Three disjoint, non-empty surfaces.
+        for (i, a) in l.surfaces.iter().enumerate() {
+            assert!(
+                a.right > a.left && a.bottom > a.top,
+                "surface {i} is empty: {a:?}"
+            );
+            assert!(
+                a.left >= 0 && a.right <= cw && a.top >= 0 && a.bottom <= ch,
+                "surface {i} outside the client: {a:?}"
+            );
+            for b in l.surfaces.iter().skip(i + 1) {
+                assert!(!rects_intersect(*a, *b), "surfaces overlap: {a:?} / {b:?}");
+            }
+        }
+
+        // The 60 px the client gained is absorbed by the stage and the lower
+        // band, and by nothing else: the rail, the object card and the tab strip
+        // are identical at both heights.
+        assert_eq!(l.stage.top, floor.stage.top, "the stage moved");
+        assert_eq!(
+            l.stage.bottom - floor.stage.bottom,
+            ch - 700,
+            "the stage did not absorb the extra height"
+        );
+        assert!(
+            r_eq(l.surfaces[0], floor.surfaces[0]),
+            "the member strip grew: {:?} vs {:?}",
+            l.surfaces[0],
+            floor.surfaces[0]
+        );
+        for (i, (now, then)) in l.surfaces.iter().zip(floor.surfaces.iter()).enumerate() {
+            if i == 0 {
+                continue;
+            }
+            assert_eq!(now.top, then.top, "surface {i} moved");
+            assert_eq!(
+                now.bottom - then.bottom,
+                ch - 700,
+                "surface {i} did not absorb the extra height"
+            );
+        }
+        assert!(
+            r_eq(l.object, floor.object),
+            "the object card grew: {:?} vs {:?}",
+            l.object,
+            floor.object
+        );
+
+        // The surfaces actually paint a panel at this size: a sample inside each
+        // one is not the bare card fill.
+        let px = paint_offscreen(cw, ch, 96, &st);
+        for (i, s) in l.surfaces.iter().enumerate() {
+            let (x, y) = ((s.left + s.right) / 2, (s.top + s.bottom) / 2);
+            assert_ne!(
+                pixel_at(&px, cw, x, y),
+                COL_BG,
+                "surface {i} painted nothing at {x},{y}"
+            );
+        }
+    }
+
     /// One payload, three surfaces: the header, details and state are the same
     /// strings on every surface; the synopsis body is local to the Activity
     /// tab; the designer's off-fields disappear everywhere at once.
