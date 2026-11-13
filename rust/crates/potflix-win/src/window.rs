@@ -13062,6 +13062,23 @@ fn paint_status_version(hdc: Gdi::HDC, status: Rect, dpi: i32) {
     }
 }
 
+/// The status bar's one painter: the left status line, the right-aligned
+/// version, and the scan strip. Every view paints its bar through this, so a
+/// view cannot ship a bar that forgets the version -- the wide Card workspace
+/// drew its own bar and dropped it, and so did the Main view.
+fn paint_status_bar(
+    hdc: Gdi::HDC,
+    status: Rect,
+    dpi: i32,
+    st: &UiState,
+    format: u32,
+    font: Gdi::HFONT,
+) {
+    draw_ui_text(hdc, &st.status_text, status, format, font, COL_MUTED);
+    paint_status_version(hdc, status, dpi);
+    paint_scan_bar(hdc, status, dpi, st);
+}
+
 /// `auditSingleLineVerdict` (`go\window.go:3582`).
 #[must_use]
 pub fn audit_single_line_verdict(
@@ -13204,15 +13221,7 @@ fn paint_main_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState) {
     if let Some(frc) = main_focus_rect(&l, st.focus_id) {
         draw_focus_ring(hdc, frc, dpi);
     }
-    draw_ui_text(
-        hdc,
-        &st.status_text,
-        l.status,
-        fmt_left,
-        status_font,
-        COL_MUTED,
-    );
-    paint_scan_bar(hdc, l.status, dpi, st);
+    paint_status_bar(hdc, l.status, dpi, st, fmt_left, status_font);
 
     // SAFETY: fonts created above are deleted here.
     unsafe {
@@ -13466,16 +13475,7 @@ fn paint_narrow_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &CardLa
     {
         draw_focus_ring(hdc, b.rc, dpi);
     }
-    draw_ui_text(
-        hdc,
-        &st.status_text,
-        l.status,
-        fmt_left,
-        status_font,
-        COL_MUTED,
-    );
-    paint_status_version(hdc, l.status, dpi);
-    paint_scan_bar(hdc, l.status, dpi, st);
+    paint_status_bar(hdc, l.status, dpi, st, fmt_left, status_font);
 
     // SAFETY: fonts created above.
     unsafe {
@@ -13647,16 +13647,7 @@ fn paint_narrow_settings(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &Se
     {
         draw_focus_ring(hdc, b.rc, dpi);
     }
-    draw_ui_text(
-        hdc,
-        &st.status_text,
-        l.status,
-        fmt_left,
-        status_font,
-        COL_MUTED,
-    );
-    paint_status_version(hdc, l.status, dpi);
-    paint_scan_bar(hdc, l.status, dpi, st);
+    paint_status_bar(hdc, l.status, dpi, st, fmt_left, status_font);
 
     // SAFETY: fonts created above.
     unsafe {
@@ -14726,15 +14717,7 @@ fn paint_card_view(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState) {
         draw_focus_ring(hdc, b.rc, dpi);
     }
     if l.status.bottom > l.status.top {
-        draw_ui_text(
-            hdc,
-            &st.status_text,
-            l.status,
-            fmt_left,
-            status_font,
-            COL_MUTED,
-        );
-        paint_scan_bar(hdc, l.status, dpi, st);
+        paint_status_bar(hdc, l.status, dpi, st, fmt_left, status_font);
     }
     if l.hint.bottom > l.hint.top {
         draw_ui_text(
@@ -23542,6 +23525,79 @@ mod tests {
                 rc.right - rc.left
             );
         }
+    }
+
+    /// Defect (2026-11-13): the wide status bar never painted the version. The
+    /// narrow bar ends `Ready … v1.2.1`; the wide bar drew `Ready` and nothing on
+    /// the right, because only the narrow painter called [`paint_status_version`].
+    /// Every bar now paints through [`paint_status_bar`], so a view cannot ship a
+    /// bar that forgets the version.
+    ///
+    /// Red when the version's inset rect carries no ink on the wide surface.
+    #[test]
+    fn every_status_bar_paints_the_version_wide_included() {
+        let Some(need) = measure_version_width(96) else {
+            return; // no GDI DC: skip (the one native exception)
+        };
+        assert!(need > 0, "the short version has a width: {need}px");
+        let mut st = UiState::default();
+        st.cur_view = View::Card;
+        st.picker.candidates = vec![dune_movie()];
+        st.picker.searched = true;
+        assert!(st.select_candidate(0), "the row selects");
+        st.set_status_text("Ready");
+
+        let mut wide_seen = false;
+        let mut narrow_seen = false;
+        for (cw, ch) in [(1180, 760), (MAIN_CLIENT_W, MAIN_CLIENT_H)] {
+            let l = compute_card_layout_state(
+                cw,
+                ch,
+                96,
+                &st.card_specs_state,
+                st.displayed_card_kind(),
+                st.preview_surface,
+                &st.card_layout_state(),
+            );
+            assert!(
+                l.status.bottom > l.status.top,
+                "{cw}x{ch}: the bar has a rect: {:?}",
+                l.status
+            );
+            if l.wide {
+                wide_seen = true;
+            } else {
+                narrow_seen = true;
+            }
+            let px = paint_offscreen(cw, ch, 96, &st);
+            let rc = status_version_rect(l.status, 96);
+            // The version is right-aligned in the inset rect, so its ink lives
+            // in the last `need` px of it: the left half belongs to the status
+            // text and must not be counted.
+            let left = (rc.right - need - 2).max(rc.left);
+            let mut ink = 0;
+            for y in rc.top..rc.bottom {
+                for x in left..rc.right {
+                    let i = ((y as usize) * cw as usize + x as usize) * 4;
+                    let sum = u32::from(px[i]) + u32::from(px[i + 1]) + u32::from(px[i + 2]);
+                    if sum > 3 * 0x90 {
+                        ink += 1;
+                    }
+                }
+            }
+            assert!(
+                ink > 0,
+                "{cw}x{ch}: the version {:?} paints no ink in its {}px inset rect {rc:?} \
+                 (bar {:?})",
+                app_version_short(),
+                need,
+                l.status
+            );
+        }
+        assert!(
+            wide_seen && narrow_seen,
+            "fixture: both bars painted (wide {wide_seen}, narrow {narrow_seen})"
+        );
     }
 
     /// The dark caption covers both DWM attributes: 20
