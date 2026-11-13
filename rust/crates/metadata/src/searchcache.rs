@@ -172,6 +172,21 @@ pub fn search_cache_put(key: &str, rows: &[Candidate], failed: &[String]) {
     let _ = cache.put_inner(key, rows, failed);
 }
 
+/// Drops every saved answer at `path`, so the picker re-asks the providers
+/// instead of replaying rows from disk. An absent file is a no-op, and the
+/// whole operation runs under the cache lock so a concurrent
+/// [`search_cache_put`] cannot recreate the file mid-clear. The path is
+/// explicit, exactly like the clear cores beside it: a caller with a custom
+/// location -- and every test -- never touches the real cache.
+pub fn search_cache_clear_at(path: &Path) -> Result<(), Error> {
+    let _guard = CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(Error::from(err)),
+    }
+}
+
 impl SearchCache {
     /// Loads the cache from [`default_path`].
     pub fn load() -> SearchCache {

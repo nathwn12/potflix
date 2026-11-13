@@ -259,9 +259,21 @@ pub fn clear_library_cache(
     (titles, records, err)
 }
 
-/// `clearMetadataCache` (`go\settings_sections.go:217`).
-pub fn clear_metadata_cache(meta_dir: &str) -> Result<(), repair::Error> {
-    metadata::cache::clear_cache(meta_dir).map_err(|e| repair::Error::new(e.message()))
+/// `clearMetadataCache` (`go\settings_sections.go:217`). The clear's SCOPE is
+/// every saved match the app holds, not one file: the metadata store AND the
+/// picker's own answer cache ([`metadata::search_cache_clear_at`]), which
+/// answers a typed search with no network at all. Clearing only the store left
+/// the picker replaying `search-cache.json`, so the owner's "Drop every saved
+/// match" visibly did nothing until that file happened to be replaced.
+///
+/// Both locations are explicit, so a test drives temp paths and can never
+/// delete the owner's real cache.
+pub fn clear_metadata_cache(
+    meta_dir: &str,
+    search_cache: &Path,
+) -> Result<(), repair::Error> {
+    metadata::cache::clear_cache(meta_dir).map_err(|e| repair::Error::new(e.message()))?;
+    metadata::search_cache_clear_at(search_cache).map_err(|e| repair::Error::new(e.message()))
 }
 
 /// `clearScanIndex` (`go\settings_sections.go:230`): drop the live handle first.
@@ -969,6 +981,45 @@ mod tests {
 
         let (_, _, err) = clear_library_cache(&meta_s, &idx);
         assert!(err.is_ok(), "missing index must not error");
+    }
+
+    /// `QA4-D1` (cache scope): "Clear metadata" promises "Drop every saved
+    /// match", and the picker's own saved answers are part of that set -- a
+    /// stored search answers a typed query with no network at all. Pre-fix the
+    /// action cleared the metadata store only, so `search-cache.json` kept
+    /// serving the very rows the user just cleared.
+    #[test]
+    fn clear_metadata_cache_drops_the_pickers_saved_answers() {
+        let scratch = Scratch::new("clear-meta-search");
+        let meta = scratch.path().join("meta");
+        std::fs::create_dir_all(&meta).unwrap();
+        let key = "the office|2005|series";
+        let path = scratch.path().join("search-cache.json");
+        let rows = [metadata::Candidate {
+            kind: metadata::Kind::SERIES,
+            title: "The Office (2005)".to_string(),
+            year: 2005,
+            provider: "tvmaze".to_string(),
+            provider_id: "tvmaze-office".to_string(),
+            poster: String::new(),
+            synopsis: String::new(),
+            genres: String::new(),
+            length: String::new(),
+            episode_count: 188,
+        }];
+        let mut cache = metadata::SearchCache::load_from(&path);
+        cache.put(key, &rows, &[]).expect("seed the picker cache");
+        assert!(
+            metadata::SearchCache::load_from(&path).get(key).is_some(),
+            "fixture: the picker cache holds one saved answer"
+        );
+
+        clear_metadata_cache(&meta.to_string_lossy(), &path).expect("ClearMetadataCache");
+
+        assert!(
+            metadata::SearchCache::load_from(&path).get(key).is_none(),
+            "the picker still serves its saved answer after Clear metadata"
+        );
     }
 
     #[test]

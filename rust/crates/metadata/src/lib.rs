@@ -102,7 +102,10 @@ pub use search::{
     Candidate, SearchOutcome, merge_same_work, pin_from_candidate, refresh, search, search_stream,
     search_stream_only, search_stream_only_with_log, search_stream_with_log,
 };
-pub use searchcache::{CachedSearch, SearchCache, search_cache_get, search_cache_put};
+pub use searchcache::{
+    CachedSearch, SearchCache, default_path as search_cache_path, search_cache_clear_at,
+    search_cache_get, search_cache_put,
+};
 
 /// The text of Go's `ErrLookupUnavailable` sentinel.
 pub const LOOKUP_UNAVAILABLE_MESSAGE: &str = "metadata lookup unavailable";

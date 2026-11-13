@@ -11700,7 +11700,10 @@ impl UiState {
     /// `onClearMetadata` (`go\settings_sections.go:594`), post-confirm half only:
     /// the modal `confirm_clear` runs OUTSIDE the `UI` guard in `run_blocking_ui`.
     fn apply_clear_metadata(&mut self) {
-        if let Err(e) = crate::settings::clear_metadata_cache(&crate::settings::metadata_dir()) {
+        if let Err(e) = crate::settings::clear_metadata_cache(
+            &crate::settings::metadata_dir(),
+            &metadata::search_cache_path(),
+        ) {
             app_logf(&format!("library: clear metadata failed: {}", e.message()));
             self.set_status_text(fit_scan_status(&format!(
                 "Clear metadata failed: {}",
@@ -17940,7 +17943,11 @@ mod tests {
         assert!(metadata::cache::cache_has(&meta_s, key));
 
         seed_index();
-        crate::settings::clear_metadata_cache(&meta_s).unwrap();
+        crate::settings::clear_metadata_cache(
+            &meta_s,
+            &base.join("search-cache.json"),
+        )
+        .unwrap();
         assert!(!metadata::cache::cache_has(&meta_s, key));
         assert_eq!(library::scanindex::load_scan_index(&idx_s).len(), 1);
     }
