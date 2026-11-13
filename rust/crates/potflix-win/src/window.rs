@@ -14490,15 +14490,12 @@ fn paint_card_view(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState) {
     fill_round_rect(hdc, l.object, COL_SURFACE, sc(R_PANEL));
     stroke_round_rect_w(hdc, l.object, COL_BORDER, sc(R_PANEL), sc(STROKE_HAIR));
     paint_cover(hdc, l.obj_cover, dpi, cover.as_ref());
-    match st.preview_object() {
-        Some((title, year, is_movie)) => {
+    match st.preview_hero_meta() {
+        Some((title, meta)) => {
             draw_ui_text(hdc, &title, l.obj_title, fmt_left, title_font, COL_TEXT);
-            let kind = if is_movie { "Film" } else { "Series" };
-            let meta = if year > 0 {
-                format!("{year} \u{b7} {kind}")
-            } else {
-                kind.to_string()
-            };
+            // The meta line is the narrow hero's own string: one formatter
+            // ([`hero_meta_for`] via [`UiState::preview_hero_meta`]), so the
+            // wide card cannot drop the runtime the narrow card shows.
             draw_ui_text(hdc, &meta, l.obj_meta, fmt_left, body_font, COL_MUTED);
             // The one sentence that decides whether this is a real presence or
             // a preview that was never sent. A local preview says so in words.
@@ -23287,6 +23284,84 @@ mod tests {
                 "surface {i} painted nothing at {x},{y}"
             );
         }
+    }
+
+    /// Defect (2026-11-13): the wide object card dropped the runtime. The
+    /// narrow card renders `2021 · Film · 2h 35m`; the wide card formatted
+    /// `"{year} · {kind}"` on its own and rendered `2021 · Film`. Both cards now
+    /// read the one [`hero_meta_for`] formatter, so the runtime reaches the wide
+    /// surface at the same size as the narrow one.
+    ///
+    /// Red when the wide meta ink stops at the bare year and kind: the same
+    /// record painted with its runtime and painted without it then draws the
+    /// same pixels, and the meta's rightmost ink column does not move.
+    #[test]
+    fn wide_object_card_paints_the_runtime_beside_the_year_and_kind() {
+        let (cw, ch) = (1180, 760);
+        let paint = |length: &str| {
+            let mut st = UiState::default();
+            st.cur_view = View::Card;
+            st.picker.candidates = vec![metadata::Candidate {
+                length: length.to_string(),
+                ..dune_movie()
+            }];
+            st.picker.searched = true;
+            assert!(st.select_candidate(0), "the row selects");
+            let l = compute_card_layout_state(
+                cw,
+                ch,
+                96,
+                &st.card_specs_state,
+                st.displayed_card_kind(),
+                st.preview_surface,
+                &st.card_layout_state(),
+            );
+            assert!(l.wide, "1180x760 is the wide workspace");
+            assert!(
+                l.obj_meta.right > l.obj_meta.left && l.obj_meta.bottom > l.obj_meta.top,
+                "the object card lays out its meta line: {:?}",
+                l.obj_meta
+            );
+            (paint_offscreen(cw, ch, 96, &st), l.obj_meta)
+        };
+        // Muted meta text on the card fill: ink is far brighter than either.
+        let rightmost_ink = |px: &[u8], rc: Rect| -> i32 {
+            let mut right = rc.left - 1;
+            for y in rc.top..rc.bottom {
+                for x in rc.left..rc.right {
+                    let i = ((y as usize) * cw as usize + x as usize) * 4;
+                    let sum = u32::from(px[i]) + u32::from(px[i + 1]) + u32::from(px[i + 2]);
+                    if sum > 3 * 0x90 {
+                        right = right.max(x);
+                    }
+                }
+            }
+            right
+        };
+
+        let (with_runtime, meta) = paint("2h 35m");
+        let (without_runtime, bare_meta) = paint("");
+        assert!(
+            r_eq(meta, bare_meta),
+            "fixture: the runtime changes no layout ({meta:?} vs {bare_meta:?})"
+        );
+        let right_with = rightmost_ink(&with_runtime, meta);
+        let right_without = rightmost_ink(&without_runtime, bare_meta);
+        assert!(
+            right_without >= meta.left,
+            "fixture: `2021 · Film` paints inside the meta rect"
+        );
+        assert!(
+            right_with > right_without,
+            "the wide card paints no runtime: meta ink ends at {right_with} with `2h 35m` \
+             and at {right_without} without it"
+        );
+        assert!(
+            right_with - right_without >= 20,
+            "the runtime is missing from the wide meta line: only {}px wider than the bare \
+             year and kind, which is not ` · 2h 35m`",
+            right_with - right_without
+        );
     }
 
     /// One payload, three surfaces: the header, details and state are the same
