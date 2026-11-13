@@ -164,6 +164,39 @@ pub fn ensure_async(url: &str) {
     });
 }
 
+/// The source and destination rects for one cover blit into `slot`: the image
+/// is scaled to COVER the slot and centre-cropped, so every source fills the
+/// tile edge to edge whatever its aspect ratio is -- a landscape still fills a
+/// portrait slot instead of letterboxing or being stretched out of shape.
+/// `src` is in image pixels, `dst` is `slot` itself. `None` on a degenerate
+/// image or slot (nothing to draw).
+#[must_use]
+pub fn cover_rects(img_w: u32, img_h: u32, slot: win32::Rect) -> Option<(win32::Rect, win32::Rect)> {
+    let slot_w = i64::from(slot.right - slot.left);
+    let slot_h = i64::from(slot.bottom - slot.top);
+    if img_w == 0 || img_h == 0 || slot_w <= 0 || slot_h <= 0 {
+        return None;
+    }
+    let (iw, ih) = (i64::from(img_w), i64::from(img_h));
+    // Compare the two aspects without floats: iw/ih > sw/sh <=> iw*sh > ih*sw.
+    // The wider side gives up its excess, so the source always carries the
+    // slot's aspect and the blit never has a band to leave behind.
+    let (src_w, src_h) = if iw * slot_h > ih * slot_w {
+        ((ih * slot_w + slot_h / 2) / slot_h, ih)
+    } else {
+        (iw, (iw * slot_h + slot_w / 2) / slot_w)
+    };
+    let src_w = src_w.clamp(1, iw);
+    let src_h = src_h.clamp(1, ih);
+    let src = win32::Rect {
+        left: ((iw - src_w) / 2) as i32,
+        top: ((ih - src_h) / 2) as i32,
+        right: ((iw + src_w) / 2) as i32,
+        bottom: ((ih + src_h) / 2) as i32,
+    };
+    Some((src, slot))
+}
+
 /// One decoded cover. The GDI+ image lives until the frame's paint returns;
 /// [`Drop`] disposes it exactly once.
 pub struct Cover {
@@ -221,15 +254,21 @@ impl Cover {
     }
 
     /// Draw the cover into `rc` through the live GDI+ context. A rounded clip
-    /// keeps the tile's corner shape; the image is scaled to fill the rect.
+    /// keeps the tile's corner shape; the image is scaled to COVER the rect and
+    /// centre-cropped (see [`cover_rects`]), so a landscape source fills a
+    /// portrait tile instead of letterboxing inside it.
     pub(crate) fn draw(&self, graphics: *mut gp::GpGraphics, rc: win32::Rect, radius: i32) {
         use gp::{
             CombineModeReplace, GdipAddPathArcI, GdipClosePathFigure, GdipCreatePath,
-            GdipDeletePath, GdipDrawImageRectI, GdipResetClip, GdipSetClipPath, FillModeAlternate,
+            GdipDeletePath, GdipDrawImageRectRectI, GdipResetClip, GdipSetClipPath,
+            FillModeAlternate, UnitPixel,
         };
-        if graphics.is_null() || rc.right <= rc.left || rc.bottom <= rc.top {
+        if graphics.is_null() {
             return;
         }
+        let Some((src, dst)) = cover_rects(self.width, self.height, rc) else {
+            return;
+        };
         let mut path: *mut gp::GpPath = std::ptr::null_mut();
         // SAFETY: every handle is created and released within this call.
         unsafe {
@@ -247,13 +286,21 @@ impl Cover {
                 GdipClosePathFigure(path);
                 GdipSetClipPath(graphics, path, CombineModeReplace);
             }
-            GdipDrawImageRectI(
+            GdipDrawImageRectRectI(
                 graphics,
                 self.image as *mut gp::GpImage,
-                rc.left,
-                rc.top,
-                rc.right - rc.left,
-                rc.bottom - rc.top,
+                dst.left,
+                dst.top,
+                dst.right - dst.left,
+                dst.bottom - dst.top,
+                src.left,
+                src.top,
+                src.right - src.left,
+                src.bottom - src.top,
+                UnitPixel,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
             );
             if r > 0 {
                 GdipResetClip(graphics);
@@ -282,6 +329,97 @@ mod tests {
         assert!(!is_http_url("file:///cover.png"));
         assert!(!is_http_url("https://"));
         assert!(!is_http_url(&format!("https://example.com/{}", "x".repeat(300))));
+    }
+
+    /// A cover must COVER its slot: the destination is the slot edge to edge
+    /// (no letterbox band, no stretch) and the source is a centre-biased crop
+    /// that carries the slot's own aspect. The result rows and the hero cover
+    /// both paint through this one geometry, so a landscape poster in a
+    /// portrait tile cannot read as a different shape than its neighbours.
+    #[test]
+    fn a_cover_crops_to_fill_its_slot_whatever_the_source_aspect() {
+        // The 32x48 result thumb: the portrait slot the rows use.
+        let slot = win32::Rect {
+            left: 10,
+            top: 20,
+            right: 42,
+            bottom: 68,
+        };
+        let slot_ratio = 32.0 / 48.0;
+
+        // A 16:9 still in a portrait slot: crop the sides, never letterbox.
+        let (src, dst) = cover_rects(1600, 900, slot).expect("a 16:9 cover has rects");
+        assert_eq!(
+            (dst.left, dst.top, dst.right, dst.bottom),
+            (10, 20, 42, 68),
+            "the tile is covered edge to edge, so no band can show"
+        );
+        assert_eq!(
+            (src.top, src.bottom),
+            (0, 900),
+            "a wide source keeps its full height and gives up the sides"
+        );
+        assert!(
+            (src.left - (1600 - src.right)).abs() <= 1,
+            "the crop is centre-biased: {}..{} of 1600",
+            src.left,
+            src.right
+        );
+        let src_ratio = f64::from(src.right - src.left) / f64::from(src.bottom - src.top);
+        assert!(
+            (src_ratio - slot_ratio).abs() < 0.02,
+            "the crop carries the slot's aspect {slot_ratio:.3}, got {src_ratio:.3}"
+        );
+
+        // A portrait poster (the common case) into the same slot: full width,
+        // crop the height.
+        for (w, h) in [(2000u32, 3000u32), (913, 1426)] {
+            let (src, dst) = cover_rects(w, h, slot).expect("portrait cover has rects");
+            assert_eq!((dst.right - dst.left, dst.bottom - dst.top), (32, 48));
+            assert_eq!(
+                (src.left, src.right),
+                (0, w as i32),
+                "a tall source keeps its full width"
+            );
+            assert!(
+                (src.top - (h as i32 - src.bottom)).abs() <= 1,
+                "the crop is centre-biased: {}..{} of {h}",
+                src.top,
+                src.bottom
+            );
+            let src_ratio = f64::from(src.right - src.left) / f64::from(src.bottom - src.top);
+            assert!(
+                (src_ratio - slot_ratio).abs() < 0.02,
+                "{w}x{h} crop carries the slot's aspect {slot_ratio:.3}, got {src_ratio:.3}"
+            );
+        }
+
+        // A square source is wider than this slot, so it gives up the sides and
+        // keeps its full height -- the same rule, not a special case.
+        let (src, _) = cover_rects(1000, 1000, slot).expect("square cover has rects");
+        assert_eq!((src.top, src.bottom), (0, 1000), "a square keeps its height");
+        assert!(
+            (src.left - (1000 - src.right)).abs() <= 1,
+            "the crop is centre-biased: {}..{} of 1000",
+            src.left,
+            src.right
+        );
+
+        // Degenerate input draws nothing rather than inventing a rect.
+        assert!(cover_rects(0, 900, slot).is_none());
+        assert!(
+            cover_rects(
+                1600,
+                900,
+                win32::Rect {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 48
+                }
+            )
+            .is_none()
+        );
     }
 
     #[test]

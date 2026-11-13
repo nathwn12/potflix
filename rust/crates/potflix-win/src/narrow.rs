@@ -313,6 +313,18 @@ pub fn hero(
 // `window::paint_narrow_card` (via the results panel loop).
 // ---------------------------------------------------------------------------
 
+/// The 32x48 cover thumb of one result row. Pure, so the paint and the test
+/// that proves the thumb fits inside the row read the same rect.
+pub fn result_row_thumb(rc: Rect, dpi: i32) -> Rect {
+    let sc = |v: i32| scale_px(dpi, v);
+    Rect {
+        left: rc.left + sc(SP_3),
+        top: rc.top + sc(SP_1),
+        right: rc.left + sc(SP_3) + sc(32),
+        bottom: rc.top + sc(SP_1) + sc(48),
+    }
+}
+
 /// Paint one 56px result row: 32x48 cover thumb (the decoded poster when its
 /// bytes are cached, else the empty tile), 13 semibold title, 12 muted
 /// record-only meta. Selected gets the hover fill plus the accent left bar.
@@ -351,12 +363,7 @@ pub fn result_row(
     }
     // 32x48 cover thumb: the decoded poster when cached, else the empty
     // tile. Same tile painter as the hero cover, so rows and hero agree.
-    let thumb = Rect {
-        left: rc.left + sc(SP_3),
-        top: rc.top + sc(SP_1),
-        right: rc.left + sc(SP_3) + sc(32),
-        bottom: rc.top + sc(SP_1) + sc(48),
-    };
+    let thumb = result_row_thumb(rc, dpi);
     super::paint_cover(hdc, thumb, dpi, cover);
     let title_font = crate::brand::ui(sc(FS_ROW_TITLE), crate::brand::UI_WEIGHT);
     let meta_font = crate::brand::ui(sc(FS_HERO_META), crate::brand::UI_WEIGHT);

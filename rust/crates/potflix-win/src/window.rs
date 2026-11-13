@@ -13776,7 +13776,7 @@ fn picker_capacity(l: &CardLayout, dpi: i32) -> usize {
         return 0;
     }
     let top = l.picker_results.top + sc(24);
-    let row_h = sc(44);
+    let row_h = sc(RESULT_ROW_H_L);
     let action_rows = l
         .btns
         .iter()
@@ -13814,7 +13814,7 @@ fn picker_row_rects(l: &CardLayout, count: usize, top: usize, dpi: i32) -> Vec<R
     let first = top;
     let last = (first + capacity).min(count);
     let base = l.picker_results.top + sc(24);
-    let row_h = sc(44);
+    let row_h = sc(RESULT_ROW_H_L);
     (first..last)
         .enumerate()
         .map(|(pos, _)| Rect {
@@ -22487,6 +22487,51 @@ mod tests {
             COL_BG,
             "the result overlay was not painted over the stage"
         );
+    }
+
+    /// The result row must be tall enough for the cover thumb it paints. The
+    /// thumb is a fixed 32x48; a row shorter than that lets the NEXT row's
+    /// fill paint over the previous thumb's bottom edge, so the tile loses its
+    /// rounded bottom clip and its artwork is cut while the last row's tile is
+    /// whole -- one column, two shapes, which reads as a rendering bug.
+    #[test]
+    fn every_picker_row_contains_its_cover_thumb() {
+        for dpi in [96, 120, 144, 192] {
+            let l = compute_card_layout_state(
+                462 * dpi / 96,
+                712 * dpi / 96,
+                dpi,
+                &CardSpecs::default(),
+                CardKind::Series,
+                PreviewSurface::default(),
+                &CardLayoutState {
+                    advanced: false,
+                    has_selection: true,
+                    can_apply: true,
+                    playing: true,
+                    filter: crate::search::KindFilter::All,
+                },
+            );
+            let rows = picker_row_rects(&l, 3, 0, dpi);
+            assert_eq!(rows.len(), 3, "dpi {dpi}: the three rows are all visible");
+            for (i, rc) in rows.iter().enumerate() {
+                let t = narrow::result_row_thumb(*rc, dpi);
+                assert!(
+                    t.top >= rc.top && t.right <= rc.right,
+                    "dpi {dpi} row {i}: thumb {:?} starts inside the row {rc:?}",
+                    t
+                );
+                assert!(
+                    t.bottom <= rc.bottom,
+                    "dpi {dpi} row {i}: the thumb bottom {} overflows the row bottom {} \
+                     (row height {}, thumb height {})",
+                    t.bottom,
+                    rc.bottom,
+                    rc.bottom - rc.top,
+                    t.bottom - t.top
+                );
+            }
+        }
     }
 
     /// With Advanced open the picker viewport holds one row at the default
