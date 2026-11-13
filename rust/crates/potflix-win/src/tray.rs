@@ -104,6 +104,19 @@ static TASKBAR_CREATED_MSG: AtomicU32 = AtomicU32::new(0);
 /// instead of growing a second one.
 static TRAY_ICON: AtomicUsize = AtomicUsize::new(0);
 
+/// Whether `Shell_NotifyIcon(NIM_ADD)` actually installed the icon, i.e.
+/// whether the tray menu -- the only way back into a parked window -- exists.
+/// [`create_tray_window`] records the add result here.
+static TRAY_ADDED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a notify icon is installed, so a window close has somewhere to park
+/// and a way back. `false` means the window is the process's only way in AND
+/// its only way out.
+#[must_use]
+pub fn tray_icon_added() -> bool {
+    TRAY_ADDED.load(Ordering::SeqCst)
+}
+
 /// The registered `TaskbarCreated` message id, or 0 when the tray window has
 /// not been created yet (or registration failed, in which case the handler
 /// below never fires).
@@ -131,6 +144,7 @@ pub fn readd_notify_icon(hwnd: HWND) -> bool {
         stored
     };
     let ok = shell_notify_icon(NIM_ADD, &make_notify_icon_data(hwnd, icon));
+    TRAY_ADDED.store(ok, Ordering::SeqCst);
     log_line(&format!("notify-icon add result={ok} (TaskbarCreated re-add)"));
     ok
 }
@@ -364,6 +378,7 @@ pub fn create_tray_window() -> Result<TrayWindow, TrayError> {
     let icon = load_embedded_icon();
     let added = shell_notify_icon(NIM_ADD, &make_notify_icon_data(hwnd, icon));
     TRAY_ICON.store(icon as usize, Ordering::SeqCst);
+    TRAY_ADDED.store(added, Ordering::SeqCst);
     // The shell restart broadcast: a nonzero id after this call; 0 means the
     // handler below stays inert (no icon to re-add into anyway).
     let name = utf16_z("TaskbarCreated");

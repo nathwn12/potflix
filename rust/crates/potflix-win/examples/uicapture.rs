@@ -754,8 +754,9 @@ fn mode_hold(args: &[String]) -> Result<(), String> {
         win32::UpdateWindow(hwnd);
     }
     // Pump this thread's queue so the window is live and responsive; the runner
-    // posts WM_CLOSE (which parks the window, never destroys it) and then ends
-    // the process.
+    // posts WM_CLOSE and then ends the process. No tray icon exists on this
+    // hidden desktop, so WM_CLOSE quits the process instead of parking the
+    // window (the tray-less branch of `main_wnd_proc`).
     let end = std::time::Instant::now() + std::time::Duration::from_millis(hold_ms);
     while std::time::Instant::now() < end {
         pump(100);

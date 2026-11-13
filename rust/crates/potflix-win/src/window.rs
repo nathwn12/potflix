@@ -15154,9 +15154,24 @@ pub unsafe extern "system" fn main_wnd_proc(
 ) -> isize {
     match msg {
         crate::win32::WM_CLOSE => {
-            // NEVER DestroyWindow: closing parks the window back to the tray.
-            unsafe {
-                crate::win32::ShowWindow(hwnd, crate::win32::SW_HIDE);
+            // Closing parks the window back to the tray -- but only while there
+            // IS a tray icon to come back from. A tray-less process (the
+            // notify-icon add failed) keeps the window as its only way in and
+            // its only way out, so hiding it there is a zombie: no icon, no
+            // window, and the single-instance port still held, so a relaunch
+            // answers "already running" and exits. `QA7-G1`.
+            if crate::tray::tray_icon_added() {
+                unsafe {
+                    crate::win32::ShowWindow(hwnd, crate::win32::SW_HIDE);
+                }
+            } else {
+                // Quit the way the tray Exit does: the flag stops the poll loop
+                // and the quit message ends the message loop, then the app tail
+                // clears, deletes the icon and closes Discord in order.
+                crate::tray::request_quit();
+                unsafe {
+                    crate::win32::DestroyWindow(hwnd);
+                }
             }
             return 0;
         }
