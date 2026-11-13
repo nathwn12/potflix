@@ -5190,6 +5190,36 @@ pub fn fix_match_no_target_reason(path: &str, is_movie: bool) -> Option<&'static
     None
 }
 
+/// The media extensions the player opens. A filename's extension is never part
+/// of its title, so it is never a search token either.
+const MEDIA_EXTENSIONS: [&str; 10] = [
+    "wav", "mp3", "mp4", "mkv", "avi", "flac", "m4a", "webm", "mov", "wmv",
+];
+
+/// `name` without a trailing media extension (`.wav`, `.MKV`), or `name`
+/// unchanged when its last dot does not carry one of [`MEDIA_EXTENSIONS`]. Only
+/// the listed extensions are stripped, so a parenthesised tail (`(Live)`) and a
+/// dotted title survive.
+#[must_use]
+fn strip_media_extension(name: &str) -> &str {
+    let Some((stem, ext)) = name.rsplit_once('.') else {
+        return name;
+    };
+    if !stem.is_empty() && MEDIA_EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)) {
+        stem
+    } else {
+        name
+    }
+}
+
+/// The media name inside the player's window title: the file it opened, without
+/// the ` - PotPlayer` suffix. The suffix constant is not reachable from this
+/// crate's deps, so the value is spelled here once.
+#[must_use]
+fn media_name(raw_title: &str) -> &str {
+    raw_title.strip_suffix(" - PotPlayer").unwrap_or(raw_title)
+}
+
 /// The name field's starting text: the folder-aware query for what's playing,
 /// the same [`metadata_core::context::resolve_query`] merge the repair path
 /// and the card path use.
@@ -5215,9 +5245,14 @@ pub fn fix_match_no_target_reason(path: &str, is_movie: bool) -> Option<&'static
 /// parse of the raw window title, and then to the card path's titleclean pass.
 /// [`metadata_core::context::context_from_path`] yields no show for a bare
 /// filename, so a movie with no folder context still prefills its own title.
+///
+/// A trailing media extension is not part of the title: `Night of the Living
+/// Dead (1968).wav` seeds `Night of the Living Dead (1968)`, never a query with
+/// `wav` spent on it (see [`strip_media_extension`]).
 #[must_use]
 pub fn fix_match_prefill_name(raw_title: &str, path: &str) -> String {
-    let q = metadata_core::context::resolve_query(raw_title, path);
+    let media = strip_media_extension(media_name(raw_title));
+    let q = metadata_core::context::resolve_query(media, path);
     if q.kind == Kind::SERIES {
         let (show, _) = metadata_core::context::context_from_path(path);
         let folder = if show.trim().is_empty() {
@@ -5584,10 +5619,10 @@ pub fn fix_match_use_text_allowed(no_results: bool, busy: bool) -> bool {
 /// The strip is the card path's own: `presence` strips `player::window::SUFFIX`
 /// for the idle check and `metadata_core::parse::parse_raw` strips its
 /// `POT_PLAYER_SUFFIX` twin for the prefill — neither constant is reachable
-/// from this crate's deps, so the value is spelled at this one call site.
+/// from this crate's deps, so the value is spelled once in [`media_name`].
 #[must_use]
 pub fn fix_match_sub_line(raw_title: &str) -> String {
-    let media = raw_title.strip_suffix(" - PotPlayer").unwrap_or(raw_title);
+    let media = media_name(raw_title);
     format!("Matching \"{media}\"")
 }
 
@@ -19956,6 +19991,51 @@ mod tests {
         );
         let raw = "Severance.S01E01.1080p.WEBRip.DS4K.AV1.DDP.5.1-dAV1nci.mkv - PotPlayer";
         assert_eq!(fix_match_prefill_name(raw, &path), "Severance");
+    }
+
+    /// Defect (2026-11-13): the picker's prefill kept the media file extension
+    /// as a search token. With `Night of the Living Dead (1968).wav` playing,
+    /// the field seeded `Night of the Living Dead wav (1968)` -- 35 characters,
+    /// one of them a word no provider carries. A trailing media extension is
+    /// stripped before the query is built, so the field seeds the 31-character
+    /// title instead.
+    #[test]
+    fn fix_match_prefill_drops_the_media_extension() {
+        let prefill = fix_match_prefill_name("Night of the Living Dead (1968).wav - PotPlayer", "");
+        assert_eq!(prefill, "Night of the Living Dead (1968)");
+        assert_eq!(
+            prefill.chars().count(),
+            31,
+            "the extension is not a search token: {prefill:?}"
+        );
+        // The same file without the player's window suffix seeds one query.
+        assert_eq!(
+            fix_match_prefill_name("Night of the Living Dead (1968).wav", ""),
+            prefill
+        );
+        // Every extension the player opens, in any case.
+        for ext in [
+            "wav", "mp3", "mp4", "mkv", "avi", "flac", "m4a", "webm", "mov", "wmv", "WAV", "Mkv",
+        ] {
+            let raw = format!("Night of the Living Dead (1968).{ext} - PotPlayer");
+            assert_eq!(
+                fix_match_prefill_name(&raw, ""),
+                prefill,
+                "extension {ext:?} leaked into the query"
+            );
+        }
+        // A parenthesised tail is the title's own, never an extension: the
+        // strip must leave it alone and the query must not change.
+        assert_eq!(
+            fix_match_prefill_name("Live at the Roxy (Live) - PotPlayer", ""),
+            "Live at the Roxy",
+            "a parenthesised tail is not an extension"
+        );
+        assert_eq!(
+            fix_match_prefill_name("Live at the Roxy (Live).mp4 - PotPlayer", ""),
+            fix_match_prefill_name("Live at the Roxy (Live) - PotPlayer", ""),
+            "stripping the extension must not touch a parenthesised tail"
+        );
     }
 
     #[test]
