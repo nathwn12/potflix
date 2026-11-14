@@ -1,10 +1,14 @@
 <p align="center">
   <img src="assets/icon.svg" width="120" alt="Potflix icon" />
 </p>
+<h1 align="center">Potflix</h1>
+<p align="center"><strong>Show PotPlayer media in Discord Rich Presence - Rust.</strong></p>
 
-# Potflix
-
-Shows your current PotPlayer track as a Discord Rich Presence card. Built for Windows users who play media in PotPlayer.
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/nathwn12/potflix" alt="License" /></a>
+  <img src="https://img.shields.io/github/languages/top/nathwn12/potflix" alt="Language" />
+  <img src="https://img.shields.io/badge/platform-windows--64bit-2b3137?logo=windows&logoColor=white" alt="Platform" />
+</p>
 
 ## Install
 
@@ -31,9 +35,7 @@ Discord shows `Watching <title>` while media plays. Closing the window parks the
 
 | Key | Default | Effect |
 | --- | --- | --- |
-| `POTFLIX_CLIENT_ID` env or `client-id.txt` beside the exe | built-in ID | Discord app name and artwork |
-| `--minimized` | off | Start silent in the tray, for autostart |
-| `--selftest` | off | Headless wiring proof; needs no PotPlayer or Discord |
+| `POTFLIX_CLIENT_ID`, `client-id.txt`, or `config.properties` | built-in ID | Discord app name and artwork; files are checked beside the exe, then in the current directory |
 
 ## Screenshots
 
@@ -52,12 +54,18 @@ Runs clippy, the workspace tests, the title-parity step, the build, and the head
 
 ## Status
 
-Experimental and still moving. It works today, but it is not a finished
-product: interfaces may change, features may be improved or removed, and a
-release can break the one before it. This is maintained by one person, not a
-team. If it breaks, open an issue with the command you ran and what you saw.
+**Unverified** - as-is, use at your own risk.
 
 ## Links
 
 - [Releases](https://github.com/nathwn12/potflix/releases)
+- [Upstream project](https://github.com/ayunami2000/PotPlayer-DiscordRPC)
 - [MIT](LICENSE)
+
+<!-- nathwn12 house footer: identical in every repo. Do not edit. -->
+<p align="center">
+  <a href="https://github.com/nathwn12"><img src="assets/signature.svg" width="96" alt="nathwn12" /></a>
+</p>
+<p align="center">
+  <sub>Built by <a href="https://github.com/nathwn12">nathwn12</a> · <a href="https://github.com/nathwn12?tab=repositories">All projects</a></sub>
+</p>

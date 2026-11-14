@@ -24,7 +24,7 @@ Checklist, in order. Each step names what it proves.
     Proves `dist\Potflix-Setup-X.Y.Z.exe` builds from the tagged exe version.
 11. Hash installer and exe: `Get-FileHash dist\Potflix-Setup-X.Y.Z.exe`, `Get-FileHash dist\potflix.exe`.
     Proves both artifacts have recorded hashes before upload.
-12. Publish both assets to the GitHub release: `node C:\Users\nathan\.config\opencode\scripts\gh.mjs release-create vX.Y.Z dist\Potflix-Setup-X.Y.Z.exe dist\potflix.exe --title "Potflix X.Y.Z" --notes-file <notes>`.
+12. Publish both assets to the GitHub release: `gh release create vX.Y.Z dist\Potflix-Setup-X.Y.Z.exe dist\potflix.exe --title "Potflix X.Y.Z" --notes-file <notes>`.
     Proves the installer and the exe are the downloadable release.
 13. Silent install: run `dist\Potflix-Setup-X.Y.Z.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL` in a clean location.
     Proves the installer installs with no prompts.
