@@ -4,9 +4,9 @@ Deep technical material for the Rust implementation: crate layout, the parity
 contract, verification, Windows-specific notes, dependencies, intent and
 limitations, and the deliberate deviations from the original Java flow carried
 over from the retired Go era.
-The user-facing manual is [README.md](./README.md).
+The user-facing manual is [README.md](../../README.md).
 
-The behaviour in [README.md](./README.md) `## Features` is the app's
+The behaviour in [README.md](../../README.md) `## Features` is the app's
 **intended contract**, carried over from the retired Go reference into the
 Rust implementation. The Rust app builds and its headless self-test passes (see
 **Verification**, below), but those gates prove wiring and the title cleaner
@@ -76,7 +76,7 @@ already running, built exe present), under which nothing was changed.
 This implementation's core claim: the Rust title cleaner reproduces the retired Go
 implementation's output **byte-for-byte**. On each corpus the Rust binary is
 run from the repo root and its TSV output must hash identically to the
-committed contract, [`rust\parity-golden.sha256`](./rust/parity-golden.sha256)
+committed contract, [`rust\parity-golden.sha256`](../../rust/parity-golden.sha256)
 — a 64-hex SHA-256 per corpus, nothing else.
 
 The oracle is now FROZEN: its Go reproducer is gone, so the hashes can never
@@ -204,7 +204,7 @@ providers are dead (Jikan discontinued 2026-10-01, iTunes leg replaced by
 Cinemeta) — an unknown host is ungated (`ratelimit.rs:14-16`), so dead rows
 cost nothing and the table stays a faithful port.
 
-For each source's licence, see [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md) —
+For each source's licence, see [THIRD-PARTY-NOTICES.md](../../THIRD-PARTY-NOTICES.md) —
 one authority, one place; the terms are not restated here.
 
 ## Deviations from the original Java flow

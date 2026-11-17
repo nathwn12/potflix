@@ -32,7 +32,7 @@ DisableProgramGroupPage=yes
 
 [Files]
 Source: "..\dist\potflix.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\client-id.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\docs\client-id.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
