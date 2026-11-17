@@ -2,7 +2,7 @@ version: 2
 # Free on a public repository.
 updates:
   - package-ecosystem: "cargo"
-    directory: "/"
+    directory: "/rust"
     schedule:
       interval: "weekly"
       day: "monday"
