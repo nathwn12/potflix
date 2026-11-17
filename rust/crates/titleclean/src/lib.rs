@@ -2,7 +2,7 @@
 //!
 //! Dependency-free port of the repo's Java media-title cleaner
 //! (`me.potflix.rpc.Main.clean`); see `go\internal\titleclean\README.md` and
-//! `DECISION.md` (byte-identical to the Java baseline on the full 2604-line
+//! `docs\history\DECISION.md` (byte-identical to the Java baseline on the full 2604-line
 //! corpus and holdout, 0 diffs).
 //!
 //! Module split follows the Go files: [`clean`] is `clean.go`, [`javacompat`]
