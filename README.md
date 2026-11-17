@@ -1,71 +1,76 @@
 <p align="center">
   <img src="assets/icon.svg" width="120" alt="Potflix icon" />
 </p>
+
 <h1 align="center">Potflix</h1>
-<p align="center"><strong>Show PotPlayer media in Discord Rich Presence - Rust.</strong></p>
+
+<p align="center"><strong>Show what PotPlayer is playing on your Discord profile, with matched artwork and episode details.</strong></p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/nathwn12/potflix" alt="License" /></a>
-  <img src="https://img.shields.io/github/languages/top/nathwn12/potflix" alt="Language" />
-  <img src="https://img.shields.io/badge/platform-windows--64bit-2b3137?logo=windows&logoColor=white" alt="Platform" />
+  <img src="assets/screenshot-card.png" width="420" alt="Potflix showing a matched card for Dune: Part Two while PotPlayer plays" />
 </p>
 
 ## Install
 
-Needs Windows, PotPlayer, the Discord desktop app, and a Rust toolchain with `cargo`. Build from source:
+Download `Potflix-Setup-*.exe` from the [latest release](https://github.com/nathwn12/potflix/releases/latest) and run it. It installs for the current user with no admin prompt.
 
-```powershell
-git clone https://github.com/nathwn12/potflix.git
-cd potflix
-powershell -ExecutionPolicy Bypass -File tools\rust-build.ps1
-.\dist\potflix.exe
-```
+`potflix.exe` is the portable build: run it from any folder.
 
-## Usage
+## Use it
 
-Run the exe and play media in PotPlayer:
+Start PotPlayer and play something. Potflix shows `Watching <title>` on your Discord profile, with the poster, year, runtime, or episode line when a provider matches the title.
 
-```powershell
-.\dist\potflix.exe
-```
+- **Fix match** opens the search when the automatic match is wrong; pick a result and apply it to the playing title.
+- Closing the window parks the app in the tray; right-click the tray icon to open or exit.
+- The gear icon in the title bar opens Settings.
 
-Discord shows `Watching <title>` while media plays. Closing the window parks the app in the tray; right-click the tray icon to open or exit.
+## Configure it
 
-## Configuration
-
-| Key | Default | Effect |
+| Setting | Default | Notes |
 | --- | --- | --- |
-| `POTFLIX_CLIENT_ID`, `client-id.txt`, or `config.properties` | built-in ID | Discord app name and artwork; files are checked beside the exe, then in the current directory |
+| Discord connection | On | Session toggle; back on at the next launch |
+| Close to tray | On | Session toggle; back on at the next launch |
+| Run at startup | Off | Adds a per-user startup entry |
+| Theme | AMOLED | AMOLED or Dark |
+| Scan speed | Turbo | Turbo, Balanced, or Gentle provider rate |
+| Library folders | None | Watched media folders |
+| Card lines | Per kind | Details and State presets for series and movies |
 
-## Screenshots
+Use your own Discord application id for your own app name and artwork:
 
-<p>
-  <img src="assets/screenshot-card.png" width="420" alt="Card view" />
-  <img src="assets/screenshot-settings.png" width="420" alt="Settings view" />
-</p>
+```powershell
+# the env var wins over client-id.txt and config.properties
+$env:POTFLIX_CLIENT_ID = "123456789012345678"
+.\potflix.exe
+```
+
+To keep the id, put it in `client-id.txt` beside `potflix.exe`. Resolution order is the env var, then the files beside the exe, then the files in the current directory, with `client-id.txt` before `config.properties` in each.
+
+## Requirements
+
+- Windows, 64-bit
+- PotPlayer running with media playing
+- The Discord desktop app running and signed in
+- To build: a stable Rust toolchain with `cargo`, and PowerShell
 
 ## Development
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File tools\rust-build.ps1
 powershell -ExecutionPolicy Bypass -File tools\check.ps1 -Build -Selftest
 ```
 
-Runs clippy, the workspace tests, the title-parity step, the build, and the headless selftest.
+The first builds `dist\potflix.exe` from the Rust workspace with `--locked`. The second runs clippy with warnings as errors, the workspace tests, the title-cleaner parity check against the frozen oracle, the build, and the headless `--selftest`.
 
 ## Status
 
-**Unverified** - as-is, use at your own risk.
+**Unverified** — as-is, use at your own risk.
 
 ## Links
 
+- [Issues](https://github.com/nathwn12/potflix/issues)
 - [Releases](https://github.com/nathwn12/potflix/releases)
-- [Upstream project](https://github.com/ayunami2000/PotPlayer-DiscordRPC)
+- [Release procedure](docs/RELEASE.md)
+- [Third-party notices](THIRD-PARTY-NOTICES.md)
+- [Upstream: PotPlayer-DiscordRPC by ayunami2000](https://github.com/ayunami2000/PotPlayer-DiscordRPC)
 - [MIT](LICENSE)
-
-<!-- nathwn12 house footer: identical in every repo. Do not edit. -->
-<p align="center">
-  <a href="https://github.com/nathwn12"><img src="assets/signature.svg" width="96" alt="nathwn12" /></a>
-</p>
-<p align="center">
-  <sub>Built by <a href="https://github.com/nathwn12">nathwn12</a> · <a href="https://github.com/nathwn12?tab=repositories">All projects</a></sub>
-</p>
