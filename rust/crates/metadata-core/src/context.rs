@@ -151,10 +151,7 @@ pub(crate) fn is_generic_folder(name: &str) -> bool {
         return true;
     }
     let t = clean(name).title;
-    if !t.is_empty() && (GENERIC_FOLDER_RE.is_match(&t) || extras_word_matches(&t)) {
-        return true;
-    }
-    false
+    !t.is_empty() && (GENERIC_FOLDER_RE.is_match(&t) || extras_word_matches(&t))
 }
 
 /// `underExtrasFolder` reports whether any folder on the path is an extras leaf
