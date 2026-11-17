@@ -2,62 +2,75 @@
   <img src="assets/icon.svg" width="120" alt="Potflix icon" />
 </p>
 
-# Potflix
+<h1 align="center">Potflix</h1>
 
-Shows your current PotPlayer track as a Discord Rich Presence card. Built for Windows users who play media in PotPlayer.
+<p align="center"><strong>Show what PotPlayer is playing on your Discord profile, with matched artwork and episode details.</strong></p>
+
+<p align="center">
+  <img src="assets/screenshot-card.png" width="420" alt="Potflix showing a matched card for Dune: Part Two while PotPlayer plays" />
+</p>
 
 ## Install
 
-Needs Windows, PotPlayer, the Discord desktop app, and a Rust toolchain with `cargo`. Build from source:
+Download `Potflix-Setup-*.exe` from the [latest release](https://github.com/nathwn12/potflix/releases/latest) and run it. It installs for the current user with no admin prompt.
 
-```powershell
-git clone https://github.com/nathwn12/potflix.git
-cd potflix
-powershell -ExecutionPolicy Bypass -File tools\rust-build.ps1
-.\dist\potflix.exe
-```
+`potflix.exe` is the portable build: run it from any folder.
 
-## Usage
+## Use it
 
-Run the exe and play media in PotPlayer:
+Start PotPlayer and play something. Potflix shows `Watching <title>` on your Discord profile, with the poster, year, runtime, or episode line when a provider matches the title.
 
-```powershell
-.\dist\potflix.exe
-```
+- **Fix match** opens the search when the automatic match is wrong; pick a result and apply it to the playing title.
+- Closing the window parks the app in the tray; right-click the tray icon to open or exit.
+- The gear icon in the title bar opens Settings.
 
-Discord shows `Watching <title>` while media plays. Closing the window parks the app in the tray; right-click the tray icon to open or exit.
+## Configure it
 
-## Configuration
-
-| Key | Default | Effect |
+| Setting | Default | Notes |
 | --- | --- | --- |
-| `POTFLIX_CLIENT_ID` env or `client-id.txt` beside the exe | built-in ID | Discord app name and artwork |
-| `--minimized` | off | Start silent in the tray, for autostart |
-| `--selftest` | off | Headless wiring proof; needs no PotPlayer or Discord |
+| Discord connection | On | Session toggle; back on at the next launch |
+| Close to tray | On | Session toggle; back on at the next launch |
+| Run at startup | Off | Adds a per-user startup entry |
+| Theme | AMOLED | AMOLED or Dark |
+| Scan speed | Turbo | Turbo, Balanced, or Gentle provider rate |
+| Library folders | None | Watched media folders |
+| Card lines | Per kind | Details and State presets for series and movies |
 
-## Screenshots
+Use your own Discord application id for your own app name and artwork:
 
-<p>
-  <img src="assets/screenshot-card.png" width="420" alt="Card view" />
-  <img src="assets/screenshot-settings.png" width="420" alt="Settings view" />
-</p>
+```powershell
+# the env var wins over client-id.txt and config.properties
+$env:POTFLIX_CLIENT_ID = "123456789012345678"
+.\potflix.exe
+```
+
+To keep the id, put it in `client-id.txt` beside `potflix.exe`. Resolution order is the env var, then the files beside the exe, then the files in the current directory, with `client-id.txt` before `config.properties` in each.
+
+## Requirements
+
+- Windows, 64-bit
+- PotPlayer running with media playing
+- The Discord desktop app running and signed in
+- To build: a stable Rust toolchain with `cargo`, and PowerShell
 
 ## Development
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File tools\rust-build.ps1
 powershell -ExecutionPolicy Bypass -File tools\check.ps1 -Build -Selftest
 ```
 
-Runs clippy, the workspace tests, the title-parity step, the build, and the headless selftest.
+The first builds `dist\potflix.exe` from the Rust workspace with `--locked`. The second runs clippy with warnings as errors, the workspace tests, the title-cleaner parity check against the frozen oracle, the build, and the headless `--selftest`.
 
 ## Status
 
-Experimental and still moving. It works today, but it is not a finished
-product: interfaces may change, features may be improved or removed, and a
-release can break the one before it. This is maintained by one person, not a
-team. If it breaks, open an issue with the command you ran and what you saw.
+**Unverified** — as-is, use at your own risk.
 
 ## Links
 
+- [Issues](https://github.com/nathwn12/potflix/issues)
 - [Releases](https://github.com/nathwn12/potflix/releases)
+- [Release procedure](docs/RELEASE.md)
+- [Third-party notices](THIRD-PARTY-NOTICES.md)
+- [Upstream: PotPlayer-DiscordRPC by ayunami2000](https://github.com/ayunami2000/PotPlayer-DiscordRPC)
 - [MIT](LICENSE)
