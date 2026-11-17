@@ -4,6 +4,7 @@
 # `working-directory: rust` because the workspace manifest lives in `rust/`).
 # Parity is deliberately absent: its corpora are gitignored, so the parity
 # step fails closed in a fresh clone and runs only in the local gate.
+# Docs-only change (*.md, docs/, LICEN[CS]E) keeps the required check green in seconds and runs no build.
 name: ci
 on:
   pull_request:
@@ -13,8 +14,35 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detect a docs-only change
+        id: scope
+        shell: bash
+        run: |
+          docs='^(.*\.md|docs/.*|LICEN[CS]E(\.md)?)$'
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+            changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          elif [ "${{ github.event_name }}" = "push" ] && [ -n "${{ github.event.before }}" ]; then
+            changed=$(git diff --name-only "${{ github.event.before }}" HEAD || true)
+          else
+            changed=$(git ls-files)
+          fi
+          if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -qvE "$docs"; then
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.scope.outputs.code == 'true'
       - run: cargo clippy --workspace --all-targets -- -D warnings
+        if: steps.scope.outputs.code == 'true'
         working-directory: rust
       - run: cargo test --workspace --release --locked
+        if: steps.scope.outputs.code == 'true'
         working-directory: rust
+      - name: Scope
+        if: always()
+        run: |
+          echo "scope: ${{ steps.scope.outputs.code == 'true' && 'code changed - the full gate ran' || 'docs-only - build skipped, the check stays green' }}"
