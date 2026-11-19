@@ -1,25 +1,3 @@
-//! `bundle` -- mirrors the Go package `go\internal\bundle`.
-//!
-//! Exports, imports, counts and clears Potflix metadata cache bundles.
-//!
-//! The live cache is not a directory of files any more: the `metadata` crate
-//! keeps ONE store file per cache directory (`metadata::cache::cache_for_each`,
-//! `cache_put_raw`, `clear_cache_entries`; `<dir>.idx`, one record per cache
-//! key). This crate therefore reads and writes the cache through that surface
-//! instead of assuming a layout, and never opens the store file itself.
-//!
-//! The bundle FILE format is unchanged and self-contained: one JSON envelope
-//! (`{"format":"potflix-metadata","version":1,...}`) carrying one entry per
-//! cache key, `{"file":"<16-hex>.json","key":...,"schema":N,"media":{...}}`,
-//! where `file` is the name `metadata::cache::cache_file_name_for` derives from
-//! the key. A bundle written before the store rework imports exactly as it did
-//! then: only the envelope and the entry fields are read, never a file on disk.
-//!
-//! Import is fill-missing-only: an entry whose key the live cache already holds
-//! is reported `Present` and its stored bytes are never replaced.
-//!
-//! Go files: `bundle.go`, `reparse_windows.go` / `reparse_other.go` (Windows
-//! reparse-point handling).
 
 use std::fmt;
 use std::io::{Read, Write};
@@ -274,8 +252,6 @@ pub fn export<W: Write>(
     }
     entries.sort_by(|a, b| a.key.cmp(&b.key));
     let count = entries.len() as i32;
-    // ExportedAt is wall-clock: determinism holds over the ENTRIES (sorted by
-    // Key with stable bytes), never over the whole byte stream.
     let b = Bundle {
         header: Header {
             format: FORMAT_NAME.to_string(),
@@ -331,8 +307,6 @@ pub fn import<R: Read>(dir: &str, r: &mut R, schema: i32) -> Result<ImportStats,
             st.skipped_schema += 1;
             continue;
         }
-        // Fill-missing-only: presence is the store's; a key it already holds is
-        // reported Present and its bytes are untouched.
         if cache::cache_has(dir, &e.key) {
             st.present += 1;
             continue;

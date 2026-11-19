@@ -1,6 +1,3 @@
-//! Episodate provider tests: the search-then-details round trip against a
-//! fake server (including the title validation), plus one live round trip
-//! against the real endpoint.
 
 use std::time::Duration;
 

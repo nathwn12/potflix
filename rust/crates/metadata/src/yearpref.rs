@@ -1,21 +1,3 @@
-//! `metadata::yearpref` -- the bounded year preference shared by the search
-//! picks (Cinemeta, Tenrai, Kitsu, TVmaze).
-//!
-//! Rule: at equal title strength, a candidate carrying the query's year
-//! outranks one that does not. "Equal strength" means the challenger fully
-//! covers the query title (every query token present in the candidate name or
-//! any canonical alias),
-//! so a rip-year typo can never drag in an unrelated entity, and a candidate
-//! with no year is neither preferred nor penalised (only `year == query_year`
-//! counts as a match).
-//!
-//! The preference is SOFT: it only swaps one complete answer for another and
-//! never returns a miss. A year mismatch never rejects a provider holding the
-//! essentials (cover, title, episode, synopsis); year is a nice-to-have.
-//!
-//! The real ranking stays in [`pick_best_show`]; this module only decides
-//! whether a year-matching challenger may take the already-picked winner's
-//! place.
 
 use metadata_core::match_::{ShowCand, pick_best_show};
 

@@ -1,14 +1,3 @@
-//! Shared test-only serial for process-global `LOCALAPPDATA`/config state.
-//!
-//! Every test in this crate that repoints `LOCALAPPDATA`, reads the config
-//! store, or drives the live card-spec mirror must go through [`EnvGuard`]:
-//! the variable, the store, and the mirror are process-global, so two such
-//! tests running on neighbouring threads would otherwise observe each other's
-//! scratch dir mid-flight. One process-global lock covers every lane (env +
-//! mirror + config); there are no per-module mutexes. The previous variable
-//! value and the previous mirror value are restored in [`Drop`], so a
-//! panicking test cannot leak a scratch root or a sentinel mirror into the
-//! next test.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -117,8 +106,6 @@ impl EnvGuard {
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
-        // Mirror first, while the serial is still held: no other lane can
-        // publish between the mirror restore and the env restore.
         app_support::config::set_live_card_specs(self.mirror.clone());
         match self.prev.clone() {
             Some(value) => unsafe {
@@ -147,7 +134,6 @@ fn env_serial_excludes_concurrent_repoint_and_mirror_publish() {
         Some(root_a.clone().into_os_string()),
         "lane A holds its own root"
     );
-    // Another lane cannot acquire the serial while A holds it.
     assert!(
         EnvGuard::try_hold().is_none(),
         "the serial must exclude a second lane while the first holds it"
@@ -155,8 +141,6 @@ fn env_serial_excludes_concurrent_repoint_and_mirror_publish() {
     let prev = lane_a.prev.clone();
     let mirror_a = lane_a.mirror.clone();
     drop(lane_a);
-    // After release the serial is free, the root is restored, and the mirror
-    // is restored to what lane A found.
     let recheck = EnvGuard::hold();
     assert_eq!(
         std::env::var_os(app_support::config::LOCAL_APP_DATA_ENV),

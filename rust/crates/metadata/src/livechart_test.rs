@@ -1,6 +1,3 @@
-//! LiveChart.me provider tests: the keyless search round trip against a fake
-//! server (including the title validation and the stub synthesis), plus one
-//! live round trip against the real endpoint.
 
 use std::time::Duration;
 

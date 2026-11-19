@@ -1,4 +1,3 @@
-//! Ports `go\internal\metadata\cache_test.go`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -163,9 +162,6 @@ fn cache_previous_schema_is_miss() {
     let key = cache_key(&series_query("Show", 1));
     let stale = CacheFile {
         key: key.clone(),
-        // Pinned to 3, the schema that wrote the pre-fix positives on disk
-        // (e.g. `Shingeki no Kyojin: Picture Drama` for the romaji AoT query):
-        // under schema 3 this record serves, under 4+ it must miss.
         schema: 3,
         media: Media {
             source: "tvmaze".to_string(),
@@ -185,8 +181,6 @@ fn cache_previous_schema_is_miss() {
         checked_at: format_rfc3339(SystemTime::now()),
     };
     let data = serde_json::to_vec(&stale).expect("encode stale record");
-    // Written straight into the live store (not the legacy dir), exactly where
-    // a pre-fix positive already sits on the owner's machine.
     store_raw_record(&d, &key, &data);
     assert!(
         cache_load(&d, &key).is_none(),
@@ -374,7 +368,6 @@ fn cache_live_corrupt() {
     );
     std::fs::write(&path, legacy).unwrap();
     assert!(!cache_live(&d, &key));
-    // Oversize garbage is rejected by the decode, not by a size cap.
     std::fs::write(&path, vec![b'x'; 512 * 1024]).unwrap();
     assert!(!cache_live(&d, &key));
 }
@@ -446,8 +439,6 @@ fn cache_legacy_positive_no_new_fields() {
         "a positive record with no checkedAt must be stale under POSITIVE_TTL"
     );
     assert!(!positive_fresh("", SystemTime::now()));
-    // The same record with a fresh stamp loads (separate directory: migration
-    // imports legacy files only while the store is empty).
     let dir2 = TempDir::new();
     let d2 = dir2.path();    let fresh = format!(
         "{{\"key\":{key:?},\"schema\":{},\"checked_at\":{:?},\"media\":{{\"source\":\"tvmaze\",\"sourceId\":\"9\",\"kind\":1,\"title\":\"Legacy Show\",\"episodes\":[{{\"season\":2,\"number\":1,\"title\":\"Pilot\"}}],\"fetchedAt\":\"2026-01-01T00:00:00Z\"}}}}",
@@ -757,9 +748,7 @@ fn clear_cache_empties_store_and_legacy_dir() {
         std::fs::metadata(&dir).is_err(),
         "the legacy cache dir must be removed"
     );
-    // Idempotent: a second call on an already-empty cache is not an error.
     clear_cache(&dir).expect("second ClearCache");
-    // The store file itself survives, so the next lookup caches again.
     cache_store(&dir, &pos_key, &media).expect("cacheStore after ClearCache");
     assert!(cache_has(&dir, &pos_key), "store unusable after ClearCache");
     clear_cache(&dir).expect("final ClearCache");
@@ -812,7 +801,6 @@ fn cache_migration_parity_on_real_dir() {
         });
     }
 
-    // The first read opens the store and migrates the directory into it.
     let mut records = 0;
     let mut imported = 0;
     with_cache(&dir, |db| {
@@ -996,7 +984,6 @@ fn cache_for_each_enumerates_live_store() {
     assert_eq!(seen.len(), 4, "enumeration saw {seen:?}");
     drop(seen);
 
-    // Early stop: a false return ends the walk.
     let mut n = 0;
     cache_for_each(
         &d,
@@ -1008,7 +995,6 @@ fn cache_for_each_enumerates_live_store() {
     .expect("CacheForEach (early stop)");
     assert_eq!(n, 1, "early stop must call the callback once");
 
-    // A legacy-only directory is imported by the enumeration.
     let legacy = TempDir::new();
     let legacy_dir = legacy.path();
     let lkey = cache_key(&Query {
@@ -1040,7 +1026,6 @@ fn cache_for_each_enumerates_live_store() {
     .expect("CacheForEach(legacy)");
     assert_eq!(got, vec![lkey], "legacy enumeration");
 
-    // No cache on disk: no calls, no error, and no cache is created.
     let empty = TempDir::new();
     let empty_dir = empty.path();
     let mut calls = 0;
@@ -1269,6 +1254,5 @@ fn checked_at_instant_round_trips() {
     let text = format_rfc3339(now);
     assert!(checked_at_instant(&text).is_some());
     assert!(cache_exists(&resolve_cache_dir("")) || !cache_exists(&resolve_cache_dir("")));
-    // The negative backoff must stay well inside the on-disk TTL.
     assert!(NEGATIVE_BACKOFF < NEGATIVE_TTL);
 }

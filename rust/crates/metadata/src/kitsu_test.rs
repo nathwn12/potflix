@@ -1,6 +1,3 @@
-//! Kitsu provider tests: the anime-then-episodes round trip against a fake
-//! server (including the title validation the iTunes leg lacked -- year never
-//! gates), plus one live round trip against the real endpoint.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

@@ -1,11 +1,3 @@
-//! `library::index` -- mirrors `go\internal\library\index.go`.
-//!
-//! The store-backed `library.idx` beside the configured index path: one record
-//! per video file (path, name, type, size, mtime, parsed title/kind/season/
-//! episode, metadata key, state, attempts, last error, next try) plus a rollup
-//! per folder. ONE process-wide index per store path, with its records in memory:
-//! the file is opened only for a commit and closed again, so a hard kill loses at
-//! most the staged, uncommitted change and the file is never held locked.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -103,10 +95,6 @@ impl FileRecord {
         metadata::Query {
             kind,
             title: self.title.clone(),
-            // `metadata::Query` keeps Go's 64-bit `int` for `season` (the
-            // season-folder capture is unbounded), and the record is 64-bit
-            // too, so the value crosses unchanged; `year`/`episode` are
-            // bounded by their patterns.
             year: self.year as i32,
             season: self.season,
             episode: self.episode as i32,
@@ -248,8 +236,6 @@ fn open_index(index_path: &str) -> Index {
     let mut db = match store::open(&path, store_options()) {
         Ok(db) => Some(db),
         Err(err) => {
-            // A file this layer cannot read as a store is quarantined, never
-            // fatal: the index is a cache.
             let quarantine = format!("{path}.corrupt");
             if std::fs::rename(&path, &quarantine).is_ok() {
                 eprintln!(
@@ -546,7 +532,6 @@ fn state_of(inner: &IndexInner) -> IndexState {
         files: inner.files.len() as i64,
         ..IndexState::default()
     };
-    // key -> true when every file carrying it is resolved; false when any is not.
     let mut unresolved: HashMap<String, bool> = HashMap::new();
     for r in inner.files.values() {
         match r.state.as_str() {

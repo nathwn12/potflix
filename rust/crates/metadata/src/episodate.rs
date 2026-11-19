@@ -1,22 +1,3 @@
-//! `metadata::episodate` -- the Episodate TV source (unofficial community DB).
-//!
-//! Episodate (`https://www.episodate.com`) is keyless JSON: `GET
-//! /api/search?q=<title>` resolves the title to a permalink, then `GET
-//! /api/show-details?q=<permalink>` carries the show record (name, seasons,
-//! `description`, `image_path`) plus the full episode table (`season`,
-//! `episode`, `name`) in the same call.
-//!
-//! Two behaviours that are contract, not detail:
-//!
-//! * the search pick is title-validated with [`pick_best_show`]: a
-//!   low-confidence best returns a definitive MISS rather than a wrong show.
-//!   The pick's `start_date` year NEVER rejects: at equal title strength it
-//!   prefers the candidate carrying the query's year, but a missing year, or
-//!   a year that disagrees with the filename, is a nice-to-have display
-//!   field, never a gate -- the essentials are cover, title, episode and
-//!   synopsis;
-//! * movies never reach the wire: Episodate holds TV only, so a movie key
-//!   returns `Ok(None)` before any fetch.
 
 use std::time::Duration;
 
@@ -151,7 +132,6 @@ impl EpisodateSource {
             return Ok(None);
         }
         let Some(winner) = pick_best_show(&q.title, &cands) else {
-            // Low-confidence best: a wrong title is worse than no title.
             return Ok(None);
         };
         let mut winner_idx = None;
@@ -164,7 +144,6 @@ impl EpisodateSource {
         let Some(winner_idx) = winner_idx else {
             return Ok(None);
         };
-        // Soft year preference only: no year match keeps the title winner.
         let take =
             crate::yearpref::prefer_year_match(&q.title, q.year, &cands, &years, winner_idx);
         Ok(Some(entries[take].clone()))

@@ -1,11 +1,3 @@
-//! `control` -- mirrors `go\internal\player\control.go`: PotPlayer
-//! control-channel reads.
-//!
-//! The Java helper sent raw commands as `SendMessage(hwnd, type, cmd, val)`; read
-//! queries use type 1024 (`WM_USER`) with the message id in `WPARAM` and read the
-//! `LRESULT` (MESSAGE-CODES.txt). Only the three queries the app uses are bound.
-//! Departure from the Java helper: the query is bounded (`SendMessageTimeoutW`)
-//! so a hung PotPlayer cannot freeze the poll loop before it reaches the clear.
 
 use core::fmt;
 

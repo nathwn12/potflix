@@ -1,29 +1,3 @@
-//! `presence::gate` -- mirrors `go\internal\presence\gate.go`.
-//!
-//! The send gate: what has to be true before a presence push is allowed out.
-//!
-//! The app is already event-driven: the tracker emits only when the card changes
-//! or a real seek moves the position. The gate sits between the tracker and the
-//! wire and decides whether the current card actually goes out. It exists because
-//! the tracker's per-poll seek delta can be swallowed (held by the debounce, then
-//! never re-fired), which left the card frozen on a stale anchor. The gate adds
-//! the two self-healing paths: a divergence re-anchor (live position vs the last
-//! anchor Discord was told) and a coarse heartbeat. It also records EVERY
-//! decision, so a suppressed poll is visible instead of silent.
-//!
-//! This is NOT about Discord rate limiting alone: the tracker emits 0/min while
-//! steady (change/seek events only), the 30 s heartbeat adds 2/min, and a scrub
-//! is ~9/min - all far below Discord's update limit in the steady case. The
-//! heartbeat is self-healing for residual divergence, nothing more.
-//!
-//! The Discord SDK limit still needs a guard for bursts: at most
-//! [`RATE_MAX_SENDS`] payload sends per [`RATE_WINDOW_MS`] (5 per 20 s). The
-//! gate enforces it as a sliding window over the monotonic interval clock. A
-//! changed card sends immediately when the window permits; when the window is
-//! full the newest card is coalesced (held) and flushed on the first poll
-//! after the window opens. An identical payload is never sent from the hold:
-//! a revert to the last-sent card drops the hold. The poll interval itself is
-//! never shortened to flush faster.
 
 use core::fmt;
 use std::collections::VecDeque;
@@ -180,34 +154,17 @@ impl Gate {
         event: bool,
         debounced: bool,
     ) -> (Activity, Verdict) {
-        // Interval bookkeeping runs on a monotonic clock; the anchors below keep
-        // the epoch now.
         let clk = self.clock.tick(now);
         self.prune_rate(clk);
         let mut out = card;
-        // Re-anchor only on a ready position read. A not-ready read (pos<=0, see
-        // presence.go) must keep the card's existing anchor: recomputing here
-        // would reset the elapsed clock to 0:00 and emit a full-duration
-        // countdown.
         if out.has_start && pos > 0 {
             out.start = now - pos;
             out.end = 0;
-            // end = now + (total - pos); serialized as timestamps.end while
-            // playing (README deviation: both start and end go on the wire), so
-            // Discord renders the time bar against the real media position.
             if total > pos {
                 out.end = now + (total - pos);
             }
         }
 
-        // Pause: send a paused card and KEEP it. The activity type is Watching
-        // and the card carries NO timestamps at all: a start-only anchor
-        // renders as a count-up that reads as playing, so the composer strips
-        // the anchor and the gate must not re-add it. There is NO
-        // timestamps.end while paused either. Decided here, before the suppression
-        // paths, so the pause card is never debounced or throttled. The pause is
-        // detected via is_paused_card (the builder's Paused flag, with the legacy
-        // small_image marker honoured); no pause icon rides the wire.
         if is_paused_card(&out) {
             if self.has_sent
                 && is_paused_card(&self.last)
@@ -218,13 +175,6 @@ impl Gate {
                 && self.last.large_image == out.large_image
                 && buttons_equal(&self.last.buttons, &out.buttons)
             {
-                // Already showing the parked paused card for this content: stay
-                // quiet, so the pause timer is not restarted and Discord is not
-                // spammed. Not even the heartbeat re-pushes while paused. A
-                // content change (a different title/state, e.g. the next
-                // episode) falls through and re-sends, so the parked card cannot
-                // go stale - while the unchanged card keeps the no-spam
-                // property.
                 return (
                     out,
                     Verdict {
@@ -237,9 +187,6 @@ impl Gate {
             out.start = 0;
             out.end = 0;
             if self.send_times.len() >= RATE_MAX_SENDS {
-                // The pause transition is owed but the window is full: hold the
-                // newest paused card; it flushes on the first poll after the
-                // window opens.
                 self.pending = Some(out.clone());
                 return (
                     out,
@@ -259,12 +206,6 @@ impl Gate {
             return (self.commit(out, clk), Verdict::sent());
         }
 
-        // Flush: a held card exists and the window just opened. Send the CURRENT
-        // card (fresh anchor, latest lines) when it still differs from what was
-        // sent; a revert to the last-sent card drops the stale hold instead of
-        // sending an identical payload. The anchor counts without requiring the
-        // tracker's one-shot event: the held seek's event is gone, but its
-        // anchor update is still owed.
         if self.pending.is_some() && self.send_times.len() < RATE_MAX_SENDS {
             let content_changed = self.content_changed(&out);
             let anchor_moved = out.has_start && out.start != self.last_start;
@@ -282,11 +223,8 @@ impl Gate {
                 return (self.commit(out, clk), Verdict::sent());
             }
             if self.has_sent {
-                // Reverted to the last-sent card: the hold is stale.
                 self.pending = None;
             }
-            // First-send hold cannot happen (an empty window always permits the
-            // first send), so a pending without `has_sent` just falls through.
         }
 
         if !self.has_sent {
@@ -302,9 +240,6 @@ impl Gate {
         if event && anchor_moved {
             return self.send_or_hold(out, clk);
         }
-        // Divergence: the live position no longer matches what the last-sent
-        // anchor predicts (a seek the tracker swallowed, a resume, or clock
-        // drift). Re-anchor at once, throttled.
         if out.has_start
             && pos > 0
             && abs64(pos - (now - self.last_start)) > DIVERGENCE_MS

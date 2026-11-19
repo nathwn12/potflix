@@ -1,11 +1,3 @@
-//! Test support: the fake HTTP server the provider tests point their sources at,
-//! the temp directory the cache tests own, and the fake [`Source`] the resolver
-//! tests drive the chain with.
-//!
-//! Go's tests use `net/http/httptest` plus `t.TempDir()`; the workspace pins no
-//! HTTP-server crate and no temp-dir crate, so both are small hand-rolled
-//! stand-ins here. NOTHING in this module reaches the network: every server
-//! binds `127.0.0.1:0` and every address is thrown away with its listener.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -229,9 +221,6 @@ fn serve_connection<F>(stream: TcpStream, handler: Arc<F>)
 where
     F: Fn(&Request) -> Response + Send + Sync + 'static,
 {
-    // An accepted socket does not reliably inherit the listener's non-blocking
-    // mode; a non-blocking read would fail instantly and close the connection
-    // right after the first response, breaking keep-alive reuse.
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let Ok(read_side) = stream.try_clone() else {

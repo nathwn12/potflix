@@ -1,27 +1,3 @@
-//! `metadata::bangumi` -- the Bangumi subject source (keyless search).
-//!
-//! Bangumi (`https://api.bgm.tv`) needs no key for subject search: `GET
-//! /search/subject/<title>?type=<n>&responseGroup=large` carries cover,
-//! titles, episode count, air date, rating and synopsis in a single call,
-//! where `type=2` is anime and `type=6` is live TV.
-//!
-//! Three behaviours that are contract, not detail:
-//!
-//! * the search pick is title-validated with [`pick_best_show`]: a
-//!   low-confidence best returns a definitive MISS rather than a wrong show.
-//!   The pick's `air_date` year NEVER rejects: at equal title strength it
-//!   prefers the candidate carrying the query's year, but a missing year, or
-//!   a year that disagrees with the filename, is a nice-to-have display
-//!   field, never a gate;
-//! * the synopsis is never required: some entries carry an empty `summary`,
-//!   and an empty one still answers (the resolver keeps a bare match as the
-//!   fallback while the walk continues);
-//! * Bangumi carries an episode COUNT but no episode table, so the answer
-//!   synthesizes numbered stubs ([`episode_stubs`]) -- numbers only, never
-//!   fabricated titles. Anime tables (`type=2`) number absolutely (season 0);
-//!   live-TV tables (`type=6`) number from season 1, so both absolute and
-//!   season-qualified queries can number-match without ever naming a wrong
-//!   episode. Movies never reach the wire.
 
 use std::time::Duration;
 
@@ -173,7 +149,6 @@ impl BangumiSource {
             return Ok(None);
         }
         let Some(winner) = pick_best_show(&q.title, &cands) else {
-            // Low-confidence best: a wrong title is worse than no title.
             return Ok(None);
         };
         let mut winner_idx = None;
@@ -186,7 +161,6 @@ impl BangumiSource {
         let Some(winner_idx) = winner_idx else {
             return Ok(None);
         };
-        // Soft year preference only: no year match keeps the title winner.
         let take =
             crate::yearpref::prefer_year_match(&q.title, q.year, &cands, &years, winner_idx);
         Ok(Some(entries[take].clone()))
@@ -227,9 +201,6 @@ impl crate::resolver::Source for BangumiSource {
         if title.is_empty() {
             return Ok(None);
         }
-        // Numbered stubs only: Bangumi carries a count but no table, so the
-        // stubs can satisfy the number-exact match without ever naming a
-        // wrong episode.
         let season = if picked_type == BANGUMI_TYPE_ANIME { 0 } else { 1 };
         let episodes = episode_stubs(bangumi_count(&entry), season);
         let artwork = entry

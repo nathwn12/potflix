@@ -1,34 +1,3 @@
-//! `tray` -- mirrors the Go root file `go\tray.go`.
-//!
-//! The hidden tray window and its `Shell_NotifyIconW` icon, plus the popup menu
-//! (`Open Potflix`, `Exit Potflix`). The icon bytes are the repo's own
-//! `assets\icon.ico`, compiled in with `include_bytes!` -- the equivalent of Go's
-//! `//go:embed assets/icon.ico` in `go\embed.go` -- and handed to
-//! `CreateIconFromResourceEx` as the RAW DIB frame at the ICO's
-//! `dwImageOffset`, never as the ICO container. No icon file ships beside the
-//! exe. (`rust\crates\app\build.rs` embeds the same file as a Win32 resource so
-//! Explorer shows it; the tray does not read that resource.)
-//!
-//! Contract (`go\tray.go:11-16`): the tray is built before config and the
-//! message loop; the tooltip is `Potflix`; the menu carries `Open Potflix` and
-//! `Exit Potflix`; an add failure is non-fatal to the caller.
-//!
-//! # Thread law
-//!
-//! [`create_tray_window`] MUST be called on the same OS thread that later runs
-//! [`message_loop`] (`go\tray.go:31-33`): window messages are delivered to the
-//! thread that created the window, so a tray window created on one thread and
-//! pumped on another never sees its `WM_APP+1` callback and the icon goes dead.
-//! The Go app pins that thread with `runtime.LockOSThread` (`go\main.go:140-143`);
-//! in Rust, create the window and pump from one thread.
-//!
-//! # Deliberate legacy shape
-//!
-//! `NIM_SETVERSION` is never called (`go\tray.go:139-141`), so the shell uses
-//! the legacy `uVersion 0` callback: `wParam` = icon id, `lParam` = the mouse
-//! message. [`tray_mouse_message`] therefore reads `LOWORD(lParam)` first and
-//! falls back to `LOWORD(wParam)`; reading only `wParam` was a real bug
-//! (`go\tray.go:143-147`).
 
 use core::ptr::{null, null_mut};
 use std::fmt;
@@ -328,8 +297,6 @@ impl std::error::Error for IconError {}
 ///
 /// Same OS thread as [`message_loop`], always -- see the module doc.
 pub fn create_tray_window() -> Result<TrayWindow, TrayError> {
-    // GetModuleHandleW(0): the module handle of the running exe, which doubles
-    // as the HINSTANCE both window calls want.
     let hinstance = unsafe { GetModuleHandleW(null()) };
     let class_name = utf16_z(TRAY_CLASS_NAME);
 
@@ -348,13 +315,11 @@ pub fn create_tray_window() -> Result<TrayWindow, TrayError> {
         lpsz_class_name: class_name.as_ptr(),
         h_icon_sm: 0,
     };
-    // The mirror is byte-identical to `WNDCLASSEXW` (asserted in `crate::win32`).
     let atom = unsafe { RegisterClassExW(&wc as *const WndClassEx as *const WNDCLASSEXW) };
     if atom == 0 {
         return Err(TrayError::RegisterClass(unsafe { GetLastError() }));
     }
 
-    // style 0 = hidden, never shown; zero size.
     let hwnd = unsafe {
         CreateWindowExW(
             0,
@@ -379,8 +344,6 @@ pub fn create_tray_window() -> Result<TrayWindow, TrayError> {
     let added = shell_notify_icon(NIM_ADD, &make_notify_icon_data(hwnd, icon));
     TRAY_ICON.store(icon as usize, Ordering::SeqCst);
     TRAY_ADDED.store(added, Ordering::SeqCst);
-    // The shell restart broadcast: a nonzero id after this call; 0 means the
-    // handler below stays inert (no icon to re-add into anyway).
     let name = utf16_z("TaskbarCreated");
     let taskbar_created = unsafe {
         windows_sys::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW(name.as_ptr())
@@ -475,7 +438,6 @@ pub fn make_notify_icon_data(hwnd: HWND, icon: HICON) -> NotifyIconData {
 ///
 /// `NIM_SETVERSION` is deliberately never called (see the module doc).
 pub fn shell_notify_icon(verb: u32, nid: &NotifyIconData) -> bool {
-    // The mirror is byte-identical to `NOTIFYICONDATAW` (asserted in `crate::win32`).
     unsafe { Shell_NotifyIconW(verb, nid as *const NotifyIconData as *const NOTIFYICONDATAW) != 0 }
 }
 
@@ -490,7 +452,6 @@ pub fn tray_delete(hwnd: HWND) {
 pub fn message_loop() {
     let mut msg = MsgT::default();
     loop {
-        // The mirror is byte-identical to `MSG` (asserted in `crate::win32`).
         let r = unsafe { GetMessageW(&mut msg as *mut MsgT as *mut MSG, null_mut(), 0, 0) };
         if r == -1 {
             return; // GetMessage error
@@ -543,7 +504,6 @@ unsafe extern "system" fn wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     if is_taskbar_created_msg(msg, taskbar_created_message()) {
-        // Explorer restarted: the icon is gone, re-add it on the same path.
         readd_notify_icon(hwnd);
         return 0;
     }
@@ -559,9 +519,6 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_MEASUREITEM => {
-            // Owner-drawn tray items only: `wParam` is 0 for menus and
-            // `lParam` is the `MEASUREITEMSTRUCT`. Anything else belongs to a
-            // control this window does not own.
             if wparam == 0 && lparam != 0 {
                 let mis = unsafe { &mut *(lparam as *mut MEASUREITEMSTRUCT) };
                 if mis.CtlType == ODT_MENU {
@@ -572,7 +529,6 @@ unsafe extern "system" fn wnd_proc(
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_DRAWITEM => {
-            // Owner-drawn tray items only; see `draw_menu_item`.
             if lparam != 0 {
                 let dis = lparam as *const DRAWITEMSTRUCT;
                 if unsafe { (*dis).CtlType } == ODT_MENU {
@@ -698,7 +654,6 @@ pub unsafe fn draw_menu_item(dis: *const DRAWITEMSTRUCT) {
         FillRect(dis.hDC, &dis.rcItem, bg);
         DeleteObject(bg);
         if selected {
-            // Selection bar down the item's left edge, like the folder list.
             let bar = windows_sys::Win32::Foundation::RECT {
                 left: dis.rcItem.left,
                 top: dis.rcItem.top,
@@ -714,8 +669,6 @@ pub unsafe fn draw_menu_item(dis: *const DRAWITEMSTRUCT) {
             crate::win32::FW_NORMAL,
         );
         if !font.is_null() {
-            // A grayed row (the picker with nothing playing) paints dimmed so
-            // the `MFS_GRAYED` state is visible, not just unclickable.
             let disabled = dis.itemState & ODS_DISABLED != 0;
             SetTextColor(
                 dis.hDC,
@@ -786,7 +739,6 @@ pub unsafe fn show_tray_menu(hwnd: HWND) {
         return;
     }
 
-    // Dark popup interior for the menu's own lifetime (deleted below).
     let bg = unsafe { crate::win32::CreateSolidBrush(crate::window::COL_CARD) };
     unsafe {
         let mut info: MENUINFO = core::mem::zeroed();
@@ -801,23 +753,15 @@ pub unsafe fn show_tray_menu(hwnd: HWND) {
             item.cbSize = core::mem::size_of::<MENUITEMINFOW>() as u32;
             item.fMask = MIIM_STRING | MIIM_ID | MIIM_FTYPE | MIIM_STATE | MIIM_DATA;
             item.fType = MFT_OWNERDRAW;
-            // The picker row is grayed at build time while nothing plays (the
-            // menu is built per show, so a build-time state is exact).
             item.fState = if *id == MENU_ITEM_FIX_MATCH && !fix_match_tray_enabled() {
                 MFS_GRAYED
             } else {
                 MFS_ENABLED
             };
             item.wID = *id as u32;
-            // `dwTypeData` is unread for `MFT_OWNERDRAW` (the label travels in
-            // `dwItemData`); it is passed anyway for debuggers and tests.
             item.dwTypeData = text.as_ptr() as *mut u16;
-            // UTF-16 units without the terminator (byte length lies for the
-            // `...` in the picker label).
             item.cch = text.len().saturating_sub(1) as u32;
             item.dwItemData = i;
-            // `text` outlives this call; the system copies nothing for
-            // owner-draw items and never reads it back.
             crate::win32::InsertMenuItemW(menu, i as u32, 1, &item);
         }
 
@@ -833,13 +777,8 @@ pub unsafe fn show_tray_menu(hwnd: HWND) {
             hwnd,
             null(),
         );
-        // Required Win32 forensics (`go\tray.go:207`): without this post the
-        // menu can stay up until the next click anywhere on the desktop.
         PostMessageW(hwnd, WM_NULL, 0, 0);
 
-        // The destroy runs after the dispatch on every path (the guard above
-        // drops after this scope): Exit now returns through the quit path, so
-        // the menu is never leaked to process teardown.
         match selection as usize {
             MENU_ITEM_OPEN => show_main_window(),
             MENU_ITEM_FIX_MATCH => crate::window::open_fix_match(),
@@ -868,9 +807,6 @@ pub fn clear_activity() {
 /// `set_activity` write races the exit clear.
 pub fn on_exit_steps() {
     log_line("exit requested (tray menu)");
-    // The clear moved to the app quit tail (ordered after the poll stop).
-    // Keep the seam callable for the legacy test path: fire it only when a
-    // test installed it AND the test explicitly drives `clear_activity`.
 }
 
 /// `onExit` (`go\tray.go:216-220`): log and request quit -- never

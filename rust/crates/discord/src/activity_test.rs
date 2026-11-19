@@ -1,7 +1,3 @@
-//! `discord::activity_test` -- mirrors `go\internal\discord\activity_test.go`:
-//! the exact SET_ACTIVITY payload shape (entity fields, no timestamps when there
-//! is no timer, a null-activity clear). Assertions check the key set explicitly,
-//! so a stray field fails.
 
 use serde_json::{Map, Value};
 
@@ -44,8 +40,6 @@ fn activity_of(top: &Map<String, Value>) -> &Map<String, Value> {
 fn test_set_activity_payload() {
     let (c, sc, _) = connect_pair(0, Config::default());
 
-    // SmallImage is caller-compat only: even when set it must not reach the
-    // wire - the pristine card carries no status icon.
     let act = Activity {
         details: "Show".to_string(),
         state: r#"S1 E2 "Pilot""#.to_string(),
@@ -171,7 +165,6 @@ fn test_large_image_missing_or_invalid_sends_no_image() {
              reached the wire: {got}"
         );
     }
-    // A card with no other asset value sends no `assets` key at all.
     let bare = wire_json(&Activity {
         details: "Show".to_string(),
         state: "S1 E2".to_string(),
@@ -223,7 +216,6 @@ fn test_large_image_over_300_is_omitted() {
         "over-budget LargeImage must not emit an assets object, got {got}"
     );
     assert!(!got.contains("logo"), "branded fallback on the wire: {got}");
-    // Boundary: exactly 300 chars rides verbatim.
     let edge = format!(
         "https://example.com/{}",
         "y".repeat(300 - "https://example.com/".len())
@@ -245,8 +237,6 @@ fn test_large_image_over_300_is_omitted() {
 
 #[test]
 fn test_set_activity_no_timer() {
-    // The idle card: details Browsing / state Idle and no timestamps object at
-    // all. No small icon either: the pristine idle card is icon-free.
     let (c, sc, _) = connect_pair(0, Config::default());
 
     c.set_activity(Activity {
@@ -274,10 +264,6 @@ fn test_set_activity_no_timer() {
 
 #[test]
 fn test_set_activity_playing_carries_start_and_end() {
-    // While playing the payload carries BOTH timestamps.start and
-    // timestamps.end (the remaining-time math is computed by the send gate:
-    // end = now + (total - pos)), so Discord renders the time bar against the
-    // real media position.
     let (c, sc, _) = connect_pair(0, Config::default());
 
     c.set_activity(Activity {
@@ -306,8 +292,6 @@ fn test_set_activity_playing_carries_start_and_end() {
 
 #[test]
 fn test_set_activity_paused_start_only_no_end() {
-    // A paused card carries timestamps.start anchored at the pause moment and NO
-    // timestamps.end, so the client counts the pause UP ("paused for M:SS").
     let (c, sc, _) = connect_pair(0, Config::default());
 
     c.set_activity(Activity {

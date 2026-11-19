@@ -1,20 +1,3 @@
-//! `metadata::imdb` -- IMDb's first-party GraphQL as a keyless regular source.
-//!
-//! POST `https://api.graphql.imdb.com/` with a read-only `mainSearch`
-//! query; one request per search, no episode table. The wire carries
-//! `mainSearch edges[].node.entity Title id/titleText.text/releaseYear.year/`
-//! `plot.plotText.plainText/primaryImage.url/runtime.seconds/`
-//! `genres.genres[].text` plus the title-type field, which maps `MOVIE` vs
-//! series. The parser is tolerant: missing or differently-cased type shapes
-//! still map (any `movie` token means movie, everything else series), so a
-//! live shape drift keeps answering instead of erroring.
-//!
-//! Behaviours that are contract:
-//! * the search pick is title-validated with [`pick_best_show`]: a
-//!   low-confidence best is a definitive miss, never a wrong title; year
-//!   never gates, it only prefers at equal title strength.
-//! * `find_all` is the same one-POST answer, each Title clearing the floor
-//!   as its own pickable row with an empty episode table.
 
 use std::time::{Duration, SystemTime};
 
@@ -423,9 +406,6 @@ impl ImdbSource {
         for entity in &rows {
             let name = title_of(entity);
             let kind = kind_for_type(&title_type_text(entity.title_type.as_ref()));
-            // The resolver asks per kind: a movie lookup skips series rows
-            // here so a same-titled series never steals a film query (the
-            // search rows keep every kind; the rank prefers the want).
             if q.kind == Kind::MOVIE && kind != Kind::MOVIE {
                 continue;
             }
@@ -459,8 +439,6 @@ impl ImdbSource {
         };
         let take =
             crate::yearpref::prefer_year_match(&q.title, q.year, &cands, &years, winner_idx);
-        // Map back to the filtered rows: kinds/cands/rows share the filter,
-        // so re-walk the entities in the same filtered order.
         let mut filtered: Vec<&ImdbEntity> = Vec::new();
         for entity in &rows {
             let kind = kind_for_type(&title_type_text(entity.title_type.as_ref()));
@@ -497,8 +475,6 @@ impl crate::resolver::Source for ImdbSource {
         if q.title.is_empty() {
             return Ok(None);
         }
-        // UNKNOWN queries try series first (a series answer can only match
-        // when the query carries an episode number), then movie.
         if q.kind == Kind::UNKNOWN {
             let series_q = Query {
                 kind: Kind::SERIES,
@@ -612,7 +588,6 @@ mod tests {
             movie.movie_url,
             "https://www.imdb.com/title/tt1375666/"
         );
-        // Series want: the series Title answers as a series.
         let series_q = Query {
             kind: Kind::SERIES,
             title: "Breaking Bad".to_string(),
@@ -625,7 +600,6 @@ mod tests {
         assert_eq!(series.source_id, "tt0903747");
         assert_eq!(series.kind, Kind::SERIES);
         assert_eq!(series.year, 2008);
-        // Search rows keep both kinds.
         let all = source
             .find_all(
                 &cancel,

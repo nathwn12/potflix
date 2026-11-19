@@ -1,4 +1,3 @@
-//! `index_test` -- mirrors `go\internal\library\index_test.go`.
 
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Instant;

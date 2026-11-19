@@ -1,54 +1,3 @@
-//! `discord::activity` -- mirrors `go\internal\discord\activity.go`.
-//!
-//! The `SET_ACTIVITY` payload shape and its serialization.
-//!
-//! SET_ACTIVITY carries:
-//!
-//! ```text
-//! {"cmd":"SET_ACTIVITY",
-//!  "args":{"pid":<std::process::id()>,
-//!          "activity":{"type":3,"name":...,"details":...,"state":...,
-//!                      "timestamps":{"start":...,"end":...},
-//!                      "assets":{"large_image":...,"large_text":...}}},
-//!  "nonce":"<unique>"}
-//! ```
-//!
-//! `name` is the media title the shipped composer sets, so the client renders
-//! `Watching <title>` -- the movie title, or the series title for an episode --
-//! never `Watching Potflix`. The body is two lines: details (movie
-//! `Title (Year)`; empty for a series, whose title the header carries) and
-//! state (movie genres/runtime, episode `SxxEyy · Episode`). The synopsis rides
-//! `large_text` as a <=128-unit, explicitly ellipsized snippet; the complete
-//! note stays in Potflix's own hover/focus tooltip. The small slot is never
-//! populated: no status icon is overlaid on the artwork.
-//!
-//! A clear is the same command with `"activity":null`. The activity type is
-//! Watching (3), not the Java reference's Playing (0): Discord documents the
-//! activity time bar as requiring Listening (2) or Watching (3), and "Watching
-//! <title>" fits a video player. Deliberate, user-visible deviation -- do not
-//! "fix" it. While playing the payload carries BOTH timestamps.start and (when
-//! the duration is known) timestamps.end, so the client renders the time bar
-//! against the real media position. While paused it carries timestamps.start
-//! only, anchored at the pause moment, so the client counts the pause UP
-//! ("paused for M:SS"). The pristine card carries NO small_image/small_text (no
-//! play/pause/stop corner icon) and NO buttons: the caller-side fields are
-//! accepted for compatibility but never serialized. Deliberately NOT set:
-//! party, secrets, instance, application_id.
-//!
-//! The artwork slot is the resolved poster URL or EMPTY; the branded app mark
-//! is never a missing-art fallback. When no asset field has a value the whole
-//! `assets` key is omitted.
-//!
-//! Empty-string fields are OMITTED, not sent as "". Discord rejects an activity
-//! whose assets carry a present-but-empty large_text/small_text (code 4000:
-//! "large_text is not allowed to be empty"). The Java app looked like it set
-//! empty strings, but the GameSDK's wire serialization dropped empty fields, so
-//! parity is "empty text omitted on the wire" -- hence `skip_serializing_if`.
-//!
-//! One divergence from Go is deliberate and documented: `encoding/json`
-//! HTML-escapes `<`, `>` and `&` inside strings (`\u003c`...), `serde_json`
-//! leaves them literal. Key order, key set, omission and every value are
-//! identical, and Discord parses both encodings to the same activity.
 
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -201,10 +150,6 @@ pub(crate) fn new_activity(a: &Activity) -> ActivityPayload {
         assets,
     };
     if a.has_start {
-        // Playing: start + end (when the duration is known) so the client renders
-        // the time bar. Paused: start only (a.end == 0) so the client counts the
-        // pause UP from the pause moment. This is the single place the timestamp
-        // pair is decided.
         let mut ts = Timestamps {
             start: a.start,
             end: 0,
@@ -214,8 +159,6 @@ pub(crate) fn new_activity(a: &Activity) -> ActivityPayload {
         }
         p.timestamps = Some(ts);
     }
-    // Pristine card: small_image/small_text/buttons are caller-compat fields only
-    // and are never serialized -- no icon keys, no buttons key.
     p
 }
 

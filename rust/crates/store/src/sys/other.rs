@@ -1,9 +1,3 @@
-//! Portable store-file open -- the port of `go\internal\store\store_other.go`.
-//!
-//! A POSIX unlink does not block on an open handle, so the portable open
-//! already meets the removal contract the crate doc states; it keeps the crate
-//! liftable off Windows. `O_RDWR|O_CREATE` and never truncate, as the Go
-//! original.
 
 use std::fs::{File, OpenOptions};
 use std::io;

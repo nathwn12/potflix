@@ -1,5 +1,3 @@
-//! Test-only helpers shared by the module test modules (Go used `t.TempDir`,
-//! `sampleReport` and `pinIdentity`; `pad2` came from `report_test.go`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

@@ -1,20 +1,3 @@
-//! `repair::time` -- the report's timestamp, mirroring Go's `time.Time` usage in
-//! `report.go`.
-//!
-//! The workspace pins no date/time crate (`Cargo.toml` dependency policy), and
-//! the report needs exactly two things Go's `time` gave it:
-//!
-//!   * `t.UTC().Format(time.RFC3339)` -- the human report's `generated:` line and
-//!     the issue body's `- generated:` bullet. No fractional seconds.
-//!   * `encoding/json`'s `time.Time` form -- RFC3339 with the fraction trimmed of
-//!     trailing zeros, and no fraction at all when the nanoseconds are zero.
-//!
-//! So: absolute Unix seconds + nanoseconds, Hinnant's civil-date conversion, and
-//! a strict RFC3339 reader. Equality is instant equality, Go's `time.Equal`.
-//!
-//! [`Time::ZERO`] is Go's `time.Time{}` -- 0001-01-01T00:00:00Z, not the Unix
-//! epoch -- so a zero report field serializes and reads back byte-for-byte like
-//! the Go one did.
 
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -61,7 +44,6 @@ impl Time {
     pub fn now() -> Time {
         match SystemTime::now().duration_since(UNIX_EPOCH) {
             Ok(d) => Time::from_unix(d.as_secs() as i64, d.subsec_nanos()),
-            // A clock before 1970: keep the instant, drop the fraction.
             Err(e) => Time::from_unix(-(e.duration().as_secs() as i64), 0),
         }
     }
@@ -116,8 +98,6 @@ impl Time {
             if i == start {
                 return None;
             }
-            // Only the first nine digits are a nanosecond count; the rest are
-            // below the resolution and are dropped.
             let mut scale = 100_000_000u32;
             for c in b[start..i].iter().take(9) {
                 nanos += (c - b'0') as u32 * scale;
@@ -244,8 +224,6 @@ mod tests {
 
     #[test]
     fn TestTimeRFC3339Format() {
-        // Go's timestamp for the zero value, and for the sample report's
-        // GeneratedAt (2026-10-12T21:30:00Z).
         assert_eq!(Time::ZERO.rfc3339(), "0001-01-01T00:00:00Z");
         assert_eq!(
             Time::from_unix(1_791_840_600, 0).rfc3339(),
@@ -265,11 +243,9 @@ mod tests {
             let t = Time::parse_rfc3339(s).expect("parses");
             assert_eq!(t.rfc3339_nanos(), s, "round trip of {s}");
         }
-        // An offset is the same instant as its UTC form.
         let offset = Time::parse_rfc3339("2026-10-12T23:30:00+02:00").expect("parses");
         assert_eq!(offset, Time::from_unix(1_791_840_600, 0));
         assert_eq!(offset.rfc3339(), "2026-10-12T21:30:00Z");
-        // Fraction with trailing zeros trims, like RFC3339Nano.
         assert_eq!(
             Time::from_unix(1_791_840_600, 500_000_000).rfc3339_nanos(),
             "2026-10-12T21:30:00.5Z"

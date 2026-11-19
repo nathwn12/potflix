@@ -1,5 +1,3 @@
-//! Hand-rolled SHA-256 (the workspace pins no crypto crate, like its hand-rolled
-//! CRC32), used for the two folder-identity hashes. The digest is returned hex.
 
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,

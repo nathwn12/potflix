@@ -1,4 +1,3 @@
-//! Ports `go\internal\metadata\wikipedia_test.go`.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -522,7 +521,6 @@ fn wikipedia_movie_order() {
         names.len() >= 2 && names[0] == "cinemeta" && names[1] == "wikipedia",
         "movie order = {names:?}, want [cinemeta wikipedia ...]"
     );
-    // Series order is untouched: wikipedia self-gates there anyway.
     let series_names: Vec<String> = resolver
         .ordered_sources(&Query {
             kind: Kind::SERIES,
@@ -594,11 +592,9 @@ fn wikipedia_transient_omits_title() {
     assert!(!wrapped.message().contains(SECRET));
     assert!(!wrapped.message().contains("api.php"));
     assert!(!wrapped.message().contains("srsearch"));
-    // URL-free diagnostics pass through verbatim.
     assert_eq!(wiki_sanitize_cause("  boom  "), "boom");
     assert_eq!(wiki_sanitize_cause("   "), "request failed (URL redacted)");
 
-    // End to end: the dead server's own URL carries the title.
     let base = format!("{}/{SECRET}", dead_url());
     let source = WikipediaSource::new(base, wiki_client());
     let err = source
@@ -664,7 +660,6 @@ fn wiki_pick_poster_guidelines_rejected() {
     ] {
         assert_eq!(wiki_pick_poster(&one(name), "Dune (2021 film)"), "", "blocked pick {name}");
     }
-    // A genuine poster still wins over blocked docs (jpg preferred).
     let mixed = vec![
         "File:Dune poster guidelines.jpg".to_string(),
         "File:Dune theatrical poster.jpg".to_string(),
@@ -851,8 +846,6 @@ fn wikipedia_exact_title_poster() {
         media.artwork,
         "https://upload.wikimedia.org/wikipedia/en/7/74/Ready_Player_One_%28film%29.png"
     );
-    // A same-named non-photo (an svg diagram of the article subject) is still
-    // rejected: the extension guard survives the fallback.
     let fake = WikiFake {
         search: r#"{"query":{"search":[{"title":"Dune (2021 film)"}]}}"#.to_string(),
         detail: WIKI_NO_POSTER_DETAIL.to_string(),

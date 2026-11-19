@@ -1,27 +1,3 @@
-//! `uicapture` -- hidden-desktop proof harness for the Potflix UI redesign.
-//!
-//! Capture-only: drives the REAL `potflix-win` window (same `create_main_window`
-//! / `show_main_window` / `main_wnd_proc` / paint path the tray app uses) on a
-//! private desktop and writes PNGs. Never touches the owner's visible desktop:
-//! no `SendInput`, no input injection, no `SetForegroundWindow` off the hidden
-//! desktop -- only the message path (`PostMessageW`/`SendMessageW`) to windows
-//! this harness created, exactly like the proven `desktop-headless.ps1` runner.
-//! The full tray binary cannot run headless (its notify-icon gate returns
-//! before the window exists when no shell hosts the tray), so this harness
-//! bypasses the tray gate and nothing else: same window, same proc, same
-//! paint, same config read.
-//!
-//! Usage (run with the wanted `LOCALAPPDATA`: owner state = populated list,
-//! scratch dir = empty state):
-//! ```text
-//! uicapture window <out.png> <main|settings|card> [focus <id>] [tabs <n>] [wheel <notches>]
-//! uicapture menu <out.png>
-//! uicapture offscreen <out.png> <dpi> <main|settings|card>
-//! uicapture fixmatch <out_unmatched.png> <out_matched.png>
-//! uicapture trace
-//! ```
-//! Every capture prints `MEASURE min/max/mean uniform=<bool>` (a blank bitmap
-//! fails the proof), the DPI, and the DPI-awareness context.
 
 use std::ffi::c_void;
 
@@ -228,7 +204,6 @@ fn save_png(hbm: isize, path: &str) -> Result<(), String> {
         GdipCreateBitmapFromHBITMAP, GdipDisposeImage, GdipSaveImageToFile, GdiplusShutdown,
         GdiplusStartup, GdiplusStartupInput, GpBitmap, GpImage,
     };
-    // PNG encoder CLSID {557CF406-1A04-11D3-9A73-0000F81EF32E}.
     let clsid = windows_sys::core::GUID {
         data1: 0x557C_F406,
         data2: 0x1A04,
@@ -337,7 +312,6 @@ fn mode_window(args: &[String]) -> Result<(), String> {
         }
         window::show_main_window();
         pump(1200);
-        // Optional interactions, all message-path to our own window.
         let mut i = 4;
         while i < args.len() {
             match args[i].as_str() {
@@ -421,8 +395,6 @@ fn mode_menu(args: &[String]) -> Result<(), String> {
     let r = (|| {
         let tw = tray::create_tray_window().map_err(|e| format!("tray window: {e}"))?;
         let owner = tw.hwnd as usize;
-        // Watcher thread: waits for the `#32768` popup on THIS hidden desktop,
-        // captures it, then ends menu tracking. Message-path only.
         let out2 = out.clone();
         let watcher = std::thread::spawn(move || -> Result<(), String> {
             // SAFETY: this thread owns no windows, so the switch is legal.
@@ -493,7 +465,6 @@ fn mode_fixmatch(args: &[String]) -> Result<(), String> {
         .get(3)
         .cloned()
         .ok_or("fixmatch <out_unmatched.png> <out_matched.png>")?;
-    // Scratch the cache root BEFORE any store/config read, restored below.
     let scratch =
         std::env::temp_dir().join(format!("potflix-cap-fixmatch-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch dir: {e}"))?;
@@ -520,7 +491,6 @@ fn mode_fixmatch(args: &[String]) -> Result<(), String> {
         ));
         // State 1: no store file on the scratch root -> the Search screen.
         capture_fix_match_once(desk, &out_un, "fixmatch-unmatched", true)?;
-        // State 2: a provider-free movie latch for the same path -> Matched.
         let mut store =
             metadata::overrides::Store::empty_at(metadata::overrides::default_path());
         store
@@ -577,9 +547,6 @@ fn capture_fix_match_once(
                 std::thread::sleep(std::time::Duration::from_millis(700));
                 let (w, h) = client_size(dlg);
                 let (w, h) = (w.max(1), h.max(1));
-                // The tall screen is Search (496 logical px for a movie, 588
-                // for a series), the short one Matched (244); the midpoint
-                // never equals either.
                 if (h >= 400) != want_tall {
                     return Err(format!("{tag2}: client {w}x{h} is not the expected screen"));
                 }
@@ -603,7 +570,6 @@ fn capture_fix_match_once(
         }
         Err(format!("{tag2}: dialog never appeared"))
     });
-    // The modal picker on THIS thread (it owns the main window).
     window::open_fix_match();
     watcher.join().map_err(|_| "watcher panicked".to_string())?
 }
@@ -677,13 +643,11 @@ fn mode_trace() -> Result<(), String> {
                 walk.push(window::ui().focus_id);
             }
             println!("{walk:?}");
-            // Full cycle: after len(order) Tabs the walk returns to the first stop.
             if walk.len() != order.len() + 1 || walk[1..] != order[..] {
                 return Err(format!(
                     "view {view:?}: Tab walk {walk:?} != order {order:?}"
                 ));
             }
-            // Shift+Tab from the first stop wraps to the last.
             {
                 let mut st = window::ui();
                 st.focus_id = order[0];
@@ -694,7 +658,6 @@ fn mode_trace() -> Result<(), String> {
                     return Err(format!("view {view:?}: Shift+Tab did not wrap"));
                 }
             }
-            // Esc: Card closes to Main; Settings returns to Main.
             {
                 let mut st = window::ui();
                 st.cur_view = view;
@@ -726,10 +689,6 @@ fn mode_hold(args: &[String]) -> Result<(), String> {
         .get(4)
         .map(|s| s.parse().unwrap_or(60_000))
         .unwrap_or(60_000);
-    // NO `enter_hidden_desktop` here: the launcher (`desktop-headless.ps1`)
-    // already started this process on its own private desktop via
-    // `STARTUPINFO.lpDesktop`, and switching this thread to a SECOND desktop
-    // would put the window somewhere the launcher cannot see it.
     window::create_main_window().map_err(|e| format!("create_main_window: {e}"))?;
     {
         let mut st = window::ui();
@@ -753,10 +712,6 @@ fn mode_hold(args: &[String]) -> Result<(), String> {
         win32::ShowWindow(hwnd, win32::SW_SHOW);
         win32::UpdateWindow(hwnd);
     }
-    // Pump this thread's queue so the window is live and responsive; the runner
-    // posts WM_CLOSE and then ends the process. No tray icon exists on this
-    // hidden desktop, so WM_CLOSE quits the process instead of parking the
-    // window (the tray-less branch of `main_wnd_proc`).
     let end = std::time::Instant::now() + std::time::Duration::from_millis(hold_ms);
     while std::time::Instant::now() < end {
         pump(100);
@@ -786,7 +741,6 @@ fn mode_facts() -> Result<(), String> {
             )
         };
         println!("FACT class-icon GCLP_HICONSM=0x{small:X} non-zero={}", small != 0);
-        // WM_GETICON answers the WINDOW slots (what the titlebar and alt-tab read).
         for (name, which) in [("ICON_BIG", win32::ICON_BIG), ("ICON_SMALL", win32::ICON_SMALL)] {
             let h = unsafe {
                 win32::SendMessageW(hwnd, win32::WM_GET_ICON, which as usize, 0)
@@ -993,7 +947,6 @@ fn mode_cardmedia(args: &[String]) -> Result<(), String> {
         if hwnd.is_null() {
             return Err("no main window".into());
         }
-        // Resize to the wanted CLIENT size.
         let mut wr: RECT = unsafe { std::mem::zeroed() };
         unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut wr) };
         let (cw0, ch0) = client_size(hwnd);
@@ -1063,9 +1016,6 @@ fn mode_cardpaint(args: &[String]) -> Result<(), String> {
     let tooltip = args.iter().any(|a| a == "tooltip");
     let advanced = args.iter().any(|a| a == "advanced");
     let empty = args.iter().any(|a| a == "empty");
-    // `surface=<member|profile|activity>`: which narrow preview surface the
-    // composition shows. The Activity pane is the one that carries the local
-    // synopsis, so the empty/selected proof for it must be its own render.
     let surface = match args
         .iter()
         .find_map(|a| a.strip_prefix("surface="))
@@ -1134,10 +1084,6 @@ fn mode_cardpaint(args: &[String]) -> Result<(), String> {
             seed_cover(&res.artwork)?;
             let mut st = window::ui();
             st.cur_view = window::View::Card;
-            // `empty` renders the explicit nothing-playing state: no recorded
-            // object, no preview, the same one field and one disclosure.
-            // `selected` renders the LOCAL preview, so it must not record a
-            // live push either -- there is no player in this harness.
             let local = args.iter().any(|a| a == "selected" || a == "results");
             if !empty && !local {
                 st.record_preview(kind, raw, Some(action), res);
@@ -1154,20 +1100,14 @@ fn mode_cardpaint(args: &[String]) -> Result<(), String> {
             );
             st.picker.set_filter(potflix_win::search::KindFilter::All);
             if empty {
-                // The empty state must not pre-fill a query: a field holding a
-                // title nothing is playing would be a dead search pretending.
                 st.picker.set_query(String::new());
             }
             if args.iter().any(|a| a == "results" || a == "selected") {
-                // The query that produced the mixed list, in the field it was
-                // typed into.
                 st.picker.set_query("Dune".to_string());
                 st.picker.open = true;
                 st.picker.searched = true;
                 st.picker.selected = 0;
                 st.picker.status = "3 matches for \"Dune\"".to_string();
-                // MIXED kinds in one list: the All-types search returns both,
-                // and each row states its own kind.
                 st.picker.candidates = vec![
                     Candidate {
                         kind: Kind::MOVIE,
@@ -1208,8 +1148,6 @@ fn mode_cardpaint(args: &[String]) -> Result<(), String> {
                 ];
             }
             if args.iter().any(|a| a == "selected") {
-                // The PRODUCTION selection transition: picking a row composes
-                // the local preview from that record. No player, no send.
                 let idx = args
                     .iter()
                     .position(|a| a.starts_with("pick="))

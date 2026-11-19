@@ -1,24 +1,3 @@
-//! A minimal leftmost-first matcher, written for this crate alone.
-//!
-//! Why hand-rolled: the workspace dependency policy keeps `titleclean`
-//! dependency-free (the JDK-11 tables must be parity data, never a crate's own
-//! Unicode), so no regex crate is available to the port. What the port must
-//! reproduce is Java's *leftmost-first* result for the fixed pattern set in
-//! `clean.rs` -- alternation and quantifier preference order, lazy quantifiers,
-//! capture groups with Java's "non-participating group is null" rule, and
-//! `\A` / `\z`.
-//!
-//! Go's `regexp` and Java's `Pattern` both define a match as the one a
-//! backtracking search finds (leftmost start, first path in preference order),
-//! so a backtracking interpreter is the faithful model here, not merely a
-//! convenient one. Leftmost-first order is carried by `Split(preferred,
-//! alternative)`, which is why the compiler encodes greediness as the order of
-//! the two targets.
-//!
-//! Scope is deliberately the subset the ported patterns use: literals, classes
-//! (with ranges, negation and `\d`), `.` as Java's line-terminator-excluding
-//! wildcard, alternation, `?` / `*` / `+` / `{n,m}` with laziness, capturing and
-//! non-capturing groups, `\A` and `\z`.
 
 /// A bracket expression. `negated` is Java's `[^...]`; ranges are inclusive.
 #[derive(Clone, Debug)]
@@ -561,7 +540,6 @@ impl Regex {
             out.push_str(&rest[..start]);
             out.push_str(replacement);
             if end == start {
-                // Zero-width match: copy one code point so the scan advances.
                 let Some(c) = rest[start..].chars().next() else {
                     break;
                 };

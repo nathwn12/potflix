@@ -1,17 +1,3 @@
-//! `presence::designer` -- the RPC designer's field toggles.
-//!
-//! One [`DesignerSpec`] decides which composed card fields reach the Discord
-//! payload and the local previews. It is a field filter, not a second
-//! composer: the card identity, the per-kind lines and the 128-unit budgets
-//! are still decided by [`crate::compose_card`], so a toggle can remove a
-//! field but can never invent one, rename the header to the application name,
-//! or add a corner icon.
-//!
-//! The shipped default is every field on: applying it to a composed card is
-//! byte-identical to the card itself, which is what keeps the preview and the
-//! wire in lockstep. The sender reads the process-wide mirror
-//! ([`live_designer`]) on every poll, so a designer click takes effect at the
-//! next poll tick with no restart and no second push path.
 
 use std::sync::{LazyLock, Mutex};
 

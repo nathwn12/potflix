@@ -1,15 +1,3 @@
-//! `metawarm` CLI -- cache pre-warmer over a library walk, mirrors
-//! `go\cmd\metawarm`.
-//!
-//! Usage:
-//!
-//! ```text
-//! metawarm [-roots "D:\Movies;D:\Shows"] [-cache <dir>] [-dry] [-offline]
-//!          [-limit N] [-concurrency N] [-gate <dur>] [-index <file>]
-//! ```
-//!
-//! The walk + resolve loop lives in `library`; this command adds flag parsing,
-//! the per-file report, and the summary lines.
 
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 

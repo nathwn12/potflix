@@ -1,27 +1,3 @@
-//! `metadata::tenrai` -- the Tenrai anime source (the Jikan successor).
-//!
-//! Tenrai (`https://api.tenrai.org/v1`) is Jikan-v4 compatible: `GET
-//! /v1/anime?q=<title>&limit=<n>&order_by=members&sort=desc` resolves the
-//! title to a MAL id, then `GET /v1/anime/<id>/episodes?page=<n>` carries the
-//! episode table (`mal_id` IS the absolute episode number, with per-episode
-//! title, synopsis and duration).
-//!
-//! Two behaviours that are contract, not detail:
-//!
-//! * the search pick is title-validated with [`pick_best_show`]: a
-//!   low-confidence best returns a definitive MISS rather than a wrong show
-//!   (the discipline the deleted iTunes leg lacked). The pick's `year` NEVER
-//!   rejects: at equal title strength it prefers the candidate carrying the
-//!   query's year, but a missing year, or a year that disagrees with the
-//!   filename, is a nice-to-have display field, never a gate -- the essentials
-//!   are cover, title, episode and synopsis.
-//!
-//! The wire numbers are already absolute, so -- unlike TVmaze/Cinemeta -- an
-//! `Absolute` query is NEVER renumbered positionally: renumbering a partial
-//! page walk would corrupt the table. A short table simply lacks the Number,
-//! so the resolver falls through to the next source. Episode pages are walked
-//! only until the requested Number is found (or the pages run out), capped at
-//! [`TENRAI_MAX_EPISODE_PAGES`] so one lookup stays a handful of requests.
 
 use std::time::Duration;
 
@@ -235,8 +211,6 @@ impl TenraiSource {
             let Some(name) = entry_name(entry) else {
                 continue;
             };
-            // Both spellings score: a romaji query must find the
-            // English-titled main series, not a romaji-named special.
             let mut aliases = Vec::new();
             for title in [&entry.title_english, &entry.title] {
                 let title = title.trim();
@@ -256,7 +230,6 @@ impl TenraiSource {
             return Ok(None);
         }
         let Some(winner) = pick_best_show(&q.title, &cands) else {
-            // Low-confidence best: a wrong title is worse than no title.
             return Ok(None);
         };
         let mut winner_idx = None;
@@ -269,7 +242,6 @@ impl TenraiSource {
         let Some(winner_idx) = winner_idx else {
             return Ok(None);
         };
-        // Soft year preference only: no year match keeps the title winner.
         let take =
             crate::yearpref::prefer_year_match(&q.title, q.year, &cands, &years, winner_idx);
         Ok(rows.get(take).cloned())
@@ -280,8 +252,6 @@ impl TenraiSource {
     /// [`TENRAI_MAX_EPISODE_PAGES`].
     fn episodes(&self, cancel: &Cancel, picked: &TenraiEntry, want: i32) -> Result<Vec<Episode>, Error> {
         let mut out: Vec<Episode> = Vec::new();
-        // A query without an episode number can never number-exact match, so
-        // one page is enough table to return.
         let mut page: u32 = 1;
         loop {
             let url = format!(
@@ -301,9 +271,6 @@ impl TenraiSource {
                 }
                 out.push(build_episode(e));
             }
-            // The page is already fetched, so the whole page is kept (a later
-            // query for another episode of the same show is then served from
-            // the cache); paging stops once the requested Number is in hand.
             if want > 0 && out.iter().any(|episode| episode.number == want) {
                 return Ok(out);
             }
@@ -339,8 +306,6 @@ impl crate::resolver::Source for TenraiSource {
             return Ok(None);
         };
         let episodes = self.episodes(cancel, &picked, q.episode)?;
-        // The wire numbers are already absolute: no positional renumbering, so
-        // a short table simply lacks the Number and the chain falls through.
         let mut media = tenrai_media(&picked, title, Kind::SERIES);
         media.episodes = episodes;
         Ok(Some(media))
@@ -373,7 +338,6 @@ impl crate::resolver::Source for TenraiSource {
                 episode_count: entry.episodes.unwrap_or(0),
                 aliases,
             };
-            // The same floor `Find` applies: a fuzzy row never becomes a pick.
             if pick_best_show(&q.title, std::slice::from_ref(&cand)).is_none() {
                 continue;
             }

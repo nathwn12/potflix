@@ -1,82 +1,3 @@
-//! `metadata::overrides` -- the manual "fix the match" latch.
-//!
-//! NEW SURFACE: `go\` has no override store, so nothing here is diffed against
-//! a ported file; the contract is stated plainly instead. It lives in this
-//! crate because it is the other half of the cache's question: the cache
-//! records what the automatic ladder answered, an [`Override`] records what
-//! the user said instead, and a latch always wins.
-//!
-//! The user types a real series/title name (plus an optional year), picks a
-//! candidate and a [`Scope`]. From then on that identity beats the ladder for
-//! that one movie file ([`Scope::Movie`]), for the episodes of one season
-//! ([`Scope::Season`]), or for every episode under a show folder
-//! ([`Scope::Series`]), including episodes indexed later. A latch also carries
-//! the cover its scope renders ([`Override::poster`]) and, for a season or a
-//! show, the per-episode identities the cards render ([`EpisodePin`]); a movie
-//! keeps its picked record ([`Override::media`]) instead. Callers [`load`]
-//! once, [`Store::put`] on the user's action, and ask [`Store::resolve_for`]
-//! (or the narrower lookups) before consulting the ladder; `None` means "no
-//! latch, resolve normally".
-//!
-//! # Precedence
-//!
-//! For one file, an exact-file movie latch beats everything; a season latch
-//! beats a show latch for that season only; a show latch covers every season
-//! without a latch of its own. Pinning the show later never replaces an
-//! explicit season latch, and [`Store::season_exceptions`] lists the seasons
-//! that carve exceptions out of a show latch.
-//!
-//! # Keying
-//!
-//! A `Scope::Movie` key is the media file's FULL path. A `Scope::Season` key
-//! is the folder that directly holds the episode ([`season_key_for`]): the
-//! `Season N` / `SNN` folder itself when the layout has one, otherwise the
-//! release-style folder that IS that season (`...\Atri S01 1080p BDRip`). A
-//! `Scope::Series` key is the SHOW FOLDER's full path: the folder the episodes
-//! live in, one level above a `Season N` folder when present
-//! ([`series_key_for`] derives that key from a file path), and
-//! [`Store::lookup_series`] walks a path's ancestors so every episode of the
-//! show hits, present or future.
-//!
-//! The asymmetry is deliberate: a season pin keys the SEASON folder and a show
-//! pin keys the SHOW folder ([`series_key_for`] steps over an immediate season
-//! folder, [`season_key_for`] never does), so the two latches can coexist on
-//! one tree and precedence decides the winner. In a release-style tree the
-//! folder can be both the show and its single season, so both functions derive
-//! the same key there; the scopes still keep the two latches apart. Keys
-//! compare case-insensitively with `\` and `/` normalised to one separator
-//! ([`normalize_key`]), so a rescan cannot orphan a latch: a separator or case
-//! difference still matches, and an episode re-indexed under
-//! `...\Show\Season 2\...` still hits a latch on `...\Show`.
-//!
-//! # Store file
-//!
-//! `%LOCALAPPDATA%\Potflix\overrides.json` ([`default_path`]) -- the same
-//! convention as `app_support::config::config_path`, restated here because
-//! `metadata` has no edge to `app-support`. The shape is
-//! `{"version":2,"entries":[...]}` and [`Store::save`] always writes version
-//! 2. A stored `version: 1` is still READ and honoured: a v1 entry carries no
-//! `poster` and no `episodes` (serde defaults them empty), so an existing
-//! store survives the schema change and upgrades on its first save. An absent
-//! file is an empty store, and an unknown JSON field is ignored, so a future
-//! writer can add fields without breaking this reader. A malformed file is
-//! REPORTED, not fatal: [`load`] returns `Err`, never panics, and quarantines
-//! the bad file beside the store; the caller carries on with [`Store::empty`],
-//! and a save over still-corrupt bytes is refused instead of writing a
-//! one-entry file over every manual match. A file whose
-//! `version` is neither [`STORE_VERSION`] nor 1 is refused the same way:
-//! well-formed, but not ours to interpret.
-//!
-//! # Atomic saves
-//!
-//! [`Store::save`] follows the repo's existing atomic-write convention
-//! (`app_support::config::save_config_to`, the cache's retired per-key
-//! writer): marshal, create a uniquely named `.tmp-<pid>-<nanos>-<seq>.json`
-//! beside the target, write, close, rename over the target. A failed write or
-//! rename removes the temp file and leaves the previous file exactly as it
-//! was. [`Store::put`] and [`Store::remove`] save in the same call, and a
-//! failed save rolls their in-memory change back, so the store in memory
-//! always matches the last successful save.
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -493,8 +414,6 @@ impl Store {
             let _ = std::fs::remove_file(&temp_path);
             return Err(err.into());
         }
-        // Flush to stable storage BEFORE the rename: a power cut must not
-        // commit a zero-length file the next load treats as an empty store.
         if let Err(err) = temp.sync_all() {
             drop(temp);
             let _ = std::fs::remove_file(&temp_path);
@@ -890,7 +809,6 @@ mod tests {
             provider_id: "16498".to_string(),
             poster: SEASON_POSTER.to_string(),
             media: None,
-            // The season's OWN episode identities, distinct from the show's.
             episodes: vec![
                 episode_pin(2, 1, 26, "Beast Titan", "A hairy giant appears."),
                 episode_pin(2, 2, 27, "I'm Home", "The scouts return home."),
@@ -920,7 +838,6 @@ mod tests {
         let dir = TempDir::new();
         let path = PathBuf::from(dir.child(STORE_FILE_NAME));
         let mut store = Store::empty_at(path.clone());
-        // Deliberately out of display order: the reloaded store sorts.
         store
             .put(series_override(&win('M', r"\2SERIES\Zentaro")))
             .expect("put series");
@@ -1039,7 +956,6 @@ mod tests {
             vec![STORE_FILE_NAME.to_string()],
             "temp litter after a failed save"
         );
-        // The failed put rolled back: memory still matches the last good save.
         assert_eq!(store.entries().len(), 1);
         assert!(store.lookup_series(&win('M', r"\2SERIES\Zentaro\01.mkv")).is_none());
 
@@ -1085,8 +1001,6 @@ mod tests {
             err.to_string().contains("overrides"),
             "the error names the store: {err}"
         );
-        // Quarantined once, never rewritten in place and never stacked: the
-        // user's bytes survive in the backup beside the store.
         let backup = corrupt_backup_for(&path).expect("quarantine backup");
         assert_eq!(
             std::fs::read(&backup).expect("read backup"),
@@ -1102,9 +1016,6 @@ mod tests {
             .collect();
         assert_eq!(backups.len(), 1, "one quarantine, never stacked");
 
-        // The recovery store refuses to clobber while corrupt bytes sit at the
-        // target: a latch over a bad file fails instead of writing a one-entry
-        // file over every manual match.
         let mut store = Store::empty_at(path.clone());
         let latch_err = store
             .put(movie_override(&win('D', r"\Films\Dune Part Two.mkv")))
@@ -1145,9 +1056,6 @@ mod tests {
         assert_eq!(entry.year, 0);
         assert!(entry.media.is_none());
 
-        // An unsupported version is refused like malformed data, never wiped.
-        // Version 1 is readable and version 2 is current (both covered above);
-        // version 3 is a schema this code does not know.
         let wrong_version = base.join("v3.json");
         let v3 = br#"{"version":3,"entries":[]}"#;
         std::fs::write(&wrong_version, v3).expect("seed v3 store");
@@ -1751,8 +1659,6 @@ mod tests {
             vec![STORE_FILE_NAME.to_string()],
             "temp litter after a failed correction"
         );
-        // The failed correction rolled back: memory still matches the last
-        // good save.
         assert!(store.lookup_movie(&file).is_some());
         assert!(store.lookup_series(&file).is_none());
         assert_eq!(

@@ -1,26 +1,3 @@
-//! `metadata::context` -- mirrors `go\internal\metadata\context.go`.
-//!
-//! Folder context for filename-poor media. Many anime files carry no usable show
-//! in the filename; the show lives in the folder (e.g.
-//! `...\Zentaro\Season 1\01.mkv`, or a release-style tree like
-//! `...\Mr.Harbor.S01.1080p...\Mr.Harbor.S01E01...mkv`). [`context_from_path`]
-//! reads the show/season out of the FULL playing-file path
-//! (`player::pathquery::current_file`) and [`resolve_query`] merges that context
-//! into the filename-only [`parse_raw`](crate::parse::parse_raw) result.
-//!
-//! Ordering that is observable, not detail:
-//!
-//!   * the season EXACT-match pass (root-first, first hit wins) PRECEDES the
-//!     embedded release-style fallback;
-//!   * [`bare_episode_number`] rejects years 1900-2100 and treats a DOT as a
-//!     non-delimiter, so version fragments (5.1, 3.0), quality tokens (1080p,
-//!     10bit, x265) and joined tags (S01E01) never match;
-//!   * the extras/theme gates run BEFORE any fetch, or those files would be
-//!     cached.
-//!
-//! Patterns are transcribed into the `titleclean::Regex` subset and compiled
-//! through `port_pattern` exactly as in `parse.rs` (see that module's doc for
-//! the `\s` expansion and the `\b` boundary helper).
 
 use std::sync::LazyLock;
 

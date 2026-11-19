@@ -1,6 +1,3 @@
-//! JustWatch provider tests: the GraphQL round trip against a fake server
-//! (including the title validation and the poster-template expansion),
-//! plus one live round trip against the real endpoint.
 
 use std::time::Duration;
 

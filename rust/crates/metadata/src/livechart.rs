@@ -1,23 +1,3 @@
-//! `metadata::livechart` -- the LiveChart.me anime source (keyless JSON).
-//!
-//! LiveChart.me (`https://www.livechart.me`) needs no key for anime search:
-//! `GET /api/v1/anime?q=<title>` carries the synopsis, alternative titles,
-//! episode count, premiere date and poster in a single call.
-//!
-//! Three behaviours that are contract, not detail:
-//!
-//! * the search pick is title-validated with [`pick_best_show`]: a
-//!   low-confidence best returns a definitive MISS rather than a wrong show.
-//!   The pick's `premiere_date` year NEVER rejects: at equal title strength
-//!   it prefers the candidate carrying the query's year, but a missing year,
-//!   or a year that disagrees with the filename, is a nice-to-have display
-//!   field, never a gate;
-//! * LiveChart.me carries an episode COUNT but no episode table, so the
-//!   answer synthesizes numbered absolute stubs ([`episode_stubs`]) --
-//!   numbers only, never fabricated titles. The alternative titles ride along
-//!   only as extra pick candidates when the display title is empty;
-//! * movies never reach the wire: this is an anime-only table, so a movie key
-//!   returns `Ok(None)` before any fetch.
 
 use std::time::Duration;
 
@@ -156,7 +136,6 @@ impl LivechartSource {
             return Ok(None);
         }
         let Some(winner) = pick_best_show(&q.title, &cands) else {
-            // Low-confidence best: a wrong title is worse than no title.
             return Ok(None);
         };
         let mut winner_idx = None;
@@ -169,7 +148,6 @@ impl LivechartSource {
         let Some(winner_idx) = winner_idx else {
             return Ok(None);
         };
-        // Soft year preference only: no year match keeps the title winner.
         let take =
             crate::yearpref::prefer_year_match(&q.title, q.year, &cands, &years, winner_idx);
         Ok(Some(entries[take].clone()))
@@ -195,7 +173,6 @@ impl crate::resolver::Source for LivechartSource {
         if title.is_empty() {
             return Ok(None);
         }
-        // Numbered absolute stubs only: the API carries a count but no table.
         let episodes = episode_stubs(item.episode_count.unwrap_or(0), 0);
         let artwork = item
             .poster

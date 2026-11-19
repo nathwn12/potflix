@@ -1,39 +1,3 @@
-//! Potflix tray application -- mirrors the Go root package `main` (`go\main.go`).
-//!
-//! Console-less by design: `#![windows_subsystem = "windows"]` is the equivalent
-//! of Go's `-ldflags "-H=windowsgui"`, so `--selftest` output only reaches a
-//! parent that redirects stdout -- exactly like the Go build.
-//!
-//! This is the app's own seam, and the last one: the single-instance lock, the
-//! debug log, the tray window and message loop, the Discord transport, the poll
-//! loop and the settings window all exist in one process here. The four frozen
-//! orderings are reproduced exactly, with two recorded repairs:
-//!
-//! 1. the logger is created BEFORE the instance lock, so a lock loser can log
-//!    its verdict to the debug log (the old "lock before log" order made a
-//!    squatted port a silent no-op under `windows_subsystem`);
-//! 2. the logger, then the client-id SOURCE only -- never the value;
-//! 3. `--selftest` (via [`potflix::selftest`]) bypasses [`run_ui`] wholly;
-//! 4. the tray window is created and pumped on one OS thread.
-//!
-//! # Where `go\events.go` lives
-//!
-//! The frozen module map (`src\lib.rs`) gives the app library exactly one module,
-//! `selftest`. The event-line emitters from `go\events.go` are therefore exposed
-//! from [`potflix::selftest`] (`event_connected`, `event_push_attempt`,
-//! `event_decision`, ...) and called from here as `selftest::event_*`. That keeps
-//! one writer per log line instead of duplicating the formats across the bin.
-//!
-//! # Known deviations (recorded, not silent)
-//!
-//! * `tray::clear_activity` now has an installable seam
-//!   ([`tray::set_clear_activity`]); [`run_ui`] installs the dc-bound clear
-//!   exactly as Go does at `main.go:197-200`, so the tray's "Exit Potflix" path
-//!   sends the IPC clear instead of only logging.
-//! * `window::set_app_log` and `tray::set_logger` both take a `&'static`
-//!   [`Logger`]; [`run_ui`] installs the same logger in both seams, so the
-//!   tray and the UI write to one shared log with no second file handle
-//!   (Go's `appLog = log` at `main.go:121`).
 
 #![windows_subsystem = "windows"]
 
@@ -228,14 +192,9 @@ fn resolved_from_latch(off: &overrides::Override, query: &metadata::Query) -> pr
             if res.year <= 0 {
                 res.year = off.year;
             }
-            // The owner's stored choice wins: the latch poster beats the
-            // media snapshot poster. The snapshot is only the fallback when
-            // the latch carries no poster of its own.
             if !off.poster.is_empty() {
                 res.artwork = off.poster.clone();
             }
-            // A movie snapshot synopsis describes the work, so it may ride
-            // the tooltip.
             res.synopsis_is_work = true;
             res
         }
@@ -256,8 +215,6 @@ fn resolved_from_latch(off: &overrides::Override, query: &metadata::Query) -> pr
             };
             if let Some(pin) = pin {
                 res.episode_name = pin.title.clone();
-                // Episode-pinned prose: `synopsis_is_work` stays false (the
-                // default), so this never rides the Discord tooltip.
                 res.synopsis = pin.synopsis.clone();
                 res.season = i64::from(pin.season);
                 res.number = pin.number;
@@ -349,10 +306,6 @@ fn push_activity(
     event: bool,
     debounced: bool,
 ) -> bool {
-    // T5-C: an idle title never becomes a card. The presence composer would
-    // render `Browsing`/`Idle` for exactly these inputs; clear instead, record
-    // no preview, and leave the gate untouched so the next real media sends
-    // fresh.
     if is_no_media_title(raw_title) {
         match dc.clear_activity() {
             Ok(()) => config::set_live_discord_up(true),
@@ -366,9 +319,6 @@ fn push_activity(
     let query = meta_query_for(raw_title);
     let mut res = presence::Resolved::default();
     let mut found = false;
-    // The stored manual latch wins before the ladder, exclusively: a latched
-    // file's card is built from the override store alone, with no resolver call
-    // and so no network.
     if let Some(latched) = latch_resolved(
         &playing_file_path(raw_title),
         &query,
@@ -376,8 +326,6 @@ fn push_activity(
         res = latched;
         found = true;
     } else if let Some(resolver) = META_RESOLVER.get() {
-        // Non-blocking: a miss fires at most one background fetch per key.
-        // Unknown kinds (themes, extras, bare names) never fetch or cache.
         if query.kind != metadata::Kind::UNKNOWN {
             let cancel = metadata_http::Cancel::background();
             if let Ok(answer) = resolver.resolve(&cancel, &query)
@@ -388,9 +336,6 @@ fn push_activity(
                     episode_name: answer.episode,
                     artwork: answer.artwork,
                     synopsis: answer.synopsis,
-                    // A resolver synopsis describes the work (show or
-                    // movie); the episode title rides separately, so the
-                    // tooltip is spoiler-free.
                     synopsis_is_work: true,
                     genres: answer.genres,
                     length: answer.length,
@@ -406,14 +351,9 @@ fn push_activity(
             }
         }
     }
-    // An unmatched UNKNOWN title (themes, extras, bare names) is not a
-    // provisional series: the card is the cleaned title plus the parsed code
-    // if any, with no art, no prose and no timestamps.
     if !found && query.kind == metadata::Kind::UNKNOWN {
         res.unknown = true;
     }
-    // The kind follows the answer when one was found, else the query; an
-    // UNKNOWN title takes the series ladder.
     let is_movie = if found {
         res.is_movie
     } else {
@@ -424,21 +364,13 @@ fn push_activity(
     } else {
         app_support::config::CardKind::Series
     };
-    // Always compose: with the default spec for a kind, `compose_card`
-    // reproduces the builder's output byte-for-byte, so no skip branch is
-    // needed.
     let card = presence::compose_card(raw_title, action, &res, is_movie, &specs.for_kind(kind));
-    // The designer's field choices filter the composed card on the one path the
-    // sender uses. The default spec is identity, so the shipped card is
-    // unchanged; a click in the designer is read here at the next poll.
     let card = presence::live_designer().apply(card);
     let (out, verdict) = gate.decide(card, ct, total, now, event, debounced);
     selftest::event_push_attempt(log, &out, &verdict);
     if !verdict.send {
         return false;
     }
-    // A pause parks the paused card and keeps it; the gate never sets Clear now,
-    // so this branch is dormant and retained for the null-activity path only.
     if verdict.clear {
         match dc.clear_activity() {
             Ok(()) => config::set_live_discord_up(true),
@@ -500,8 +432,6 @@ fn is_no_media_title(raw_title: &str) -> bool {
     let mut raw = raw_title
         .strip_suffix(player::window::SUFFIX)
         .unwrap_or(raw_title);
-    // A renamed window keeps the same convention (`PotFlix` instead of
-    // `PotPlayer`); strip it too so the gate does not depend on the suffix.
     if let Some(stripped) = raw.strip_suffix(" - PotFlix") {
         raw = stripped;
     }
@@ -636,15 +566,11 @@ fn poll_step<P: PlayerProbe>(
     sleep: &dyn Fn(Duration),
 ) {
     if state.segment.is_none() {
-        // A reconnect starts a fresh Discord session. The segment below is reset
-        // on every outer iteration anyway (Main.java:109), so only the generation
-        // needs noting here.
         if dc.generation() != state.last_gen {
             state.last_gen = dc.generation();
         }
 
         let Some(id) = probe.find_first() else {
-            // No player window: nothing plays, so the UI's latch target is gone.
             config::set_live_now_playing(None);
             if clear_due(dc.generation(), state.cleared_gen) {
                 if let Err(err) = dc.clear_activity() {
@@ -662,9 +588,6 @@ fn poll_step<P: PlayerProbe>(
             return;
         }
 
-        // Java makes one PresenceTracker per outer iteration (Main.java:109), so
-        // a window that disappears and returns starts a fresh segment rather than
-        // inheriting the previous segment's last-seen state.
         state.segment = Some(PollSegment {
             id,
             tracker: Tracker::new(),
@@ -672,9 +595,6 @@ fn poll_step<P: PlayerProbe>(
         });
     }
 
-    // One iteration of the inner "track this window until it dies or stops
-    // looking like PotPlayer" loop. `gone` marks the paths that end the segment;
-    // the window-gone clear then runs unconditionally, as it always has.
     let mut gone = false;
     {
         let seg = state.segment.as_mut().expect("segment created above");
@@ -710,19 +630,8 @@ fn poll_step<P: PlayerProbe>(
                         &a.suffix,
                     );
                 }
-                // The card is rebuilt from the current action every poll,
-                // including polls where the tracker emits nothing (`current`).
                 let cur = action.clone().or_else(|| seg.tracker.current());
                 let live = cur.as_ref().is_some_and(|a| a.running || a.paused);
-                // T5-C: no idle card, ever. An idle title (empty, the player
-                // app name) or a window with no current file is not media:
-                // clear (once per generation, like the no-player path),
-                // record no preview, and feed nothing to the gate -- so no
-                // `Browsing`/`Idle`, no app-name header, and no PotFlix /
-                // PotPlayer name ever reaches the wire. A live running/paused
-                // action still wins over an empty file read (a transient path
-                // query must not clear a real card); a stopped or silent
-                // window with no file clears immediately instead of parking.
                 let no_media = is_no_media_title(&title)
                     || (!live && playing_file_path(&title).trim().is_empty());
                 if no_media {
@@ -740,10 +649,6 @@ fn poll_step<P: PlayerProbe>(
                         state.cleared_gen = dc.generation();
                     }
                 } else {
-                // The UI's "Fix match" latches the file that is playing: mirror
-                // the raw title and its path while a live action (running or
-                // paused) is on the card, so the UI reads exactly what the card
-                // renders from.
                 if let Some(a) = cur.as_ref()
                     && (a.running || a.paused)
                 {
@@ -751,26 +656,12 @@ fn poll_step<P: PlayerProbe>(
                         raw_title: title.clone(),
                         path: playing_file_path(&title),
                     }));
-                    // Warm the Fix match list for what is playing now: the
-                    // poll thread only starts a search when the title/year/scope
-                    // changed, so a repeated tick is free and the next episode
-                    // of the same show is a cache hit.
                     potflix_win::window::prefetch_now_playing();
                 }
-                // C: a live window whose action stays Stop past the grace is a
-                // stopped player (or one closed to the tray), not a playing one,
-                // so clear the card as the no-player branch does -- and record
-                // the generation, so a reconnect re-asserts it. The next live
-                // poll resets the anchor, and the resume then pushes a live card
-                // through the normal path: the stop card carries no anchor, so
-                // the running card can never be byte-identical to it and the
-                // gate cannot suppress it.
                 let stopped = cur.as_ref().is_some_and(|a| !a.running && !a.paused);
                 let (since, due) = sustained_stop(now, state.stop_since, stopped);
                 state.stop_since = since;
                 if due {
-                    // A stopped player is not a playing segment: clear the
-                    // mirror with the card.
                     config::set_live_now_playing(None);
                     if clear_due(dc.generation(), state.cleared_gen) {
                         match dc.clear_activity() {
@@ -784,9 +675,6 @@ fn poll_step<P: PlayerProbe>(
                         state.cleared_gen = dc.generation();
                     }
                 } else {
-                    // The gate is consulted EVERY poll with the current card so
-                    // it can re-anchor on divergence, fire the heartbeat, and log
-                    // the verdict.
                     let debounced = seg.tracker.pending_debounce();
                     if let Some(cur) = cur {
                         let mut record = |kind,
@@ -809,15 +697,6 @@ fn poll_step<P: PlayerProbe>(
                             action.is_some(),
                             debounced,
                         );
-                        // T5-E: a successful real-media send re-arms the
-                        // once-per-generation idle clear. Without this the
-                        // next idle/no-media transition on the same
-                        // generation is suppressed (`generation ==
-                        // cleared_gen`) and the media card stays parked
-                        // after the media is gone. A suppressed hold or a
-                        // failed send leaves the anchor alone, so idle
-                        // polls without an intervening card still clear
-                        // exactly once.
                         if sent {
                             state.cleared_gen = -1;
                         }
@@ -828,8 +707,6 @@ fn poll_step<P: PlayerProbe>(
         }
     }
     if gone {
-        // The window is gone (closed, or no longer PotPlayer): the segment
-        // ended, so the clear and the mirror go together.
         state.segment = None;
         config::set_live_now_playing(None);
         match dc.clear_activity() {
@@ -986,8 +863,6 @@ fn handle_lock_bind_failure(log: &'static Logger, err: std::io::Error) -> ! {
                 instance::ALREADY_RUNNING_MSG
             ));
             log.close();
-            // The loser still says why on stderr: the probe that made this
-            // path discriminating must not silence the user-facing reason.
             eprintln!("{}", instance::ALREADY_RUNNING_MSG);
             std::process::exit(code);
         }
@@ -1020,9 +895,6 @@ fn run_ui(log: &'static Logger) {
     };
     let tray_failed = !tray_window.added;
     if tray_failed {
-        // Deliberate departure from Java :550-551 (see README deviation 16):
-        // a tray-less process keeps serving the card with the window visible
-        // instead of exiting silently.
         eprintln!("TrayIcon could not be added.");
         log.log("notify-icon add result=false");
     } else {
@@ -1032,8 +904,6 @@ fn run_ui(log: &'static Logger) {
         ));
     }
 
-    // Tray is up: start the Discord transport and the poll loop on their own
-    // threads; the message loop below owns this OS thread.
     let (client_id, _) = clientid::resolve_client_id();
     let dc = discord::Client::new(discord::Config {
         client_id: client_id.to_string(),
@@ -1079,10 +949,6 @@ fn run_ui(log: &'static Logger) {
         ..Default::default()
     }));
 
-    // Library catch-up: resolve whatever metadata the store-backed index still
-    // owes, on a background worker, resuming where the last run stopped. The
-    // config carries the app version like the UI scan path does, so the
-    // needs-repair report's `app version:` is never empty.
     let _ = library::catchup::start_catch_up(startup_catch_up_config(&cfg), None);
 
     let dc = Arc::new(dc);
@@ -1090,27 +956,17 @@ fn run_ui(log: &'static Logger) {
     tray::reset_quit();
     let poll_handle = std::thread::spawn(move || poll_loop(log, &poll_dc));
 
-    // Fleet decision 6 (deviation): clear the Discord card before exiting. Go
-    // installs the dc-bound override at `go\main.go:197-200`, replacing the tray
-    // stub; the poll loop's own clears are already live, so this repairs only
-    // the tray Exit path. The Exit dispatch itself no longer clears: the quit
-    // tail below clears after the poll thread stops, so no in-flight
-    // `set_activity` races it.
     let clear_dc = Arc::clone(&dc);
     let _ = tray::set_clear_activity(Box::new(move || {
         let _ = clear_dc.clear_activity();
         log.log("cleared (exit)");
     }));
 
-    // Settings window: created hidden, shown on manual launch, kept hidden to
-    // the tray on the autostart path. `--selftest` never reaches here.
     match window::create_main_window() {
         Err(err) => log.log(&format!("main window init failed: {err}")),
         Ok(()) => {
             let args: Vec<String> = std::env::args().collect();
             if tray_failed {
-                // No tray icon, no tray menu, no other way back in: leave the
-                // window visible so the app is reachable and quittable (X).
                 log.log("tray icon missing: window left visible");
                 window::show_main_window();
             } else if potflix_win::settings::should_show_main_window(&args) {
@@ -1122,11 +978,6 @@ fn run_ui(log: &'static Logger) {
     }
 
     tray::message_loop();
-    // Ordered quit tail (the old `process::exit` in the menu dispatch skipped
-    // all of this): stop the poll thread first so no new `set_activity` can
-    // start, then clear with ordering, delete the icon, and close Discord.
-    // A window-close (X) that bypassed Exit still lands here, so force the
-    // quit flag before joining.
     if !tray::quit_requested() {
         tray::request_quit();
     }
@@ -1152,7 +1003,6 @@ fn snapshot_request(args: &[String]) -> Option<Result<(String, String, bool), St
 }
 
 fn main() {
-    // argv is ignored except for the M1 test switch.
     let args: Vec<String> = std::env::args().collect();
     if let Some(req) = snapshot_request(&args) {
         selftest::attach_console();
@@ -1193,19 +1043,12 @@ fn main() {
         selftest::attach_console(); // make --selftest output visible from the parent console
     }
 
-    // (1) Debug log beside the executable, FIRST: a lock loser must log its
-    // verdict to the debug log (the old lock-before-log order plus `eprintln`
-    // under `windows_subsystem` made a squatted port a silent no-op).
     let log: &'static Logger = Box::leak(Box::new(Logger::new(
         debuglog::default_log_path(),
         debuglog::DEFAULT_LOG_CAP_BYTES,
         debuglog::DEFAULT_LOG_MAX_FILES,
     )));
 
-    // (2) Single-instance lock: 127.0.0.1:17843, held for life. A bind failure
-    // is probed: a live Potflix answers the handshake and the loser exits 0
-    // cleanly with a log line; a foreign listener (or a teardown race with no
-    // answer) is a logged failure with a non-zero exit.
     let held_listener = match instance::acquire_instance_lock_on(instance::LOCK_PORT) {
         Ok(listener) => listener,
         Err(err) => handle_lock_bind_failure(log, err),
@@ -1219,12 +1062,9 @@ fn main() {
         instance::LOCK_BACKLOG
     ));
 
-    // (3) Client id: log only the source, never the value.
     let (_, source) = clientid::resolve_client_id();
     clientid::log_client_id_source(log, source);
 
-    // `appLog = log` for the tray window's message/menu callbacks and the
-    // settings window's `app_logf` (Go `main.go:121`: one shared logger).
     let _ = tray::set_logger(log);
     let _ = window::set_app_log(log);
     let _ = tray::set_show_main_window(window::show_main_window);
@@ -1268,8 +1108,6 @@ mod tests {
     /// sequence and asserts the exact SET_ACTIVITY frames.
     #[test]
     fn gate_fake_pipe_sequence() {
-        // Reads the live mirror on every drive; the serial keeps a concurrent
-        // publisher out of this long run.
         let _live_serial = LIVE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         const IT_TITLE: &str = "Breaking Bad (2008) - S04E07 - Problem Dog (1080p BluRay x265 Silence).mkv - PotPlayer";
         const IT_TOTAL: i64 = 2_832_979;
@@ -1585,7 +1423,6 @@ mod tests {
         );
         assert!(log_text.contains("reason=paused"), "missing reason=paused");
 
-        // F1: the logged payload must agree with the frame on the wire.
         let mut logged_ends: Vec<(bool, i64)> = Vec::new();
         for line in log_text.split('\n') {
             if !line.contains("gate=sent") {
@@ -1647,8 +1484,6 @@ mod tests {
 
         let dir = unique_dir("m3-reply");
         let log_path = dir.join("potflix-m3-reply.log");
-        // The client callbacks must be `'static`; the log is leaked so the ONE
-        // handle on the file is shared by every callback (never a second handle).
         let log: &'static Logger = Box::leak(Box::new(Logger::new(&log_path, 1 << 20, 2)));
 
         let srv = discord::FakeServer::new(0);
@@ -2233,7 +2068,6 @@ mod tests {
 
         let series_raw = "Show.S01E02.Pilot.1080p.mkv - PotPlayer";
         let movie_raw = "Dune.Part.Two.2024.1080p.BluRay.x264.mkv - PotPlayer";
-        // Positive control: the query kinds really are series vs movie here.
         assert_eq!(
             meta_query_for(series_raw).kind,
             metadata::Kind::SERIES,
@@ -2338,7 +2172,6 @@ mod tests {
         push_activity(&log, &dc, &mut gate, config::CardSpecs::default(), &mut record, raw_a, Some(&act), 1000, TOTAL, NOW, true, false);
         let first = frx.recv_timeout(Duration::from_secs(2)).expect("first card");
         let (d1, s1) = wire_lines(&first);
-        // One poll later the corrected title sends at once, not at heartbeat.
         let act2 = presence::Action {
             running: true,
             has_start: true,
@@ -2399,7 +2232,6 @@ mod tests {
             };
             push_activity(&log, &dc, &mut gate, config::CardSpecs::default(), &mut record, raw, Some(&act), ct, TOTAL, now, true, false);
         }
-        // 5 frames go out; the 6th change is held (coalesced, no preview).
         let mut got_details = Vec::new();
         for _ in 0..5 {
             let frame = frx.recv_timeout(Duration::from_secs(2)).expect("burst frame");
@@ -2407,8 +2239,6 @@ mod tests {
         }
         assert!(frx.recv_timeout(Duration::from_millis(250)).is_err(), "6th change must hold, not send a 6th frame");
         assert_eq!(previews.get(), 5, "held poll records no preview");
-        // First poll after the window flushes the newest (F); intermediates
-        // never go out twice and no identical duplicate follows.
         let flush_now = NOW + 20_000 + 250;
         let flush_ct = 1000 + 250 * 5 + 20_000;
         let flush_act = presence::Action {
@@ -2636,8 +2466,6 @@ mod tests {
         assert_eq!(d1, ed1);
         assert_eq!(s1.as_deref().unwrap_or(""), es1);
 
-        // A save publishes new specs; the NEXT poll with the same title/ct/total
-        // and no event sends the new lines by itself.
         let mut specs_b = config::CardSpecs::default();
         assert!(specs_b.set_line(config::CardKind::Series, config::CardLine::Details, "title"));
         assert!(specs_b.set_line(config::CardKind::Series, config::CardLine::State, "tag"));
@@ -2665,10 +2493,6 @@ mod tests {
         assert_eq!(s2.as_deref().unwrap_or(""), es2);
         assert_ne!((d1, s1), (d2, s2), "the wire must carry the new lines");
 
-        // Movie variant: same-media spec change, so the send can only come from
-        // the published specs (the gate's content-change rule), not from a
-        // media change or a forced event. First push a MOVIE baseline and
-        // record the card the wire carried.
         let movie_raw = "Dune.Part.Two.2024.1080p.BluRay.x264.mkv - PotPlayer";
         let act_m = presence::Action {
             running: true,
@@ -2699,11 +2523,6 @@ mod tests {
         assert_eq!(dm1, edm1);
         assert_eq!(sm1.as_deref().unwrap_or(""), esm1);
 
-        // Movie variant: without metadata the default movie card is already
-        // title-led, so a published Details "title" preset cannot change the
-        // unresolved wire. Prove the mirror directly instead: publish the
-        // spec, read it back, and compose a resolved movie -- the title preset
-        // drops the year the default would carry.
         let mut specs_c = specs_b.clone();
         assert!(specs_c.set_line(config::CardKind::Movie, config::CardLine::Details, "title"));
         config::set_live_card_specs(specs_c.clone());
@@ -2794,8 +2613,6 @@ mod tests {
             parked.ends_with(" \u{b7} Paused"),
             "first frame is the parked pause card, got {parked:?}"
         );
-        // A save publishes the Minimal state preset; the next paused poll with
-        // the same title/ct/total and no event still sends the new lines.
         let mut specs = config::CardSpecs::default();
         assert!(specs.set_line(config::CardKind::Series, config::CardLine::State, "none"));
         config::set_live_card_specs(specs.clone());
@@ -2899,12 +2716,9 @@ mod tests {
         let mut tracker = Tracker::new();
         let mut gate = Gate::new();
         let mut stop_since = 0i64;
-        // Nothing is cleared yet on this generation, so the first due clear
-        // goes out (a fresh generation is the poll loop's start state too).
         let mut cleared_gen = -1i64;
 
         {
-            // One poll of the loop's decision: tracker -> sustained stop -> push.
             let mut drive = |status: PlayStatus, ct: i64, now: i64| {
                 let action = tracker.poll(RAW, status, ct, now);
                 let cur = action.clone().or_else(|| tracker.current());
@@ -2940,8 +2754,6 @@ mod tests {
                 }
             };
 
-            // Play, then the position freezes and the Stopped state lands (the
-            // tracker's glitch rule keeps reporting Running while it still moves).
             drive(PlayStatus::RUNNING, 1000, NOW);
             drive(PlayStatus::RUNNING, 1250, NOW + 250);
             drive(PlayStatus::STOPPED, 1250, NOW + 500);
@@ -2967,8 +2779,6 @@ mod tests {
                 "frame 2 must be the stop card with no anchor: {stop}"
             );
 
-            // The grace elapses with the window still Stopped: the clear goes out
-            // and no stop card is pushed again.
             drive(PlayStatus::STOPPED, 1250, NOW + 16_000);
             let cleared = frx
                 .recv_timeout(Duration::from_secs(2))
@@ -2980,8 +2790,6 @@ mod tests {
                 "frame 3 must be the null clear: {cleared}"
             );
 
-            // Playback resumes from the same window: the live card goes out
-            // again, re-anchored to the resume.
             drive(PlayStatus::RUNNING, 1300, NOW + 16_250);
             let resume = frx
                 .recv_timeout(Duration::from_secs(2))
@@ -3077,8 +2885,6 @@ mod tests {
     /// exclusivity is structural.
     #[test]
     fn latched_series_file_renders_the_pin_and_poster() {
-        // The fixture store path and the seeded query cache are process-wide:
-        // the serial keeps every other cache-touching test out.
         let _live_serial = LIVE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let root = unique_dir("latch-series");
         let show_dir = root.join("Latch Show");
@@ -3112,7 +2918,6 @@ mod tests {
 
         let raw = "Latch.Show.S02E05.The.Pin.Episode.1080p.mkv - PotPlayer";
         let query = seed_playing_file(raw, &file.to_string_lossy());
-        // Positive control: the fixture really is the pinned episode.
         assert_eq!(query.kind, metadata::Kind::SERIES, "series fixture kind");
         assert_eq!((query.season, query.episode), (2, 5), "pinned episode");
         assert!(
@@ -3192,7 +2997,6 @@ mod tests {
     /// all three.
     #[test]
     fn latched_movie_file_renders_its_media_snapshot() {
-        // Same process-wide fixture state as the series test: one serial.
         let _live_serial = LIVE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let root = unique_dir("latch-movie");
         let file = root.join("Latch Movie (2019).mkv");
@@ -3294,8 +3098,6 @@ mod tests {
             "the owner's latch poster wins over the snapshot artwork: {v}"
         );
 
-        // Rewrite the store without media artwork: only the mtime-driven
-        // reload can see the new latch, and the latch poster is the fallback.
         store.put(movie("")).expect("rewrite the movie latch");
         set_store_mtime(&store_path, 2_000_000);
         push_activity(
@@ -3330,10 +3132,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    // Poll-loop sequence tests over the injected probe seam. The REAL loop body
-    // (`poll_step`) runs -- real tracker, real gate, real push_activity, real
-    // clear logic -- against a scripted player, a fake clock and the in-process
-    // fake Discord pipe; only the player reads and the sleeps are injected.
 
     /// The scripted player the poll-loop tests drive: one window whose identity,
     /// aliveness, title, status and times the test mutates between steps. The
@@ -3535,7 +3333,6 @@ mod tests {
         let player = ScriptedPlayer::new(RAW);
         let mut state = PollState::new();
 
-        // Playing: the first poll sends the card, the steady followers do not.
         player.set(|w| {
             w.present = true;
             w.alive = true;
@@ -3550,8 +3347,6 @@ mod tests {
             poll_steps(&log, &dc, &player, &clock, &mut state, &sleep, 1);
         }
 
-        // The window dies: the clear goes out ONCE (and records the generation),
-        // then the no-player iterations stay silent.
         player.set(|w| {
             w.alive = false;
             w.present = false;
@@ -3579,7 +3374,6 @@ mod tests {
             "the clear carries a null activity: {v}"
         );
 
-        // Positive control: the clear really came from the window-gone path.
         let log_text = std::fs::read_to_string(&log_path).expect("read log");
         assert_eq!(
             log_text.matches("cleared (player window gone)").count(),
@@ -3603,7 +3397,6 @@ mod tests {
         config::set_live_card_specs(config::CardSpecs::default());
         const RAW: &str = "Dune.Part.Two.2024.1080p.BluRay.x264.mkv - PotPlayer";
         const NOW: i64 = 1_000_000_000_000;
-        // T5-C: real media carries a current file (see above).
         let query = seed_playing_file(RAW, r"Q:\Media\Dune.Part.Two.2024.1080p.BluRay.x264.mkv");
         assert_eq!(query.kind, metadata::Kind::MOVIE, "movie fixture kind");
 
@@ -3742,9 +3535,6 @@ mod tests {
             let player = ScriptedPlayer::new(RAW);
             let mut state = PollState::new();
 
-            // Playing, then Stopped with the position frozen. The tracker keeps
-            // reporting Running while the ct window still moves, then emits the
-            // stop card and arms the grace at the poll where the window settles.
             player.set(|w| {
                 w.present = true;
                 w.alive = true;
@@ -3761,8 +3551,6 @@ mod tests {
             now_clock.set(NOW + 750);
             poll_steps(&log, &dc, &player, &clock, &mut state, &sleep, 1);
 
-            // Drive to just inside the grace (anchor at NOW+750, due at
-            // NOW+15_750): still no clear.
             for i in 4..=62i64 {
                 now_clock.set(NOW + 250 * i);
                 poll_steps(&log, &dc, &player, &clock, &mut state, &sleep, 1);
@@ -3774,7 +3562,6 @@ mod tests {
                 before.iter().filter(|f| f.clear).count()
             );
 
-            // The boundary: the grace has elapsed, so the clear goes out.
             now_clock.set(NOW + 15_750);
             poll_steps(&log, &dc, &player, &clock, &mut state, &sleep, 1);
             let cleared = frx
@@ -3782,7 +3569,6 @@ mod tests {
                 .expect("the sustained-stop clear");
             assert!(cleared.clear, "the grace elapsed, so the clear goes out");
 
-            // ...exactly once: the generation is recorded.
             for i in 1..=3i64 {
                 now_clock.set(NOW + 15_750 + 250 * i);
                 poll_steps(&log, &dc, &player, &clock, &mut state, &sleep, 1);
@@ -3794,8 +3580,6 @@ mod tests {
                 after.len()
             );
 
-            // Positive controls: the stop really happened, and the clear is the
-            // one logged line.
             let log_text = std::fs::read_to_string(&log_path).expect("read log");
             assert!(
                 log_text.contains("action=STOP"),
@@ -3812,11 +3596,7 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
 
-        // Case 2: the flicker. Running/Paused/Running with short stopped blips
-        // across a 20 s span (past the grace): the live polls reset the stop
-        // anchor, so no clear ever fires.
         {
-            // T5-C: real media carries a current file (see case 1).
             let query = seed_playing_file(RAW, r"Q:\Media\Dune.Part.Two.2024.1080p.BluRay.x264.mkv");
             assert_eq!(query.kind, metadata::Kind::MOVIE, "movie fixture kind");
             let srv = discord::FakeServer::new(0);
@@ -3846,10 +3626,6 @@ mod tests {
                 .expect("the running card");
             assert!(!card.clear, "frame 1 is the running card");
 
-            // 80 polls, 250 ms apart (20 s, past the 15 s grace). Per 8-poll
-            // cycle: Running, Paused, Running (the owner's log flicker), then
-            // five stopped polls with the position frozen. Each cycle's live
-            // polls reset the stop anchor.
             for i in 1..=80i64 {
                 now_clock.set(NOW + 250 * i);
                 let phase = (i - 1) % 8;
@@ -3879,8 +3655,6 @@ mod tests {
                 "the flickering window cleared {} times",
                 frames.iter().filter(|f| f.clear).count()
             );
-            // Positive control: the stopped blips really produced stop
-            // decisions (the anchor armed and reset), not a vacuous pass.
             let log_text = std::fs::read_to_string(&log_path).expect("read log");
             assert!(
                 log_text.contains("action=STOP"),
@@ -3915,7 +3689,6 @@ mod tests {
             episodes: Vec::new(),
             created_at_ms: 1_700_000_000_000,
         };
-        // Season/episode query: the code comes from the query.
         let query = metadata::Query {
             kind: metadata::Kind::SERIES,
             title: "Latch Show".to_string(),
@@ -3932,7 +3705,6 @@ mod tests {
         assert!(!res.is_movie, "a series latch is never a movie");
         assert_eq!((res.season, res.number), (1, 2), "code from the query");
         assert!(res.episode_name.is_empty(), "no pin means no episode title");
-        // Absolute query: the absolute number rides along, no season fabricated.
         let absolute = metadata::Query {
             kind: metadata::Kind::SERIES,
             title: "Latch Show".to_string(),
@@ -3944,8 +3716,6 @@ mod tests {
         assert!(!res.is_movie, "absolute series latch is never a movie");
         assert_eq!(res.absolute, 7, "absolute from the query");
         assert_eq!((res.season, res.number), (0, 0), "no fabricated season");
-        // The provisional card composes: the show title in the header (line 1
-        // blanks) and the absolute code on line 2; never a panic.
         let card = presence::compose_card(
             "Latch.Show.07.1080p.mkv - PotPlayer",
             None,
@@ -4003,7 +3773,6 @@ mod tests {
             res.synopsis_is_work,
             "a snapshot synopsis is work-level and rides the tooltip"
         );
-        // No latch poster: the snapshot artwork is the fallback.
         let mut bare = latch.clone();
         bare.poster.clear();
         let res = resolved_from_latch(&bare, &query);
@@ -4081,7 +3850,6 @@ mod tests {
             .expect("latch the show folder");
         let _fixture = OverridesFixture::install(store_path);
 
-        // The filename classifies as a movie, yet the series latch wins.
         let query = metadata::Query {
             kind: metadata::Kind::MOVIE,
             title: "Latch Movie".to_string(),
@@ -4099,11 +3867,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    // T5-C (red first): no idle `Browsing`/`Idle` card, no `Watching
-    // PotFlix`/`Watching PotPlayer`. An idle title (empty/whitespace, the
-    // player app name) or a window with no current file must never send the
-    // idle card: clear instead, record no preview, and keep real media
-    // sending with the stop grace intact.
 
     /// T5-C: the idle-title predicate covers the app names and the empty
     /// cases (suffix-stripped, trimmed).
@@ -4418,9 +4181,6 @@ mod tests {
             silent.len()
         );
 
-        // Phase 2: real media in the SAME window on the SAME generation. The
-        // card must go out (and re-arm the clear); it must not be a clear and
-        // must not carry idle lines.
         now_clock.set(NOW + 1000);
         player.set(|w| {
             w.title = RAW.to_string();
@@ -4444,8 +4204,6 @@ mod tests {
             "phase 2: media card carries idle lines: {text}"
         );
 
-        // Phase 3: back to idle on the same generation. The re-armed clear
-        // must go out again; further idle polls stay silent.
         now_clock.set(NOW + 1250);
         player.set(|w| {
             w.title = "PotPlayer".to_string();

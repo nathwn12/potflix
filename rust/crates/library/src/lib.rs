@@ -1,12 +1,3 @@
-//! `library` -- mirrors the Go package `go\internal\library`.
-//!
-//! The shared walk + diff loop behind the tray window's Scan / Refresh, the
-//! background metadata catch-up, and `metawarm`. The index is the store-backed
-//! `library.idx` (`index.rs`: one record per video file plus a rollup per
-//! folder); an indexed scan is enumerate + a `(size, mtime)` diff and performs
-//! zero network fetches.
-//!
-//! This file is the module body for `go\internal\library\library.go`.
 
 #![allow(
     clippy::collapsible_if,
@@ -1627,7 +1618,6 @@ pub fn scan_with_options(cancel: &Cancel, opts: Options) -> Result<Stats, Error>
                 keys_failed: a.keys_failed,
             };
             drop(a);
-            // Mid-scan checkpoint (indexed only, context live).
             if indexed && cancel.err().is_none() {
                 let mut last = last_ckpt.lock().unwrap();
                 if last.elapsed() >= CHECKPOINT_EVERY_INTERVAL {

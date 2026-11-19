@@ -1,14 +1,3 @@
-//! `snapshot` -- hidden-desktop UI previews produced by the real app window.
-//!
-//! One implementation for the product (`potflix.exe --snapshot`) and the
-//! `uicapture snapshot` example mode: private desktop via `CreateDesktopW` +
-//! `SetThreadDesktop`, `create_main_window` plus a foreground-free show,
-//! message pump only, `PrintWindow` client capture to a bitmap, PNG out via
-//! the GDI+ image encoder.
-//!
-//! Never touches the visible desktop: no input injection, shown only on the
-//! private desktop. Exit contract lives with the callers: `Ok` means a
-//! non-blank PNG was written, `Err` carries the plain reason.
 
 use std::ffi::c_void;
 

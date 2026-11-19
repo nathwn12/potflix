@@ -1,68 +1,3 @@
-//! `config` -- mirrors the Go root file `go\config.go`.
-//!
-//! The settings store for the `PotflixMainWnd` seam.
-//!
-//! Path mirrors the metadata cache convention: `os.UserCacheDir()` +
-//! `\Potflix\config.json` -- i.e. `%LOCALAPPDATA%\Potflix\config.json` -- falling
-//! back to the exe directory when the cache dir cannot be read (see
-//! `go\internal\metadata\cache.go:36-44`). Writes are atomic (temp file +
-//! rename), mirroring `cache.go:98-115`. Loads are tolerant: a missing or corrupt
-//! file yields the zero value, never an error to the UI. Unknown fields are
-//! ignored; a retired credential field, when present, is scrubbed by rewriting
-//! the file, and a clean file is never rewritten.
-//!
-//! # The stored schema, with every default
-//!
-//! ```json
-//! {"dirs": [], "start_with_windows": false, "scan_speed": "turbo", "card": {}}
-//! ```
-//!
-//! * `dirs` -- `[]` (the watched library roots, a case-insensitive Windows path
-//!   list).
-//! * `start_with_windows` -- `false`.
-//! * `scan_speed` -- `turbo`, normalised on load AND on save: `turbo` |
-//!   `balanced` | `gentle`, anything else (including empty) becomes `turbo`.
-//! * `card` -- `{}` when unset; otherwise
-//!   `{"series": {...}, "movie": {...}}`, one [`CardSpec`] per kind (SERIES
-//!   covers TV + anime; MOVIE is movies). Each kind object carries
-//!   `{"details": "...", "state": "..."}`, each line one of the preset ids
-//!   below defaulting to `default`. A kind object equal to the default is
-//!   OMITTED, so an unset/default config still writes `"card": {}`. The legacy
-//!   flat object `{"details": "...", "state": "..."}` still loads (as the
-//!   series spec, movie default). Go's `json:"card,omitempty"` is a no-op for a
-//!   struct, so the key is always written -- matched here. Retired Details ids
-//!   (`title`/`series`, which repeat the activity header, and `episode`,
-//!   which renders byte-identical to `default`) migrate to `default`
-//!   on load AND on save, so a stored repeating line resets without losing the
-//!   unrelated lines.
-//!
-//! Go marshals a nil `Dirs` as `null`; this port always writes `[]`, and accepts
-//! `null` on read (Go's `json.Unmarshal` treats a JSON `null` for any non-pointer
-//! field as a no-op, so `null` must not fail a load here either).
-//!
-//! # Tolerant-load rules (all reproduced)
-//!
-//! * missing file, unreadable file, malformed JSON, or a wrong field type ->
-//!   `Err` from [`load_config_from`] (the bad file is quarantined beside the
-//!   store as `<name>.corrupt-<ms>`, once); the tolerant [`load_config`] turns
-//!   that into the zero [`Config`], while [`load_config_for_update`] and
-//!   [`save_config_to`] refuse instead of saving defaults over real data.
-//! * a partial file -> the absent fields take their defaults.
-//! * `null` for any field -> the field takes its default (Go's no-op rule).
-//! * unknown fields -> ignored.
-//! * a retired credential field -> the load still succeeds and the file is
-//!   rewritten without it (best effort: a failed rewrite is dropped).
-//! * a clean file -> never rewritten.
-//!
-//! # The `card` type
-//!
-//! Go stores `presence.CardSpec` (`go\internal\presence\cardspec.go`); this crate
-//! now stores one spec per kind ([`CardSpecs`]: `series` + `movie`), each side
-//! the stored shape [`presence::cardspec::CardSpec`], re-exported here rather
-//! than mirrored, because presence owns `normalized()`, the behaviour-critical
-//! part. That type's own serde shape is the JSON contract per kind
-//! (`details`/`state`, both `omitempty`, unknown ids normalised to `default`).
-//! The legacy flat `card` object loads as the series spec.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -613,9 +548,6 @@ pub fn load_config_from(path: &Path) -> io::Result<Config> {
         Ok(data) => data,
         Err(err) => {
             if err.kind() != io::ErrorKind::NotFound {
-                // Unreadable (permissions, a directory, a torn write): move the
-                // bytes aside once so the next write cannot silently replace
-                // them with defaults.
                 let _ = quarantine_corrupt_file(path);
             }
             return Err(err);
@@ -629,12 +561,7 @@ pub fn load_config_from(path: &Path) -> io::Result<Config> {
         }
     };
     config.scan_speed = normalize_scan_speed(&config.scan_speed).to_string();
-    // Theme stays raw here (`""` when absent): `effective_theme()` maps
-    // absent/unreadable to AMOLED, and the default is omitted on the wire so
-    // unset stores keep their exact bytes.
     if has_retired_fields(&data) {
-        // Best-effort scrub: the load still succeeds when the rewrite fails, so
-        // the error is dropped here.
         let _ = save_config_to(path, &config);
     }
     Ok(config)
@@ -675,10 +602,6 @@ pub fn save_config(config: &Config) -> io::Result<()> {
 /// the close-error branch has no separate case; a failed write or rename removes
 /// the temp file and returns the error.
 pub fn save_config_to(path: &Path, config: &Config) -> io::Result<()> {
-    // Never silently replace real data: a present-but-unparsable store is
-    // quarantined and the write is refused (the caller surfaces it). A
-    // missing store (nothing to keep, or already quarantined by a load) is
-    // writable.
     if std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
         match std::fs::read(path) {
             Ok(data) => {
@@ -703,9 +626,6 @@ pub fn save_config_to(path: &Path, config: &Config) -> io::Result<()> {
     let mut out = config.clone();
     out.scan_speed = normalize_scan_speed(&out.scan_speed).to_string();
     out.theme = normalize_theme(&out.theme).to_string();
-    // T5-B, extended to the retired `episode` preset: a retired Details id
-    // (`title`/`series`/`episode`) never persists again: the
-    // store migrates it to the default line on save, as on load.
     out.card.series = out.card.series.migrated();
     out.card.movie = out.card.movie.migrated();
 
@@ -722,8 +642,6 @@ pub fn save_config_to(path: &Path, config: &Config) -> io::Result<()> {
         let _ = std::fs::remove_file(&temp_path);
         return Err(err);
     }
-    // Flush the file to stable storage BEFORE the rename, so a power cut
-    // cannot commit a zero-length file the next load would treat as defaults.
     if let Err(err) = temp.sync_all() {
         drop(temp);
         let _ = std::fs::remove_file(&temp_path);
@@ -734,7 +652,6 @@ pub fn save_config_to(path: &Path, config: &Config) -> io::Result<()> {
         let _ = std::fs::remove_file(&temp_path);
         return Err(err);
     }
-    // Fsync the directory so the rename itself survives a power cut.
     fsync_dir(&dir);
     Ok(())
 }
@@ -898,9 +815,6 @@ mod tests {
         let bad = scratch.write(CONFIG_FILE_NAME, "{not json");
         assert!(load_config_from(&bad).is_err(), "corrupt file must error");
 
-        // The tolerant wrapper the UI calls never surfaces either failure. The
-        // real store is never read here: the same core call on a missing path is
-        // what `load_config` degrades to the zero value.
         assert_eq!(
             load_config_from(&scratch.join("missing-store.json")).unwrap_or_default(),
             Config::default()
@@ -927,7 +841,6 @@ mod tests {
                 "{tag}: the user's bytes survive in the backup"
             );
             assert!(!path.exists(), "{tag}: the corrupt file is moved aside");
-            // A second corrupt load never stacks a second backup ("once").
             std::fs::write(&path, junk).expect("re-seed corrupt");
             assert!(load_config_from(&path).is_err());
             let backups: Vec<_> = std::fs::read_dir(scratch.path())
@@ -942,8 +855,6 @@ mod tests {
                 .collect();
             assert_eq!(backups.len(), 1, "one quarantine, never stacked: {backups:?}");
 
-            // The write refuses instead of saving defaults over real data, and
-            // leaves the corrupt bytes in place for inspection.
             let err = save_config_to(
                 &path,
                 &Config {
@@ -983,7 +894,6 @@ mod tests {
         assert!(std::fs::read(&backup).expect("read backup").is_empty());
         assert!(!path.exists());
 
-        // A clean save round-trips and stages no temp file beside the store.
         let want = Config {
             dirs: vec![r"C:\Media".to_string()],
             scan_speed: SCAN_SPEED_TURBO.to_string(),
@@ -1495,7 +1405,6 @@ mod tests {
         assert_eq!(reloaded.card.series.state, CARD_STATE_TAG);
         assert!(reloaded.card.movie.is_default());
 
-        // Legacy flat shape migrates the same way (movie stays default).
         let legacy = scratch.write(
             "legacy-retired.json",
             r#"{"dirs":[],"card":{"details":"series","state":"tag"}}"#,

@@ -1,8 +1,3 @@
-//! `presence_test` -- mirrors `go\internal\presence\presence_test.go`.
-//!
-//! Table-driven tests over the transition matrix, plus the debounce deviation and
-//! the payload helpers. Expectations are derived from the port contract
-//! (section 4) and the Java PresenceTracker ported in `presence.go`.
 
 use player::control::PlayStatus;
 use titleclean::trunc;
@@ -183,8 +178,6 @@ fn transition_matrix_running_advance_pause_stop() {
             },
         ],
         &[
-            // Index 2 is a Running->Paused report while ct still moves in the
-            // window: flap suppression keeps it Running, so Pause lands on 3.
             run_w(99000),
             none(),
             none(),
@@ -249,21 +242,18 @@ fn transition_matrix_flap_suppression() {
                 ct: 1600,
                 now: 300250,
             },
-            // glitch: still moving -> Running
             Sample {
                 title: TC,
                 status: PlayStatus::PAUSED,
                 ct: 2200,
                 now: 300500,
             },
-            // still moving -> Running
             Sample {
                 title: TC,
                 status: PlayStatus::PAUSED,
                 ct: 2200,
                 now: 300750,
             },
-            // window flushed -> real Pause
             Sample {
                 title: TC,
                 status: PlayStatus::PAUSED,
@@ -276,7 +266,6 @@ fn transition_matrix_flap_suppression() {
                 ct: 2200,
                 now: 301250,
             },
-            // paused seek
             Sample {
                 title: TC,
                 status: PlayStatus::PAUSED,
@@ -357,14 +346,12 @@ fn transition_matrix_undefined_carries_nothing() {
                 ct: 0,
                 now: 500500,
             },
-            // unchanged: lastStatus still Running
             Sample {
                 title: TE,
                 status: PlayStatus::RUNNING,
                 ct: 1250,
                 now: 500750,
             },
-            // ct<=0 -> no movement, real transition
             Sample {
                 title: TE,
                 status: PlayStatus::STOPPED,
@@ -471,9 +458,6 @@ fn transition_matrix_initial_stopped() {
 
 #[test]
 fn run_debounce() {
-    // A seek inside the ~1 s window, same title, is HELD (trailing edge) and
-    // lands when the window expires - it is no longer dropped forever, which is
-    // what froze the card on a stale anchor.
     const X: &str = "X - PotPlayer";
     let mut tr = Tracker::default();
     let a = tr.poll(X, PlayStatus::RUNNING, 1000, 0);
@@ -495,7 +479,6 @@ fn run_debounce() {
         a.is_none(),
         "seek still inside the window should be held, got {a:?}"
     );
-    // The window expires: the held seek lands with a fresh anchor.
     let a = tr.poll(X, PlayStatus::RUNNING, 5200, 1001);
     match a.as_ref() {
         Some(a) if a.running => assert_eq!(
@@ -512,14 +495,12 @@ fn run_debounce() {
         "pending flag should clear after the held seek lands"
     );
 
-    // A title change bypasses the debounce even inside the window.
     let a = tr.poll("Y - PotPlayer", PlayStatus::RUNNING, 500, 1050);
     assert!(
         a.as_ref().is_some_and(|a| a.running),
         "title change should bypass debounce, got {a:?}"
     );
 
-    // After the window, a seek with the same title emits again.
     const Z: &str = "Z - PotPlayer";
     let mut tr2 = Tracker::default();
     let _ = tr2.poll(Z, PlayStatus::RUNNING, 1000, 0);
@@ -543,19 +524,16 @@ fn run_debounce_backward_clock_step() {
         a.as_ref().is_some_and(|a| a.running),
         "first RUN should emit, got {a:?}"
     );
-    // A seek 200 ms later is held inside the ~1 s window.
     let a = tr.poll(X, PlayStatus::RUNNING, 5000, 100200);
     assert!(
         a.is_none(),
         "seek inside the window should be held, got {a:?}"
     );
-    // The wall clock steps back 55 s: the held seek is still inside the window.
     let a = tr.poll(X, PlayStatus::RUNNING, 5000, 45200);
     assert!(
         a.is_none(),
         "seek should still be held right after the step, got {a:?}"
     );
-    // ~1 s of monotonic interval later it lands, rather than waiting 55 s.
     let a = tr.poll(X, PlayStatus::RUNNING, 5000, 46300);
     assert!(
         a.as_ref().is_some_and(|a| a.running),
@@ -656,10 +634,6 @@ fn paused_marker_survives_context_cap() {
 
 #[test]
 fn build_activity_cases() {
-    // Netflix-style mapping: the header (name) is the media title, the first
-    // body line (details) is the episode name when known, else the episode tag,
-    // else the title, and the second body line (state) is the episode tag when it
-    // adds information, else empty.
     const TV_RAW: &str = "Show.S01E02.Pilot.1080p.mkv - PotPlayer";
     const TV_TAG_ONLY_RAW: &str = "Show.S01E02.1080p.mkv - PotPlayer";
     const MOVIE_RAW: &str = "Movie.mkv - PotPlayer";
@@ -799,9 +773,6 @@ fn build_activity_cases() {
             start: 0,
         },
         Case {
-            // No episode name, and the over-128-unit title fills the details
-            // line on its own: the state line must stay empty rather than
-            // repeating the truncated details.
             name: "long title without episode context emits no state",
             raw: format!("{}.mkv - PotPlayer", "A".repeat(200)),
             act: running(12345),
@@ -861,8 +832,6 @@ fn build_activity_resolved_overrides() {
         ..Action::default()
     };
 
-    // Zero overrides: the filename's own title IS the header, the filename
-    // code/episode is the state, and there is no synopsis tooltip.
     let got = build_activity_resolved(TV_RAW, Some(&act), &Resolved::default());
     assert_eq!(got.name, "Show", "header = the clean title");
     assert_eq!(
@@ -872,7 +841,6 @@ fn build_activity_resolved_overrides() {
     assert_eq!(got.state, "S1 E2 \u{b7} Pilot", "state = tag + episode name");
     assert_eq!(got.large_text, "", "no synopsis = no tooltip");
 
-    // Series override moves the header; line 2 keeps the episode identity.
     let got = build_activity_resolved(
         TV_RAW,
         Some(&act),
@@ -885,7 +853,6 @@ fn build_activity_resolved_overrides() {
     assert_eq!(got.details, "", "details blanks under the new header");
     assert_eq!(got.state, "S1 E2 \u{b7} Pilot", "state unchanged");
 
-    // Episode override moves the episode title on line 2, never the header.
     let got = build_activity_resolved(
         TV_RAW,
         Some(&act),
@@ -898,7 +865,6 @@ fn build_activity_resolved_overrides() {
     assert_eq!(got.details, "", "details stays blank");
     assert_eq!(got.state, "S1 E2 \u{b7} Canonical Episode", "episode state");
 
-    // Overrides truncate at 128, never silently.
     let long = "y".repeat(200);
     let got = build_activity_resolved(
         TV_RAW,
@@ -929,7 +895,6 @@ fn build_activity_resolved_rich() {
         ..Action::default()
     };
 
-    // artwork https URL becomes large_image
     let art = "https://example.com/poster.jpg";
     let got = build_activity_resolved(
         TV_RAW,
@@ -941,8 +906,6 @@ fn build_activity_resolved_rich() {
     );
     assert_eq!(got.large_image, art, "large_image");
 
-    // artwork empty or invalid sends NO image: the branded mark is never a
-    // missing-art fallback.
     for art in [
         "",
         "logo",
@@ -964,7 +927,6 @@ fn build_activity_resolved_rich() {
         );
     }
 
-    // series episode tag synopsis semantics
     let got = build_activity_resolved(
         TV_RAW,
         Some(&run_act),
@@ -972,7 +934,6 @@ fn build_activity_resolved_rich() {
             series: "Canonical Series".to_string(),
             episode_name: "Canonical Episode".to_string(),
             synopsis: "A brave synopsis".to_string(),
-            // Work-level show synopsis: it may ride the tooltip.
             synopsis_is_work: true,
             ..Resolved::default()
         },
@@ -988,16 +949,12 @@ fn build_activity_resolved_rich() {
         "default state must not carry the synopsis: {:?}",
         got.state
     );
-    // Hover slot: the synopsis snippet, never a duplicate of the title.
     assert_eq!(
         got.large_text,
         rp_text("A brave synopsis", 128),
         "large_text"
     );
 
-    // A movie with only a synopsis: the header is the filename title (no year
-    // known), line 1 blanks (it would repeat the header), line 2 stays empty,
-    // and the synopsis is tooltip-only.
     let got = build_activity_resolved(
         MOVIE_RAW,
         Some(&run_act),
@@ -1013,14 +970,11 @@ fn build_activity_resolved_rich() {
     assert_eq!(got.state, "", "state");
     assert_eq!(got.large_text, "Just a synopsis", "large_text");
 
-    // tag only becomes state; the header carries the show and line 1 blanks
     let got = build_activity_resolved(TV_TAG_ONLY_RAW, Some(&run_act), &Resolved::default());
     assert_eq!(got.name, "Show", "header");
     assert_eq!(got.details, "", "details blanks");
     assert_eq!(got.state, "S1 E2", "state");
 
-    // A long movie synopsis is tooltip-only, explicitly ellipsized at 128;
-    // the header is the title and line 1 blanks.
     let long = "s".repeat(200);
     let got = build_activity_resolved(
         MOVIE_RAW,
@@ -1078,7 +1032,6 @@ fn large_image_over_300_is_omitted() {
         "large_image still oversized: {:?}",
         got.large_image
     );
-    // Boundary: exactly 300 chars rides verbatim.
     let edge = format!("https://example.com/{}", "y".repeat(300 - "https://example.com/".len()));
     assert_eq!(edge.len(), 300, "edge fixture must be exactly 300 chars");
     let got_edge = build_activity_resolved(
@@ -1113,8 +1066,6 @@ fn rp_text_cases() {
 #[test]
 fn trim_word_cases() {
     assert_eq!(trim_word("hello world", 128), "hello world", "fits");
-    // A long synopsis of whole words must end on "..." at a word boundary,
-    // never mid-word: the hard cut would leave a dangling "wo...".
     let syn = format!("{}tail", "word ".repeat(40));
     let got = trim_word(&syn, 128);
     assert!(
@@ -1131,8 +1082,6 @@ fn trim_word_cases() {
     );
     let n = java_units(&got);
     assert!(n <= 128, "trim_word length {n} exceeds 128: {got:?}");
-    // No spaces: the cut is still signalled with a trailing ellipsis within
-    // budget (never a silent hard cut, never a split surrogate).
     let nospace = "s".repeat(200);
     let got = trim_word(&nospace, 128);
     assert!(
@@ -1149,7 +1098,6 @@ fn trim_word_cases() {
         n <= 128,
         "trim_word nospace length {n} exceeds 128: {got:?}"
     );
-    // CJK run (no spaces): the same signalled cut.
     let cjk = "\u{6f22}".repeat(300);
     let got = trim_word(&cjk, 128);
     assert!(
@@ -1164,8 +1112,6 @@ fn trim_word_cases() {
         last.is_alphanumeric(),
         "trim_word cjk cut ends on {last:?}, want a word character: {got:?}"
     );
-    // Surrogate safety: an emoji straddling the cut is dropped whole, never
-    // split (the old UTF-16 hard cut left a `?` from the lone surrogate).
     let split = format!("{}\u{1f600}{}", "a".repeat(126), "b".repeat(100));
     let got = trim_word(&split, 128);
     assert!(
@@ -1181,9 +1127,6 @@ fn trim_word_cases() {
         format!("{}\u{2026}", "a".repeat(126)),
         "trim_word surrogate"
     );
-    // Sentence-end cut: the word-boundary cut lands on `.` followed by a
-    // space, so the complete sentence is kept with its own terminator and no
-    // ellipsis (the `x×120 + ".…"` shape was the live defect).
     let sentence = format!("{}. {}", "x".repeat(120), "y".repeat(20));
     let got = trim_word(&sentence, 128);
     assert_eq!(
@@ -1241,8 +1184,6 @@ fn trim_word_strips_cut_punctuation() {
     let s = format!("{}stop, {}", "filler ".repeat(20), "rest ".repeat(20));
     let got = trim_word(&s, 128);
     assert_clean_cut(&s, &got);
-    // The 128-unit budget fits 18 whole fillers: the cut lands on the word
-    // boundary, never inside `filler` or the `stop,` tail.
     let want = format!("{}\u{2026}", "filler ".repeat(18).trim());
     assert_eq!(got, want, "trim_word cut");
 }
@@ -1302,7 +1243,6 @@ fn series_default_state_is_code_plus_synopsis() {
         &Resolved {
             series: "Show".to_string(),
             synopsis: syn.to_string(),
-            // No episode pin: this is the work synopsis, so it rides.
             synopsis_is_work: true,
             ..Resolved::default()
         },
@@ -1361,7 +1301,6 @@ fn media_rpc_contract_movie_and_episode() {
             length: "2h 46m".to_string(),
             synopsis: long_syn.to_string(),
             artwork: ART.to_string(),
-            // A movie synopsis describes the work, so it rides the tooltip.
             synopsis_is_work: true,
             ..Resolved::default()
         },
@@ -1412,8 +1351,6 @@ fn media_rpc_contract_movie_and_episode() {
             && !episode.state.contains("retired operative"),
         "episode identity is split correctly"
     );
-    // Episode-pinned prose never rides the tooltip: it would spoil the
-    // episode. The large_text stays empty even though a synopsis is stored.
     assert_eq!(
         episode.large_text, "",
         "episode prose must not ride: {:?}",
@@ -1449,8 +1386,6 @@ fn hover_tooltip_cut_ends_clean() {
     assert_eq!(got.details, "2018", "details");
     assert_eq!(got.state, "", "no runtime facts, so no state");
     assert_eq!(got.name, "Ready Player One", "header is the movie title");
-    // The synopsis rides the artwork tooltip, cut at 128 and always
-    // ellipsized; line 1 stays the clean title.
     assert!(
         got.large_text.ends_with('\u{2026}'),
         "large_text must signal the cut: {:?}",
@@ -1476,8 +1411,6 @@ fn build_activity_resolved_movie() {
         ..Action::default()
     };
 
-    // Movie with a year and no synopsis: the year on line 1 and an
-    // empty line 2 (no runtime fact).
     let got = build_activity_resolved(
         MOVIE_RAW,
         Some(&run_act),
@@ -1493,8 +1426,6 @@ fn build_activity_resolved_movie() {
     assert_eq!(got.large_text, "", "large_text");
     assert_eq!(got.name, "Dune: Part Two", "header is the movie title");
 
-    // Bare movie: the header is the title, no fabricated year; line 1 blanks
-    // because it would repeat the header.
     let got = build_activity_resolved(
         MOVIE_RAW,
         Some(&run_act),
@@ -1509,8 +1440,6 @@ fn build_activity_resolved_movie() {
     assert_eq!(got.state, "", "state");
     assert_eq!(got.large_text, "", "large_text");
 
-    // Year and genres on line 1; runtime on line 2; the work synopsis is
-    // only in the artwork tooltip.
     let got = build_activity_resolved(
         MOVIE_RAW,
         Some(&run_act),
@@ -1529,8 +1458,6 @@ fn build_activity_resolved_movie() {
     assert_eq!(got.state, "2h 46m", "state");
     assert_eq!(got.large_text, "Paul unites the Fremen", "large_text");
 
-    // Missing year/genres: no line 1; line 2 is the runtime; the work
-    // synopsis is tooltip-only.
     let got = build_activity_resolved(
         MOVIE_RAW,
         Some(&run_act),
@@ -1548,8 +1475,6 @@ fn build_activity_resolved_movie() {
     assert_eq!(got.state, "2h 19m", "state");
     assert_eq!(got.large_text, "A quest", "large_text");
 
-    // Long synopsis is capped in the tooltip, explicitly ellipsized; the body
-    // lines are unaffected. Genres without a year still lead line 1.
     let syn = format!("{}finale", "epic ".repeat(40));
     let got = build_activity_resolved(
         MOVIE_RAW,
@@ -1574,7 +1499,6 @@ fn build_activity_resolved_movie() {
     let n = java_units(&got.state);
     assert!(n <= 128, "state length {n} exceeds 128: {:?}", got.state);
 
-    // paused movie keeps the Paused marker on the runtime line
     let got = build_activity_resolved(
         MOVIE_RAW,
         Some(&Action {
@@ -1608,7 +1532,6 @@ fn build_activity_resolved_movie() {
         got.state
     );
 
-    // empty artwork sends no image: never the branded logo
     let got = build_activity_resolved(
         MOVIE_RAW,
         Some(&run_act),
@@ -1667,7 +1590,6 @@ fn build_activity_resolved_series_state() {
 
 #[test]
 fn build_activity_resolved_buttons() {
-    // Pristine card: resolved buttons are always ignored, even valid ones.
     const MOVIE_RAW: &str = "Movie.mkv - PotPlayer";
     let run_act = Action {
         running: true,
@@ -1677,7 +1599,6 @@ fn build_activity_resolved_buttons() {
         ..Action::default()
     };
 
-    // valid buttons stripped
     let got = build_activity_resolved(
         MOVIE_RAW,
         Some(&run_act),
@@ -1701,7 +1622,6 @@ fn build_activity_resolved_buttons() {
         got.buttons
     );
 
-    // build_activity carries no buttons
     assert!(
         build_activity(MOVIE_RAW, Some(&run_act)).buttons.is_empty(),
         "build_activity buttons, want empty"
@@ -1756,7 +1676,6 @@ fn pristine_card_no_icons_no_buttons() {
             got.buttons
         );
     }
-    // No card carries a corner slot: no status icon over the artwork.
     for got in &cards {
         assert!(
             got.small_image.is_empty() && got.small_text.is_empty(),
@@ -1765,8 +1684,6 @@ fn pristine_card_no_icons_no_buttons() {
             got.small_text
         );
     }
-    // Spot-check the intact lines: the legacy filename mapping and the resolved
-    // card's media-title header with the series/episode roles.
     let run = &cards[0];
     assert!(
         run.name == "Show" && run.details == "Pilot" && run.state == "S1 E2",
@@ -1823,9 +1740,6 @@ fn smart_trim_synopsis_clause_ellipsis() {
         "clause cut should end with U+2026: {got:?}"
     );
     assert!(!got.contains("..."), "never three dots: {got:?}");
-    // The clause comma is a cut mark, not content: the live card carried it
-    // into the ellipsis (`Buu,…`), so the cut strips trailing punctuation and
-    // the base ends on the word (`first…`).
     let want = format!("{}first\u{2026}", "word ".repeat(10));
     assert_eq!(got, want, "clause cut");
     assert_clean_cut(&s, &got);
@@ -1834,7 +1748,6 @@ fn smart_trim_synopsis_clause_ellipsis() {
         n <= STATE_SYNOPSIS_BUDGET,
         "length {n} exceeds {STATE_SYNOPSIS_BUDGET}: {got:?}"
     );
-    // No sentence end in this input, so the comma path must win.
     assert!(
         !got.trim_end_matches('\u{2026}').contains('.'),
         "unexpected sentence cut: {got:?}"
@@ -2000,8 +1913,6 @@ fn synopsis_state_budget_72() {
         ..Action::default()
     };
     let long_syn = "A retired operative living quietly is pulled back when a ruthless syndicate burns his home. He crosses continents, gathers old allies, and faces a final choice that will decide everything he loves and more.";
-    // The 72-unit synopsis budget lives on the explicit Synopsis preset: the
-    // default state carries no synopsis, so compose through the preset.
     let syn_spec = CardSpec {
         details: CARD_DETAILS_DEFAULT.to_string(),
         state: CARD_STATE_SYNOPSIS.to_string(),
@@ -2086,7 +1997,6 @@ fn synopsis_state_budget_72() {
             act.state
         );
     }
-    // Structured prefixes survive in full.
     let movie = movie(&run_act);
     assert!(
         movie.state.contains("Action, Drama") && movie.state.contains("2h 19m"),
@@ -2130,15 +2040,12 @@ fn hover_tooltip_whole_and_state_budget_agree() {
     let compose = |raw: &str, res: &Resolved| {
         compose_card(raw, Some(&run_act), res, res.is_movie, &syn_spec)
     };
-    // ~99 units: over the 72 State budget, under the 128 tooltip cap.
     let mid_syn = "word ".repeat(20).trim().to_string();
     let n = java_units(&mid_syn);
     assert!(
         n > STATE_SYNOPSIS_BUDGET && n <= 128,
         "fixture setup: mid_syn units={n}, want 72 < n <= 128"
     );
-    // Work-level synopsis rides the tooltip whole on both kinds; the
-    // Synopsis-preset state line carries it within the 72-unit budget.
     let cases: [(&str, Activity, &str); 2] = [
         (
             "movie synopsis-only",
@@ -2148,7 +2055,6 @@ fn hover_tooltip_whole_and_state_budget_agree() {
                     is_movie: true,
                     series: "Mid Film".to_string(),
                     synopsis: mid_syn.clone(),
-                    // Work-level: the tooltip mechanics are the point here.
                     synopsis_is_work: true,
                     ..Resolved::default()
                 },
@@ -2162,7 +2068,6 @@ fn hover_tooltip_whole_and_state_budget_agree() {
                 &Resolved {
                     series: "Mid Series".to_string(),
                     synopsis: mid_syn.clone(),
-                    // Work-level: the tooltip mechanics are the point here.
                     synopsis_is_work: true,
                     ..Resolved::default()
                 },
@@ -2199,7 +2104,6 @@ fn hover_tooltip_whole_and_state_budget_agree() {
             );
             continue;
         }
-        // The tooltip carries the short synopsis whole, not the State trim.
         assert_eq!(
             act.large_text,
             rp_text(syn, 128),
@@ -2214,9 +2118,6 @@ fn hover_tooltip_whole_and_state_budget_agree() {
             "{name}: tooltip must not equal the trimmed State line"
         );
     }
-    // Over-cap synopsis still respects both ceilings on the same input.
-    // T5-A: the movie tooltip is omitted; the Synopsis-preset state still
-    // carries the synopsis within the 72 budget.
     let over_syn = "s".repeat(200);
     let over = compose(
         MOVIE_RAW,
@@ -2263,7 +2164,6 @@ fn hover_tooltip_not_series_name() {
         &Resolved {
             series: "Canonical Series".to_string(),
             synopsis: "A brave synopsis".to_string(),
-            // Work-level show note: it rides the tooltip.
             synopsis_is_work: true,
             ..Resolved::default()
         },
@@ -2421,10 +2321,6 @@ fn episode_code_formatter() {
         "",
         "non-code tag is no code"
     );
-    // The real AniList absolute production shape: season 0 with the number
-    // set to the absolute episode. No season is fabricated -- there is no
-    // distinct signal for a real S00 special in this shape, so it renders
-    // the bare absolute number the same way.
     assert_eq!(
         episode_code(0, 5, 5, ""),
         "E05",
@@ -2519,7 +2415,6 @@ fn series_default_details_fallbacks_and_truncation() {
         ct: 1000,
         ..Action::default()
     };
-    // Canonical series title wins.
     let got = build_activity_resolved(
         TV_RAW,
         Some(&run_act),
@@ -2538,7 +2433,6 @@ fn series_default_details_fallbacks_and_truncation() {
         "episode identity must not leak into the header: {:?}",
         got.name
     );
-    // No canonical series: the clean filename title stands in.
     let got = build_activity_resolved(
         TV_RAW,
         Some(&run_act),
@@ -2550,10 +2444,8 @@ fn series_default_details_fallbacks_and_truncation() {
         },
     );
     assert_eq!(got.name, "Show", "clean title fallback");
-    // Nothing resolved: still the clean filename title.
     let got = build_activity_resolved(TV_RAW, Some(&run_act), &Resolved::default());
     assert_eq!(got.name, "Show", "filename title fallback");
-    // A long series title truncates at 128, never silently.
     let long = "D".repeat(200);
     let got = build_activity_resolved(
         TV_RAW,
@@ -2604,7 +2496,6 @@ fn series_default_details_skips_spaced_tag() {
     assert_eq!(got.name, "Show", "header is the show title");
     assert_eq!(got.details, "", "details blanks");
     assert_eq!(got.state, "S1 E2", "state carries the tag");
-    // The episode preset keeps the episode title alone: no code prefix.
     let ep_spec = CardSpec {
         details: crate::cardspec::CARD_DETAILS_EPISODE.to_string(),
         state: CARD_STATE_DEFAULT.to_string(),
@@ -2661,7 +2552,6 @@ fn series_default_state_prefers_episode_title() {
         "the code appears once: {:?}",
         got.state
     );
-    // Paused keeps the code and episode plus the marker.
     let paused = Action {
         paused: true,
         ct: 1000,
@@ -2672,7 +2562,6 @@ fn series_default_state_prefers_episode_title() {
         got.state, "S01E02 \u{b7} Confrontation \u{b7} Paused",
         "paused marker"
     );
-    // Synopsis preset keeps its explicit `-` join.
     let syn_spec = CardSpec {
         details: CARD_DETAILS_DEFAULT.to_string(),
         state: CARD_STATE_SYNOPSIS.to_string(),
@@ -2718,8 +2607,6 @@ fn episode_preset_is_title_only() {
         card.details, "Confrontation",
         "episode title alone, never the code"
     );
-    // No canonical episode title: the default line (the series title) would
-    // repeat the header, so it blanks.
     let card = compose_card(
         TV_RAW,
         Some(&run_act),
@@ -2751,8 +2638,6 @@ fn absolute_special_and_movie_code_shapes() {
         ct: 1000,
         ..Action::default()
     };
-    // Absolute-only: the series title in the header, the absolute code and
-    // episode on the state line.
     let got = build_activity_resolved(
         TV_RAW,
         Some(&run_act),
@@ -2766,8 +2651,6 @@ fn absolute_special_and_movie_code_shapes() {
     assert_eq!(got.name, "Show", "absolute header");
     assert_eq!(got.details, "", "details blanks");
     assert_eq!(got.state, "E02 \u{b7} The Second", "absolute state");
-    // Special with no number: the filename tag stands, with the filename's
-    // episode name.
     let got = build_activity_resolved(
         TV_RAW,
         Some(&run_act),
@@ -2784,7 +2667,6 @@ fn absolute_special_and_movie_code_shapes() {
         got.state, "S1 E2 \u{b7} Confrontation",
         "special state keeps the filename tag and episode"
     );
-    // Movie branches ignore episode-code data.
     let got = build_activity_resolved(
         MOVIE_RAW,
         Some(&run_act),
@@ -2823,8 +2705,6 @@ fn series_default_state_carries_code_plus_title() {
         ..Action::default()
     };
     let syn = "While the world's criminals fall silent";
-    // Series: the header is the show, state is the code and episode title; the
-    // synopsis is tooltip-only.
     let got = build_activity_resolved(
         TV_RAW,
         Some(&run_act),
@@ -2840,8 +2720,6 @@ fn series_default_state_carries_code_plus_title() {
     assert_eq!(got.name, "Death Note", "header");
     assert_eq!(got.details, "", "details blanks");
     assert_eq!(got.state, "S01E03 \u{b7} Dealings", "state");
-    // Episode context: the stored note is episode prose, so the tooltip
-    // hides it.
     assert_eq!(got.large_text, "", "tooltip hides episode prose");
     let n = java_units(&got.state);
     assert!(
@@ -2849,7 +2727,6 @@ fn series_default_state_carries_code_plus_title() {
         "state length {n} exceeds 128: {:?}",
         got.state
     );
-    // No synopsis with a code: the same identity line.
     let got = build_activity_resolved(
         TV_RAW,
         Some(&run_act),
@@ -2862,7 +2739,6 @@ fn series_default_state_carries_code_plus_title() {
         },
     );
     assert_eq!(got.state, "S01E03 \u{b7} Dealings", "no-synopsis state");
-    // No episode title: the code alone, while the header still carries the show.
     let got = build_activity_resolved(
         "Show.S01E03.1080p.mkv - PotPlayer",
         Some(&run_act),
@@ -2877,7 +2753,6 @@ fn series_default_state_carries_code_plus_title() {
     assert_eq!(got.name, "Show", "series header");
     assert_eq!(got.details, "", "details blanks");
     assert_eq!(got.state, "S01E03", "code alone");
-    // Absolute-only: no fabricated season.
     let got = build_activity_resolved(
         TV_RAW,
         Some(&run_act),
@@ -2895,8 +2770,6 @@ fn series_default_state_carries_code_plus_title() {
         "absolute must never fabricate a season: {:?}",
         got.state
     );
-    // The real AniList absolute production shape (season 0, number set to the
-    // absolute episode): still `E05`, never `S00E05`.
     let got = build_activity_resolved(
         TV_RAW,
         Some(&run_act),
@@ -2916,7 +2789,6 @@ fn series_default_state_carries_code_plus_title() {
         "season 0 must never fabricate a season: {:?}",
         got.state
     );
-    // One-season shows keep S01.
     let got = build_activity_resolved(
         TV_RAW,
         Some(&run_act),
@@ -2930,7 +2802,6 @@ fn series_default_state_carries_code_plus_title() {
         },
     );
     assert_eq!(got.state, "S01E01 \u{b7} Dealings", "one-season keeps S01");
-    // Paused keeps the marker and stays within 128.
     let paused = Action {
         paused: true,
         ct: 1000,
@@ -2958,8 +2829,6 @@ fn series_default_state_carries_code_plus_title() {
         "paused state length {n} exceeds 128: {:?}",
         got.state
     );
-    // A long synopsis does not touch the body lines; episode-pinned prose
-    // never rides the tooltip, so the tooltip stays empty.
     let long_syn = "A retired operative living quietly is pulled back when a ruthless syndicate burns his home. He crosses continents, gathers old allies, and faces a final choice that will decide everything he loves and more.";
     let got = build_activity_resolved(
         TV_RAW,
@@ -2979,7 +2848,6 @@ fn series_default_state_carries_code_plus_title() {
         "episode prose never rides, however long: {:?}",
         got.large_text
     );
-    // Movie default ignores episode-code data.
     let got = build_activity_resolved(
         "Dune.Part.Two.2024.1080p.mkv - PotPlayer",
         Some(&run_act),
@@ -2997,7 +2865,6 @@ fn series_default_state_carries_code_plus_title() {
     );
     assert_eq!(got.details, "2024 \u{b7} Sci-Fi", "movie details");
     assert_eq!(got.state, "2h 46m", "movie state");
-    // Custom presets are unchanged.
     for (preset, want) in [
         (crate::cardspec::CARD_STATE_TAG, "S1 E3"),
         (
@@ -3067,7 +2934,6 @@ fn movie_t5a_details_is_synopsis_never_title() {
             genres: "Sci-Fi".to_string(),
             length: "2h 46m".to_string(),
             synopsis: "Paul unites the Fremen".to_string(),
-            // A movie synopsis describes the work, so it rides the tooltip.
             synopsis_is_work: true,
             ..Resolved::default()
         },
@@ -3105,7 +2971,6 @@ fn movie_t5a_state_is_year_genres_runtime() {
         },
     );
     assert_eq!(got.state, "2h 46m", "movie state");
-    // The brief's shape example.
     let got = build_activity_resolved(
         "Movie.2019.1080p.mkv - PotPlayer",
         Some(&run_act),
@@ -3136,7 +3001,6 @@ fn movie_t5a_details_fallbacks_skip_missing_never_title() {
         ct: 1000,
         ..Action::default()
     };
-    // No synopsis: year is on line 1, genres/runtime on line 2.
     let got = build_activity_resolved(
         MOVIE_RAW,
         Some(&run_act),
@@ -3151,7 +3015,6 @@ fn movie_t5a_details_fallbacks_skip_missing_never_title() {
     );
     assert_eq!(got.details, "2024 \u{b7} Sci-Fi", "details carry the year");
     assert_eq!(got.state, "2h 46m", "state");
-    // No year: the title is the header and line 1 carries the genres.
     let got = build_activity_resolved(
         MOVIE_RAW,
         Some(&run_act),
@@ -3166,7 +3029,6 @@ fn movie_t5a_details_fallbacks_skip_missing_never_title() {
     assert_eq!(got.name, "Dune: Part Two", "header without a year");
     assert_eq!(got.details, "Sci-Fi", "details carry the genres without a year");
     assert_eq!(got.state, "2h 46m", "state");
-    // Bare movie: the header is the title; line 1 blanks, never a duplicate.
     let got = build_activity_resolved(
         "Movie.mkv - PotPlayer",
         Some(&run_act),
@@ -3179,7 +3041,6 @@ fn movie_t5a_details_fallbacks_skip_missing_never_title() {
     assert_eq!(got.name, "Dune", "bare movie header");
     assert_eq!(got.details, "", "bare movie details blank");
     assert_eq!(got.state, "", "bare movie state stays empty");
-    // State skips missing parts.
     let got = build_activity_resolved(
         MOVIE_RAW,
         Some(&run_act),
@@ -3205,7 +3066,6 @@ fn movie_t5a_details_fallbacks_skip_missing_never_title() {
     );
     assert_eq!(got.details, "2024", "details carry the year");
     assert_eq!(got.state, "", "state stays empty with no runtime");
-    // State with nothing: empty, never the title.
     let got = build_activity_resolved(
         "Movie.mkv - PotPlayer",
         Some(&run_act),
@@ -3236,8 +3096,6 @@ fn movie_default_details_and_state_never_repeat() {
         ct: 1000,
         ..Action::default()
     };
-    // With a synopsis, the body still carries identity + playback; the
-    // synopsis is in the artwork tooltip.
     let got = build_activity_resolved(
         MOVIE_RAW,
         Some(&run_act),
@@ -3248,7 +3106,6 @@ fn movie_default_details_and_state_never_repeat() {
             genres: "Sci-Fi".to_string(),
             length: "2h 46m".to_string(),
             synopsis: "Paul unites the Fremen".to_string(),
-            // A movie synopsis describes the work, so it rides the tooltip.
             synopsis_is_work: true,
             ..Resolved::default()
         },
@@ -3260,7 +3117,6 @@ fn movie_default_details_and_state_never_repeat() {
         "movie state is the runtime"
     );
     assert_eq!(got.large_text, "Paul unites the Fremen", "movie tooltip");
-    // No synopsis: the same body lines.
     let got = build_activity_resolved(
         MOVIE_RAW,
         Some(&run_act),
@@ -3280,7 +3136,6 @@ fn movie_default_details_and_state_never_repeat() {
         "state stays runtime"
     );
     assert_eq!(got.large_text, "", "no synopsis means no tooltip");
-    // No year: the header is the title and line 1 carries the genres.
     let got = build_activity_resolved(
         MOVIE_RAW,
         Some(&run_act),
@@ -3318,7 +3173,6 @@ fn movie_t5a_tooltip_empty_tv_unchanged() {
             genres: "Sci-Fi".to_string(),
             length: "2h 46m".to_string(),
             synopsis: "Paul unites the Fremen".to_string(),
-            // A movie synopsis describes the work.
             synopsis_is_work: true,
             ..Resolved::default()
         },
@@ -3337,7 +3191,6 @@ fn movie_t5a_tooltip_empty_tv_unchanged() {
         },
     );
     assert_eq!(got.large_text, "", "movie tooltip stays empty without synopsis");
-    // TV carries the same snippet.
     let got = build_activity_resolved(
         TV_RAW,
         Some(&run_act),
@@ -3348,8 +3201,6 @@ fn movie_t5a_tooltip_empty_tv_unchanged() {
             ..Resolved::default()
         },
     );
-    // TV carries episode-pinned prose here, so the tooltip hides it: only a
-    // work-level synopsis rides.
     assert_eq!(got.large_text, "", "TV tooltip hides episode prose");
 }
 
@@ -3376,7 +3227,6 @@ fn movie_t5a_no_title_in_details_or_state() {
             ..Resolved::default()
         },
     );
-    // Owner mapping: the header carries the title; line 1 keeps year/genres.
     assert_eq!(
         got.details, "2024 \u{b7} Sci-Fi",
         "year and genres must lead details"
@@ -3386,7 +3236,6 @@ fn movie_t5a_no_title_in_details_or_state() {
         "title must not leak into state: {:?}",
         got.state
     );
-    // The header is the media title, never the app name.
     assert_eq!(got.name, "Dune: Part Two", "header is the movie title");
 }
 
@@ -3408,7 +3257,6 @@ fn movie_t5a_details_128_word_aware() {
             series: "Some Film".to_string(),
             is_movie: true,
             synopsis: syn.clone(),
-            // Work-level: the tooltip mechanics are the point here.
             synopsis_is_work: true,
             ..Resolved::default()
         },
@@ -3429,7 +3277,6 @@ fn movie_t5a_details_128_word_aware() {
     assert!(n <= 128, "large_text length {n} exceeds 128: {:?}", got.large_text);
     assert_eq!(got.name, "Some Film", "header stays the title");
     assert_eq!(got.details, "", "details blanks: it would repeat the header");
-    // Spaceless run still signals within budget.
     let nospace = "s".repeat(200);
     let got = build_activity_resolved(
         MOVIE_RAW,
@@ -3523,9 +3370,7 @@ fn movie_t5a_tv_t4_unchanged() {
         "TV details blanks: the header carries the series title"
     );
     assert_eq!(got.state, "S01E02 \u{b7} Confrontation", "TV state is code · episode");
-    // Episode-pinned prose never rides the tooltip.
     assert_eq!(got.large_text, "", "TV tooltip hides episode prose");
-    // Absolute-only still renders E02, never a fake season; one-season keeps S01.
     let got = build_activity_resolved(
         TV_RAW,
         Some(&run_act),
@@ -3771,7 +3616,6 @@ fn paused_marks_last_populated_line_without_timestamps() {
         ct: 1000,
         ..Action::default()
     };
-    // Movie with a runtime: the marker rides the state; line 1 is untouched.
     let got = build_activity_resolved(
         "Dune.Part.Two.2024.1080p.mkv - PotPlayer",
         Some(&paused),
@@ -3786,8 +3630,6 @@ fn paused_marks_last_populated_line_without_timestamps() {
     );
     assert_eq!(got.details, "2024 \u{b7} Sci-Fi", "line 1 untouched");
     assert_eq!(got.state, "2h 46m \u{b7} Paused", "marker on the state");
-    // Movie with no runtime: the marker rides line 1, the last populated
-    // body line; line 2 stays empty.
     let got = build_activity_resolved(
         "Dune.Part.Two.2024.1080p.mkv - PotPlayer",
         Some(&paused),
@@ -3804,7 +3646,6 @@ fn paused_marks_last_populated_line_without_timestamps() {
         "marker on line 1"
     );
     assert_eq!(got.state, "", "line 2 stays empty");
-    // Series: the marker rides the episode line; line 1 stays empty.
     let got = build_activity_resolved(
         "Show.S01E02.Confrontation.1080p.mkv - PotPlayer",
         Some(&paused),
@@ -3821,7 +3662,6 @@ fn paused_marks_last_populated_line_without_timestamps() {
         got.state, "S01E02 \u{b7} Confrontation \u{b7} Paused",
         "marker on the episode line"
     );
-    // No timestamps on any paused card.
     for raw in [
         "Dune.Part.Two.2024.1080p.mkv - PotPlayer",
         "Show.S01E02.Confrontation.1080p.mkv - PotPlayer",
@@ -3868,7 +3708,6 @@ fn unknown_card_is_title_and_code_only() {
         "no timestamps: {:?}",
         (got.has_start, got.start, got.end)
     );
-    // No tag at all: no state either, still no timestamps.
     let got = build_activity_resolved(
         "Some.Random.Video.1080p.mkv - PotPlayer",
         Some(&run_act),
@@ -3900,7 +3739,6 @@ fn tooltip_only_rides_work_level_synopsis() {
         ct: 1000,
         ..Action::default()
     };
-    // A work synopsis rides whole when short.
     let got = build_activity_resolved(
         MOVIE_RAW,
         Some(&run_act),
@@ -3917,7 +3755,6 @@ fn tooltip_only_rides_work_level_synopsis() {
         got.large_text, "Paul unites the Fremen",
         "work prose rides"
     );
-    // The same note without provenance stays home.
     let got = build_activity_resolved(
         MOVIE_RAW,
         Some(&run_act),
@@ -3934,7 +3771,6 @@ fn tooltip_only_rides_work_level_synopsis() {
         "unmarked prose never rides: {:?}",
         got.large_text
     );
-    // Episode-pinned prose never rides, however short.
     let got = build_activity_resolved(
         TV_RAW,
         Some(&run_act),
@@ -3952,7 +3788,6 @@ fn tooltip_only_rides_work_level_synopsis() {
         "episode prose never rides: {:?}",
         got.large_text
     );
-    // A work-level series note rides, capped at 128 with the signal.
     let long = format!("{}tail", "word ".repeat(40));
     let got = build_activity_resolved(
         TV_RAW,

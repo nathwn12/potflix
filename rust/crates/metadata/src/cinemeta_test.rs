@@ -1,6 +1,3 @@
-//! Cinemeta provider tests: the catalog-then-meta round trip against a fake
-//! server (including the title validation that the iTunes leg lacked),
-//! plus one live round trip against the real endpoint.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

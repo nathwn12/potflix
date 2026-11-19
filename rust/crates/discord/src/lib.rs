@@ -1,39 +1,3 @@
-//! `discord` -- mirrors the Go package `go\internal\discord`.
-//!
-//! Local Discord IPC pipe transport over `\\.\pipe\discord-ipc-0..9`:
-//! handshake, `SET_ACTIVITY`, `READY` gating, reply matching.
-//!
-//! This file is the module body for `go\internal\discord\pipe.go`: a named-pipe
-//! client for `\\.\pipe\discord-ipc-0..9`. Frame = int32 LE opcode + int32 LE
-//! length + JSON payload. Opcodes: 0 handshake, 1 frame, 2 close, 3 ping,
-//! 4 pong. The client sends the handshake, a read-pump thread answers PING with
-//! PONG and surfaces READY/dispatch frames, and any transport error triggers a
-//! reconnect after `Config::retry_delay` (5000 ms default), with the contract's
-//! `session dropped: <err>` line emitted through `Config::on_drop`. The delay is
-//! damped: the first retry after a drop waits exactly `retry_delay`, and every
-//! consecutive unhealthy session -- never READY, or dropped within `READY_GRACE`
-//! of READY -- doubles the wait up to `BACKOFF_MAX` (60 s). A session that
-//! survives the grace resets the backoff, so a single transient drop still
-//! recovers at the plain `retry_delay`; a peer that accepts and never acks
-//! settles at the cap instead of reconnecting on every `retry_delay`.
-//!
-//! Discord answers every command with the SAME nonce. `send` records each
-//! outstanding nonce in a nonce-keyed set and the read pump matches an incoming
-//! frame against it; a matched frame is surfaced through `Config::on_reply` (an
-//! `evt:"ERROR"` rejection carries Discord's own `data.code` and `data.message`).
-//! Commands are held back until Discord's READY dispatch (`Error::NotReady`
-//! before it), because Discord discards commands sent earlier; READY also fires
-//! `Config::on_connect` and bumps the generation. Every write is bounded by a
-//! deadline, because the write mutex is held across it: a peer that accepted the
-//! connection but stopped draining would otherwise stall the poll loop forever.
-//! Nothing on this path is swallowed: the caller logs every reply, every send
-//! error, a `push ack timeout` when a command gets no reply, and a write expiry.
-//! An unanswered command is unproven, so its timeout drops the connection too:
-//! the supervisor reconnects with a fresh handshake and the caller re-delivers,
-//! instead of leaving the session limping on a connection that never answered.
-//!
-//! The Win32 plumbing -- the `FILE_FLAG_OVERLAPPED` contract, one event per
-//! operation, deadline cancellation -- lives in `win.rs`.
 
 pub mod activity;
 pub mod fakepipe;
@@ -698,8 +662,6 @@ fn dispatch_frame(inner: &Arc<Inner>, payload: &[u8]) {
             let mut st = inner.state.lock().expect("client state");
             let already = st.ready;
             st.ready = true;
-            // Stamped once per session, at its first READY: the supervisor
-            // classifies the session by how long it lived after this.
             st.ready_at.get_or_insert_with(Instant::now);
             already
         };

@@ -1,8 +1,3 @@
-//! `library::scanindex` -- mirrors `go\internal\library\scanindex.go`.
-//!
-//! The folder tier of the library index: the two content identities (tier-1
-//! names hash, tier-2 fingerprint) and the folder rollups the scan's fast path
-//! consults. The rollups live in the store-backed index (`index.rs`).
 
 use std::collections::HashMap;
 use std::sync::Arc;

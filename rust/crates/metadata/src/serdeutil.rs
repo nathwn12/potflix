@@ -1,13 +1,3 @@
-//! Serde helpers for the provider wire shapes.
-//!
-//! Go's `encoding/json` is deliberately lenient: unmarshalling `null` into a
-//! non-pointer field is a NO-OP that leaves the zero value, while `serde` errors
-//! on `null` for `String`, `Vec` and the numeric types. The providers depend on
-//! that leniency -- TVmaze really does serve `"summary":null` and
-//! `"premiered":null` for unreleased shows -- so every non-`Option` field of a
-//! provider response struct goes through [`null_default`], which reads the value
-//! as an `Option` and falls back to the type's default. A missing field is
-//! handled by `#[serde(default)]` before this runs.
 
 use serde::{Deserialize, Deserializer};
 

@@ -1,9 +1,3 @@
-//! `library::catchup` -- mirrors `go\internal\library\catchup.go`.
-//!
-//! The background metadata catch-up: after a scan has indexed the tree, and at
-//! every launch, this worker resolves whatever metadata the index still owes -
-//! pending keys, and needs_repair entries whose cooldown has expired - and
-//! writes the needs-repair inventory report.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -218,10 +212,6 @@ impl CatchUp {
                     continue;
                 }
             }
-            // The manual latch wins before anything is fetched: a latched
-            // record is resolved from the override store itself -- no provider
-            // lookup, no attempt increment, no error, no cooldown -- so a
-            // latched folder never returns to the repair list.
             if overrides
                 .resolve_for(&rec.path)
                 .is_some()
@@ -229,10 +219,6 @@ impl CatchUp {
                 apply_latch_verdict(&idx, rec, now);
                 continue;
             }
-            // Parser-classified extras are not metadata gaps: the live path
-            // never fetches them (UNKNOWN kinds, extras-folder leaves), so the
-            // repair path never looks them up again. `write_inventory` counts
-            // them separately and keeps them out of the needs-repair list.
             if is_extra(rec) {
                 continue;
             }
@@ -521,9 +507,6 @@ impl Index {
         let mut extras = 0i64;
         let mut pending = 0i64;
         for rec in &records {
-            // The manual latch wins over every other bucket: a latched file is
-            // counted once, as pinned, never as needs-repair -- even when its
-            // record still says so.
             if overrides
                 .resolve_for(&rec.path)
                 .is_some()

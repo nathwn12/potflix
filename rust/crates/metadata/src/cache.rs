@@ -1,29 +1,3 @@
-//! `metadata::cache` -- mirrors `go\internal\metadata\cache.go`.
-//!
-//! ONE store file per cache directory (`<dir>.idx`, so
-//! `%LOCALAPPDATA%\Potflix\meta.idx` for the default `meta` dir) behind one
-//! handle held for the process lifetime, so a read is a map lookup. One entry
-//! per key (`series|<show>|<year>|<season>` or `movie|<title>|<year>`);
-//! not-found titles are cached as NEGATIVE entries for 30 days, and media
-//! answers as positive entries for 30 days ([`POSITIVE_TTL`]): a bounded
-//! read-through cache, never indefinite storage.
-//! `migrateLegacyCache` imports the retired per-key `meta\*.json` directory
-//! once, when the store is empty, and keeps it as the recovery copy;
-//! `ClearCache` is the only code that removes it.
-//!
-//! # Serialization decision (made, not relitigated)
-//!
-//! Go's `json.Marshal` HTML-escapes `<`, `>` and `&`; `serde_json` does not.
-//! This crate accepts serde_json's output for cache records: both directions
-//! parse either form, so interop with existing Go-written caches holds, and no
-//! byte-identical-refresh test exists. Nothing here depends on the escaping.
-//!
-//! # Schema gate
-//!
-//! [`CACHE_SCHEMA`] versions the on-disk envelope; a record whose `schema`
-//! differs is a whole-record MISS so art/synopsis are refetched. `CacheHas`
-//! deliberately does NOT check the schema -- it is a presence probe, and the
-//! caller that needs the schema reads it from the record itself.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -286,9 +260,6 @@ pub(crate) fn with_cache<T>(
         .db
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    // The legacy directory stays watched while the store is empty: a caller that
-    // seeds legacy files after the store was first touched still sees them
-    // imported. On a populated store this is a `len` check, not a directory read.
     if migrate_legacy(&db, dir) > 0 {
         db.commit()?;
     }
@@ -480,8 +451,6 @@ pub fn clear_cache_entries(dir: &str) -> Result<i32, Error> {
             db.delete(key)?;
         }
         cleared = keys.len() as i32;
-        // Tombstones alone would leave the file's bytes on disk: rewrite it as
-        // an empty snapshot.
         db.compact()?;
         Ok(())
     })?;
@@ -632,7 +601,6 @@ pub fn count_negatives(dir: &str) -> i32 {
         return 0;
     }
     let mut count = 0;
-    // `for_each` runs with the store locked: this callback only decodes a copy.
     let result = with_cache(&d, |db| {
         db.for_each(|_, value| {
             if let Ok(record) = serde_json::from_slice::<CacheFile>(value)
@@ -842,9 +810,6 @@ mod tests {
 
     #[test]
     fn decode_heals_wikipedia_disambiguation_title() {
-        // A record written before the disambiguation strip (the owner's live
-        // cache carries `Ready Player One (film)`) decodes to the clean title
-        // with no schema bump, no rewrite and no refetch.
         let key = "movie|ready player one|2018";
         let record = CacheFile {
             key: key.to_string(),
@@ -866,8 +831,6 @@ mod tests {
         assert_eq!(media.title, "Ready Player One");
         assert_eq!(media.source_id, "Ready Player One");
         assert_eq!(media.year, 2018);
-        // A real parenthesized title heals to itself, and other providers are
-        // never rewritten by a Wikipedia convention.
         for (source, title) in [
             ("wikipedia", "Nymphomaniac (Director's Cut)"),
             ("cinemeta", "Dune (2021 film)"),

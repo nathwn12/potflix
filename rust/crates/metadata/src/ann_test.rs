@@ -1,6 +1,3 @@
-//! ANN provider tests: the XML report parsing against a canned body
-//! (including the title validation and the colon retry), plus one live round
-//! trip against the real endpoint.
 
 use std::time::Duration;
 

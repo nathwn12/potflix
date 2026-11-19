@@ -1,7 +1,3 @@
-//! Non-Windows stub -- mirrors `reparse_other.go`.
-//!
-//! Reparse points do not exist off Windows, and the `symlink_metadata` check in
-//! `check_bundle_dir` already covers symlinks on every platform.
 
 use std::path::Path;
 

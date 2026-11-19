@@ -1,34 +1,3 @@
-//! `clientid` -- mirrors the Go root file `go\clientid.go`.
-//!
-//! `resolve_client_id`, in the contract's order (section 7):
-//!
-//! 1. env `POTFLIX_CLIENT_ID`
-//! 2. file `client-id.txt`
-//! 3. file `config.properties` (raw text, first run of 17-20 digits)
-//! 4. hardcoded default
-//!
-//! Files are searched beside the running executable FIRST (the install
-//! directory, where they actually live), then against the process CWD -- the
-//! original behaviour, kept so an install launched from its own directory is
-//! unaffected. The order is PER DIRECTORY: the exe directory's `client-id.txt`,
-//! then the exe directory's `config.properties`, then the CWD's `client-id.txt`,
-//! then the CWD's `config.properties` (the Go loop nests the file list inside
-//! the directory list). Files are read as raw text, and the first regex match of
-//! 17-20 digits wins. `config.properties` is NOT key/value parsed; no keys
-//! exist. The VALUE is never logged -- only the source ([`ClientIdSource`]).
-//!
-//! Ported from `Main.java:515-536`; the default is the Java literal at `:516`.
-//! Deviation (kept from the Go port): `Main.java` opened both files against the
-//! CWD only, so a launch from any other directory (Start-Process, a scheduled
-//! task, a shortcut with a different "Start in") missed `client-id.txt` and
-//! silently fell through to the default id -- the wrong Discord application, and
-//! no Potflix artwork.
-//!
-//! Rust notes: the exe directory and the CWD are parameters of
-//! [`resolve_client_id_in`], the equivalent of the Go package's injectable
-//! `clientIDExeDir` seam. That keeps every precedence test hermetic -- no test
-//! mutates the process CWD or the process environment, so the suite is
-//! order-independent and safe under the parallel test harness.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -153,8 +122,6 @@ pub fn resolve_client_id_in(
     cwd: &Path,
     env: Option<&str>,
 ) -> (i64, ClientIdSource) {
-    // (1) environment. Java: null check, then Long.parseLong(env.trim());
-    // a set-but-unparseable value falls through.
     if let Some(value) = env
         && !value.is_empty()
         && let Ok(id) = value.trim().parse::<i64>()
@@ -162,7 +129,6 @@ pub fn resolve_client_id_in(
         return (id, ClientIdSource::Env);
     }
 
-    // (2) client-id.txt, (3) config.properties, in that order per directory.
     for dir in client_id_file_dirs(exe_dir, cwd) {
         for (name, source) in [
             (CLIENT_ID_FILE_NAME, ClientIdSource::ClientIdFile),
@@ -171,9 +137,6 @@ pub fn resolve_client_id_in(
             let Ok(bytes) = std::fs::read(dir.join(name)) else {
                 continue;
             };
-            // Raw text: Go reads the bytes into a string and scans it. Lossy
-            // decoding keeps that behaviour for a file that is not UTF-8 --
-            // replacement characters never hide an ASCII digit run.
             let text = String::from_utf8_lossy(&bytes);
             if let Some(id) = first_client_id_match(text.trim()) {
                 return (id, source);
@@ -181,7 +144,6 @@ pub fn resolve_client_id_in(
         }
     }
 
-    // (4) hardcoded default.
     (DEFAULT_CLIENT_ID, ClientIdSource::Default)
 }
 
@@ -237,7 +199,6 @@ mod tests {
         );
     }
 
-    // TestResolveClientIDOrder (1): env wins over every file.
     #[test]
     fn env_wins_over_exe_dir_and_cwd() {
         let install = Scratch::new("env-exe");
@@ -252,8 +213,6 @@ mod tests {
         assert_source_hides_value(got, source, "env");
     }
 
-    // TestResolveClientIDOrder (2): client-id.txt beats config.properties in the
-    // SAME directory.
     #[test]
     fn client_id_file_beats_config_properties_in_one_directory() {
         let cwd = Scratch::new("same-dir");
@@ -265,8 +224,6 @@ mod tests {
         assert_source_hides_value(got, source, "client-id.txt");
     }
 
-    // TestResolveClientIDOrder (3): config.properties, raw scan, no key/value
-    // parsing -- and (3b) the first 17-20 digit run wins inside unrelated text.
     #[test]
     fn config_properties_is_raw_scanned() {
         let cwd = Scratch::new("props-raw");
@@ -283,7 +240,6 @@ mod tests {
         assert_source_hides_value(got, source, "raw scan");
     }
 
-    // TestResolveClientIDOrder (4): default when the files are gone.
     #[test]
     fn default_when_no_source_is_present() {
         let cwd = Scratch::new("default");
@@ -292,8 +248,6 @@ mod tests {
         assert_source_hides_value(got, source, "default");
     }
 
-    // The regression the Go port fixed: client-id.txt sits beside the exe while
-    // the process CWD holds no such file, and resolution must still find it.
     #[test]
     fn finds_file_beside_exe_when_cwd_has_none() {
         let install = Scratch::new("exe-first");
@@ -305,8 +259,6 @@ mod tests {
         assert_source_hides_value(got, source, "client-id.txt beside exe, CWD elsewhere");
     }
 
-    // The pre-existing install keeps working: no file beside the exe, the file
-    // in the CWD still resolves.
     #[test]
     fn falls_back_to_cwd() {
         let install = Scratch::new("cwd-fallback-exe");
@@ -318,7 +270,6 @@ mod tests {
         assert_source_hides_value(got, source, "CWD fallback");
     }
 
-    // An exe-dir lookup failure is not fatal: the CWD, then the default.
     #[test]
     fn absent_exe_dir_falls_through_to_cwd_then_default() {
         let cwd = Scratch::new("no-exe-dir");
@@ -339,7 +290,6 @@ mod tests {
         let install = Scratch::new("ladder-exe");
         let cwd = Scratch::new("ladder-cwd");
 
-        // (a) exe/config.properties beats cwd/client-id.txt.
         install.write(CONFIG_PROPS_FILE_NAME, &id('1').to_string());
         cwd.write(CLIENT_ID_FILE_NAME, &id('2').to_string());
         let (got, source) = resolve_client_id_in(Some(install.path()), cwd.path(), None);
@@ -349,28 +299,22 @@ mod tests {
             "exe config.properties must outrank cwd client-id.txt"
         );
 
-        // (b) exe/client-id.txt beats exe/config.properties.
         install.write(CLIENT_ID_FILE_NAME, &id('3').to_string());
         let (got, source) = resolve_client_id_in(Some(install.path()), cwd.path(), None);
         assert_eq!((got, source), (id('3'), ClientIdSource::ClientIdFile));
 
-        // (c) env beats everything, including both exe files.
         let (got, source) =
             resolve_client_id_in(Some(install.path()), cwd.path(), Some("12345678901234567"));
         assert_eq!((got, source), (12_345_678_901_234_567, ClientIdSource::Env));
 
-        // (d) an unparseable env value falls through to the files, not to the
-        // default (Java's Long.parseLong failure, Go's ParseInt failure).
         let (got, source) =
             resolve_client_id_in(Some(install.path()), cwd.path(), Some("not-a-number"));
         assert_eq!((got, source), (id('3'), ClientIdSource::ClientIdFile));
 
-        // (e) an empty env value is the unset case.
         let (got, source) = resolve_client_id_in(Some(install.path()), cwd.path(), Some(""));
         assert_eq!((got, source), (id('3'), ClientIdSource::ClientIdFile));
     }
 
-    // The regex contract: leftmost run, 17-20 digits, greedy at the match start.
     #[test]
     fn first_match_is_leftmost_and_capped_at_twenty_digits() {
         assert_eq!(first_client_id_match(""), None);
@@ -383,8 +327,6 @@ mod tests {
             first_client_id_match("id=12345678901234567 trailing"),
             Some(12_345_678_901_234_567)
         );
-        // A longer run is cut at 20 digits: only 20 digits fit an i64, so a
-        // 21-digit run overflows and is discarded (Go's ParseInt error path).
         assert_eq!(
             first_client_id_match(&digits('1', 21)),
             None,
@@ -395,21 +337,17 @@ mod tests {
             Some(id_of('1', 19)),
             "19 digits: the whole run is the match"
         );
-        // Leftmost wins: a short run is skipped, the first valid one returned
-        // even with another valid run later in the same text.
         assert_eq!(
             first_client_id_match("999 12345678901234567 88888888888888888"),
             Some(12_345_678_901_234_567)
         );
     }
 
-    // Go: a matched-but-unparseable run moves on to the NEXT candidate file.
     #[test]
     fn overflowing_match_falls_through_to_the_next_file() {
         let install = Scratch::new("overflow-exe");
         let cwd = Scratch::new("overflow-cwd");
 
-        // 20 nines overflow an i64: the file yields no id.
         install.write(CONFIG_PROPS_FILE_NAME, &digits('9', 20));
         cwd.write(CLIENT_ID_FILE_NAME, &id('4').to_string());
         let (got, source) = resolve_client_id_in(Some(install.path()), cwd.path(), None);
@@ -419,13 +357,11 @@ mod tests {
             "an unparseable match must fall through to the next file"
         );
 
-        // Same file, unparseable only: the default, never a partial id.
         std::fs::remove_file(cwd.join(CLIENT_ID_FILE_NAME)).expect("remove cwd fixture");
         let (got, source) = resolve_client_id_in(Some(install.path()), cwd.path(), None);
         assert_eq!((got, source), (DEFAULT_CLIENT_ID, ClientIdSource::Default));
     }
 
-    // Every branch reports a fixed source name, never the id VALUE.
     #[test]
     fn source_is_one_of_four_known_names() {
         let install = Scratch::new("sources-exe");
@@ -459,8 +395,6 @@ mod tests {
         assert_source_hides_value(got, source, "default");
     }
 
-    // The real entry point agrees with the explicit-path core for this process:
-    // no environment or CWD is mutated to prove it.
     #[test]
     fn resolve_client_id_uses_the_real_exe_dir_and_cwd() {
         let cwd = std::env::current_dir().expect("process cwd");
@@ -471,7 +405,6 @@ mod tests {
         assert!(ClientIdSource::ALL.contains(&got.1));
     }
 
-    // The logged line names the source and never carries the value.
     #[test]
     fn log_line_carries_the_source_never_the_value() {
         let scratch = Scratch::new("log-source");

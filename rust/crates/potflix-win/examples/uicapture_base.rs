@@ -1,28 +1,3 @@
-//! `uicapture_base` -- BASELINE twin of `uicapture`, compiled against the
-//! pre-redesign code (base `a4d6a10`) during the file-swap capture only. Uses
-//! base APIs exclusively (no `paint_to_hdc`, no `scroll_top`, no owner-draw
-//! menu model): `window` and `menu` modes only. Kept so the before-proof is
-//! re-runnable; see the swap script in the fleet report.
-//!
-//! Capture-only: drives the REAL `potflix-win` window (same `create_main_window`
-//! / `show_main_window` / `main_wnd_proc` / paint path the tray app uses) on a
-//! private desktop and writes PNGs. Never touches the owner's visible desktop:
-//! no `SendInput`, no input injection, no `SetForegroundWindow` off the hidden
-//! desktop -- only the message path (`PostMessageW`/`SendMessageW`) to windows
-//! this harness created, exactly like the proven `desktop-headless.ps1` runner.
-//! The full tray binary cannot run headless (its notify-icon gate returns
-//! before the window exists when no shell hosts the tray), so this harness
-//! bypasses the tray gate and nothing else: same window, same proc, same
-//! paint, same config read.
-//!
-//! Usage (run with the wanted `LOCALAPPDATA`: owner state = populated list,
-//! scratch dir = empty state):
-//! ```text
-//! uicapture_base window <out.png> <main|settings|card>
-//! uicapture_base menu <out.png>
-//! ```
-//! Every capture prints `MEASURE min/max/mean uniform=<bool>` (a blank bitmap
-//! fails the proof), the DPI, and the DPI-awareness context.
 
 use std::ffi::c_void;
 
@@ -174,7 +149,6 @@ fn save_png(hbm: isize, path: &str) -> Result<(), String> {
         GdipCreateBitmapFromHBITMAP, GdipDisposeImage, GdipSaveImageToFile, GdiplusShutdown,
         GdiplusStartup, GdiplusStartupInput, GpBitmap, GpImage,
     };
-    // PNG encoder CLSID {557CF406-1A04-11D3-9A73-0000F81EF32E}.
     let clsid = windows_sys::core::GUID {
         data1: 0x557C_F406,
         data2: 0x1A04,
@@ -310,8 +284,6 @@ fn mode_menu(args: &[String]) -> Result<(), String> {
     let r = (|| {
         let tw = tray::create_tray_window().map_err(|e| format!("tray window: {e}"))?;
         let owner = tw.hwnd as usize;
-        // Watcher thread: waits for the `#32768` popup on THIS hidden desktop,
-        // captures it, then ends menu tracking. Message-path only.
         let out2 = out.clone();
         let watcher = std::thread::spawn(move || -> Result<(), String> {
             // SAFETY: this thread owns no windows, so the switch is legal.

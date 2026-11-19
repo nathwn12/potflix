@@ -1,39 +1,3 @@
-//! The Potflix brand system, ported from the repo's own identity pass.
-//!
-//! `design\make_logo.py` is the authority for everything in this module: the
-//! palette it prints as `PALETTE_REPORT`, the faces it ships in `design\fonts\`,
-//! the Ribbon-P mark it renders into `assets\icon.ico`, and the house squircle
-//! fraction it uses for every tile. Nothing here is invented -- each token names
-//! the part of that script it comes from.
-//!
-//! # Why this module exists
-//!
-//! The Win32 client area was drawing with system fonts and an ad-hoc grey ramp,
-//! so the shipped window carried none of the brand. Every token below is either
-//! a hex the identity pass already prints, or a value derived from one by a
-//! stated rule. The two rules that matter:
-//!
-//! * **The squircle fraction.** `make_logo.py` rounds a tile with
-//!   `size * 0.225` (`tile()`) and the app icon's own radius is 112/512 =
-//!   `0.21875` (the brief's 21.9%). [`squircle`] is that fraction as integer
-//!   math, and every radius in the app is `squircle(<its own square>)` -- a
-//!   36px control rounds like a 36px tile, a 64px panel like a 64px tile.
-//! * **The palette is fixed.** `RED`/`DARK`/`BLACK`/`WHITE` plus the card
-//!   quartet. `DARK` is not free-hand: it is `round(RED * 0.62)`, which
-//!   `make_logo.py` states at its own definition site, and
-//!   [`dark_is_red_scaled`] re-derives it so the claim is checked, not trusted.
-//!
-//! # Contrast
-//!
-//! Every text/surface pair the app paints is measured by [`contrast`] from the
-//! actual constants (`brand_contrast_gate` below). The brand palette was chosen
-//! for the Discord card, a large-format surface; the app reuses it at 11-13px,
-//! so each pair is re-checked at the small-text threshold.
-
-// The Win32 surface is inherently pointer-taking: every entry point accepts an
-// `HWND`/`HICON` and hands it to `windows-sys`. The handles are opaque and the
-// module never dereferences them itself, so the lint is silenced module-wide
-// (the same allow `window` carries).
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use windows_sys::Win32::Foundation::HWND;
@@ -437,7 +401,6 @@ mod tests {
     fn squircle_is_the_house_fraction() {
         assert_eq!(squircle(512), 112);
         assert_eq!(squircle(1024), 224);
-        // A 36px control rounds like a 36px tile; a 64px panel like a 64px tile.
         assert_eq!(squircle(36), 8);
         assert_eq!(squircle(64), 14);
         assert_eq!(squircle(32), 7);
@@ -478,7 +441,6 @@ mod tests {
     /// test measured.
     #[test]
     fn brand_contrast_gate() {
-        // Body text: >= 4.5:1 against every surface it is painted on.
         for (name, fg, bg) in [
             ("CARD_HDR on BLACK", CARD_HDR, BLACK),
             ("CARD_HDR on CHROME", CARD_HDR, CHROME),
@@ -499,9 +461,6 @@ mod tests {
             println!("CONTRAST body {name} = {r:.2}:1");
             assert!(r >= 4.5, "body {name} = {r:.2}:1 < 4.5:1");
         }
-        // Non-text: >= 3:1 -- boundaries, indicators, glyphs. Only the pairs the
-        // app actually paints are listed, so the gate cannot pass on a
-        // combination no surface uses.
         for (name, fg, bg) in [
             ("RED on BLACK", RED, BLACK),
             ("RED on CHROME", RED, CHROME),
@@ -521,7 +480,6 @@ mod tests {
     /// that ship beside them travel with the embedded copies.
     #[test]
     fn embedded_faces_are_the_design_fonts() {
-        // Both are real TrueType images: the sfnt version tag is 0x00010000.
         assert_eq!(&DISPLAY_TTF[..4], &[0x00, 0x01, 0x00, 0x00]);
         assert_eq!(&UI_TTF[..4], &[0x00, 0x01, 0x00, 0x00]);
         assert!(DISPLAY_TTF.len() > 80_000, "Archivo Black looks truncated");

@@ -1,26 +1,3 @@
-//! `metadata::cinemeta` -- Stremio's default catalog addon as a keyless movie and
-//! series source (`com.linvo.cinemeta`, base [`CINEMETA_DEFAULT_BASE`]).
-//!
-//! Wire shape: `/catalog/<movie|series>/top/search=<title>.json` resolves the
-//! title to an IMDb id, then `/meta/<movie|series>/<id>.json` carries the
-//! details (year, `runtime` like `"148 min"`, `genre[]`, `description`,
-//! `poster`) plus the series episode list (`videos[]`) in the same call.
-//!
-//! Two behaviours that are contract, not detail:
-//!
-//! * the catalog pick is title-validated with [`pick_best_show`]: a
-//!   low-confidence best returns a definitive MISS rather than a wrong movie
-//!   (the iTunes leg it replaces returned the first `feature-movie` row with
-//!   no title check at all);
-//! * year NEVER rejects: a known query year only PREFERS, at equal title
-//!   strength, the candidate carrying it (any challenger fully covering the
-//!   query title, not just a duplicate exact one) and otherwise rides along
-//!   as a display field. A missing year, or a year that disagrees with the
-//!   filename, never skips a provider holding the essentials.
-//!
-//! An `Absolute` series query renumbers the episode table positionally in
-//! `(season, number)` air order, exactly as TVmaze does, so the resolver's
-//! number-exact match holds.
 
 use std::time::Duration;
 
@@ -265,10 +242,6 @@ impl CinemetaSource {
 
     fn find_movie(&self, cancel: &Cancel, q: &Query) -> Result<Option<Media>, Error> {
         let entries = self.catalog(cancel, q, "movie")?;
-        // A title below the floor is still the right work when the search
-        // engine's own top row carries the query year (parse_raw salvages that
-        // year out of junk-laden scene names): two independent keys -- the
-        // engine's rank and the year -- so an unrelated first row still loses.
         let Some(idx) = Self::pick_index(q, &entries).or_else(|| year_seed_index(q, &entries))
         else {
             return Ok(None);
@@ -373,9 +346,6 @@ fn series_media(q: &Query, picked: &CinemetaMeta, details: CinemetaDetails) -> O
     }
     episodes.sort_by_key(|episode| (episode.season, episode.number));
     if q.absolute {
-        // Absolute N maps to the Nth entry in (season, number) air order,
-        // exactly as the TVmaze source renumbers, so number-exact matching
-        // holds for absolute anime queries.
         for (i, episode) in episodes.iter_mut().enumerate() {
             episode.number = i as i32 + 1;
         }
@@ -451,7 +421,6 @@ impl crate::resolver::Source for CinemetaSource {
                 episode_count: 0,
                 aliases: Vec::new(),
             };
-            // The same floor `Find` applies: a fuzzy row never becomes a pick.
             if pick_best_show(&q.title, std::slice::from_ref(&cand)).is_none() {
                 continue;
             }

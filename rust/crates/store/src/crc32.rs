@@ -1,14 +1,3 @@
-//! Hand-rolled CRC32/IEEE, table-driven, built at compile time.
-//!
-//! Port of the Go original's use of `hash/crc32` with `crc32.IEEETable` (the
-//! reflected polynomial `0xEDB88320`, init `0xFFFFFFFF`, final XOR
-//! `0xFFFFFFFF` -- the same function as zlib `crc32`). The workspace dependency
-//! policy keeps this crate dependency-free, so the table is produced by a
-//! `const fn` instead of a crate.
-//!
-//! Proved against the published vectors in the test below, and end to end by
-//! `tests/fixtures/*.pflx` (written by the Go implementation): the header CRC
-//! they carry only validates here if the two implementations agree bit for bit.
 
 /// The reflected IEEE 802.3 polynomial (`crc32.IEEETable`).
 const POLY: u32 = 0xEDB8_8320;

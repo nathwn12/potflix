@@ -1,20 +1,3 @@
-//! `metadata::animeschedule` -- AnimeSchedule as a keyless anime source.
-//!
-//! GET `https://animeschedule.net/api/v3/anime?q=<title>`: one request per
-//! search, no episode table. The wire carries `title`/`premier`/`episodes`/
-//! `description`/`season.title`/`imageVersionRoute` plus genre and poster
-//! fields whose exact names drifted across API revisions, so the parser is
-//! deliberately tolerant: it accepts an array or an object holding the array
-//! under `anime`/`data`/`results`, reads the title/year/poster from any of
-//! the known spellings, and prefixes a bare image route with the site root.
-//!
-//! Behaviours that are contract:
-//! * the search pick is title-validated with [`pick_best_show`]: a
-//!   low-confidence best is a definitive miss, never a wrong show; year
-//!   never gates, it only prefers at equal title strength.
-//! * `find_all` is the same one-GET answer, each entry clearing the floor
-//!   as its own pickable row with an empty episode table; the entry's own
-//!   form decides the kind (`movie` is a movie, everything else a series).
 
 use std::time::Duration;
 
@@ -152,9 +135,6 @@ fn genres_field(value: &serde_json::Value) -> String {
 }
 
 fn poster_field(base: &str, value: &serde_json::Value) -> String {
-    // `imageVersionRoute` is a versioned route (`/images/...`); `poster`,
-    // `cover`, `image` and their nested spellings carry the same picture
-    // under other revisions. A bare route is prefixed with the site root.
     for key in [
         "poster",
         "posterImage",
@@ -198,7 +178,6 @@ fn poster_field(base: &str, value: &serde_json::Value) -> String {
             }
         }
     }
-    // Nested `images: { jpg: { image_url } }` (Jikan-shaped mirrors).
     if let Some(images) = value.get("images")
         && let Some(obj) = images.as_object()
     {
@@ -251,7 +230,6 @@ fn year_field(value: &serde_json::Value) -> i32 {
             }
         }
     }
-    // `season: { title: "Fall 2022" }` carries the year as a last resort.
     if let Some(season) = value.get("season") {
         if let Some(s) = season.as_str() {
             let year = date_year(s);
@@ -326,8 +304,6 @@ fn entry_from_value(base: &str, value: &serde_json::Value) -> Option<ScheduleEnt
             }
         }
     }
-    // Real shape nests the alternate spellings under `names:{romaji,english,
-    // native}`; without them a romaji/english query never corroborates.
     if let Some(names) = value.get("names").and_then(|v| v.as_object()) {
         for key in ["romaji", "english", "native", "preferred"] {
             if let Some(s) = names.get(key).and_then(|v| v.as_str())
@@ -578,7 +554,6 @@ mod tests {
         assert!(media.artwork.contains("one-piece.jpg"));
         assert!(media.genres.contains("Action"));
         assert_eq!(source.path(), SearchPath::Anime);
-        // The second entry's absolute poster URL and string-genre shape.
         let rows = source
             .find_all(&cancel, &q)
             .expect("find_all");

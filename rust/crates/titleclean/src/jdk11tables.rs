@@ -1,8 +1,3 @@
-// JDK-11 (Unicode 10) classification tables. DO NOT EDIT.
-// Ported VERBATIM from the Go file `go/internal/titleclean/jdk11tables.go`,
-// which `jdkgen` generated from the installed JDK 11 -- the runtime the Java
-// cleaner ships against. The compiler's own Unicode is newer, so these are the
-// authoritative bytes for parity, never a re-derivation.
 
 pub static JDK_WORD_RANGES: &[(char, char)] = &[
     ('\u{30}', '\u{39}'), ('\u{41}', '\u{5A}'), ('\u{61}', '\u{7A}'), ('\u{AA}', '\u{AA}'),
@@ -242,7 +237,6 @@ pub static JDK_MN_RANGES: &[(char, char)] = &[
     ('\u{E0100}', '\u{E01EF}'),
 ];
 
-// (lo, hi, delta); the upper-case mapping is the code point plus the delta.
 pub static JDK_UPPER_RANGES: &[(char, char, i32)] = &[
     ('\u{61}', '\u{7A}', -32), ('\u{B5}', '\u{B5}', 743), ('\u{E0}', '\u{F6}', -32), ('\u{F8}', '\u{FE}', -32),
     ('\u{FF}', '\u{FF}', 121), ('\u{101}', '\u{101}', -1), ('\u{103}', '\u{103}', -1), ('\u{105}', '\u{105}', -1),
@@ -411,7 +405,6 @@ pub static JDK_UPPER_RANGES: &[(char, char, i32)] = &[
     ('\u{FF41}', '\u{FF5A}', -32),
 ];
 
-// (lowercase, full upper-case expansion) pairs, ascending by key.
 pub static JDK_FULL_UPPER: &[(char, &str)] = &[
     ('\u{00DF}', "\u{0053}\u{0053}"),
     ('\u{0149}', "\u{02BC}\u{004E}"),

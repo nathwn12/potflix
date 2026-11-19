@@ -1,20 +1,3 @@
-//! `metacheck` -- mirrors `go\cmd\metacheck`: the proof/diagnostic CLI for the
-//! metadata lookup.
-//!
-//! ```text
-//! metacheck [-offline] [-dir <cacheDir>] [-path <filePath>] <rawTitle>
-//! ```
-//!
-//! It parses the raw PotPlayer window title, resolves the canonical series and
-//! episode title, and prints one line:
-//!
-//! ```text
-//! input=<raw> series=<canonical> season=<n> episode=<n> title=<episode> source=<...> cache=<hit|miss> dir=<cacheDir> genres=<...> length=<...> year=<n> buttons=<label|url,...> art=<url> synopsis=<text>
-//! ```
-//!
-//! Default mode fetches over the network (`lookup_now`) and writes the cache;
-//! `-offline` serves the cache only and never touches the network. Exit 0 when
-//! resolved, 1 when not found or on error, 2 on a usage error.
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -131,12 +114,9 @@ fn main() -> ExitCode {
         q = resolve_query(&raw, &path_flag);
     }
 
-    // Every path below either initialises `res` or returns, so the binding is
-    // declared without a dead default (Go's `res := Resolution{}`).
     let res;
     let mut cache = "miss";
     if !offline {
-        // Cache-only probe first: it tells hit from miss without fetching.
         let probe = Resolver::new(Options {
             dir: dir.clone(),
             offline: true,

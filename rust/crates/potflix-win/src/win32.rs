@@ -1,85 +1,31 @@
-//! `win32` -- mirrors the Go root file `go\win32.go`.
-//!
-//! The raw Win32 surface: `user32`, `kernel32`, `shell32`, `gdi32`, `ole32` and
-//! the procedure pointers Go reaches through `syscall.NewLazyDLL` /
-//! `NewLazyProc`. In Rust this is `windows-sys` (feature-gated bindings), with
-//! the same DLLs and the same procedures -- no C toolchain, no `cc` dependency.
-//!
-//! # Layout law
-//!
-//! The Go port hands Win32 raw struct pointers, so every struct below is a
-//! byte-exact mirror of `go\win32.go`: pointer-sized fields are `uintptr`
-//! (`usize` here, 8 bytes on amd64), fixed fields stay `u32`/`i32`, and
-//! `#[repr(C)]` reproduces the two 4-byte pads Go inserts in `NOTIFYICONDATAW`
-//! (after `cbSize`, and after `uCallbackMessage`/`hIcon`). A wrong offset is a
-//! silent runtime failure -- `Shell_NotifyIconW` just returns FALSE -- so every
-//! struct carries a compile-time size assertion and `#[cfg(test)]` offset
-//! assertions: adding, removing, or reordering a field must break the build,
-//! never the tray. The field names are snake_case (Go's are camelCase); the
-//! offset assertions, not the names, are what pin the ABI.
-//!
-//! Measured with `go1.27.0` `unsafe.Sizeof` on amd64 and asserted below:
-//! `wndClassEx` 80, `guid` 16, `notifyIconData` 976, `point` 8, `msgT` 48,
-//! `rect` 16, `paintStruct` **72**, `browseInfoW` 64, `trackMouseEvent` 24.
-//!
-//! `paintStruct` is the one place the Go source comment is wrong: `win32.go:240`
-//! (and the port map) say "68 bytes on amd64", but 68 is the sum of the field
-//! widths, not the ABI size. Go rounds the struct up to its 8-byte alignment and
-//! reports 72, exactly like `PAINTSTRUCT` in the Windows headers -- so 72 is
-//! asserted here. A 68-byte buffer would be a stack overwrite by `BeginPaint`.
-//!
-//! 32-bit (x86) layouts are unverified (the port map flags them), so the size
-//! assertions are gated to `x86_64` rather than pretending to cover x86.
-//!
-//! # Value traps reproduced, not smoothed over
-//!
-//! * `cwUseDefault` (`win32.go:229`) is `CW_USEDEFAULT`, i.e. `(int)-2147483648`
-//!   -- see [`CW_USEDEFAULT`].
-//! * `attachParentProcess` / `stdOutputHandle` / `stdErrorHandle`
-//!   (`win32.go:75-78`) are Go's `^uintptr(n)` complement form -- see
-//!   [`ATTACH_PARENT_PROCESS`].
 
 use core::mem::size_of;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 pub use windows_sys::Win32::Graphics::Gdi;
 
-// Binding table (`go\win32.go:8-36`).
-//
-// Each `pub use` IS the proc pointer Go builds with `NewLazyProc`: same DLL,
-// same entry point. A few user32 entries live in `windows-sys`'s `Gdi` module
-// because the header that documents them is `wingdi.h`, not because the DLL
-// differs.
 
-// user32 (`go\win32.go:13-28`).
 pub use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
     DestroyMenu, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, PostMessageW,
     PostQuitMessage, RegisterClassExW, SetForegroundWindow, TrackPopupMenu, TranslateMessage,
 };
 
-// kernel32 (`go\win32.go:30-33`).
 pub use windows_sys::Win32::Storage::FileSystem::CreateFileW;
 pub use windows_sys::Win32::System::Console::{AttachConsole, GetStdHandle};
 pub use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
-// shell32 (`go\win32.go:35`).
 pub use windows_sys::Win32::UI::Shell::{
     SHBrowseForFolderW, SHGetPathFromIDListW, Shell_NotifyIconW,
 };
 
 
-// user32 (`go\win32.go:141-151`; `BeginPaint`/`EndPaint`/`DrawTextW`/
-// `UpdateWindow` are declared under `Gdi` in `windows-sys` but still come from
-// `user32.dll`).
 pub use windows_sys::Win32::Graphics::Gdi::{BeginPaint, DrawTextW, EndPaint, UpdateWindow};
 pub use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 pub use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetDlgItem, LoadCursorW, SendMessageW, SetWindowTextW, ShowWindow,
 };
 
-// shell32 (`go\win32.go:153-154`).
-// gdi32 + ole32 (`go\win32.go:156-171`).
 pub use windows_sys::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateFontW, CreateSolidBrush, DeleteDC, DeleteObject, RoundRect,
     SelectObject, SetBkMode, SetTextColor,
@@ -131,18 +77,6 @@ pub fn dpi_awareness() -> i32 {
     }
 }
 
-// Native dark window chrome (Rust-only; `go\win32.go` has no counterpart -- the
-// Go build keeps the stock light caption).
-//
-// `dwmapi.dll` ships with the OS and is reached through the same `windows-sys`
-// FFI path as every proc above, so there is no new dependency: only the additive
-// `Win32_Graphics_Dwm` feature, exactly like the settings-window features.
-//
-// Attribute numbers and OS floors (learn.microsoft.com/windows/win32/api/dwmapi/
-// ne-dwmapi-dwmwindowattribute, verified 2026-10-14): `DWMWA_USE_IMMERSIVE_DARK_MODE`
-// is 20 (Windows 11 22000+; the pre-22000 Windows 10 attribute was 19, which this
-// app does not target), `DWMWA_WINDOW_CORNER_PREFERENCE` 33, `DWMWA_BORDER_COLOR`
-// 34, `DWMWA_CAPTION_COLOR` 35, `DWMWA_TEXT_COLOR` 36.
 
 pub use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -191,12 +125,6 @@ pub fn apply_dark_caption(hwnd: HWND, caption: u32, text: u32) {
     dwm_set(hwnd, DWMWA_BORDER_COLOR, caption);
 }
 
-// Dark owner-drawn tray menu (Rust-only: the Go build leaves the stock white
-// popup). `SetMenuInfo`/`MIM_BACKGROUND` paints the popup's interior dark
-// (learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setmenuinfo, verified
-// 2026-10-14); `MF_OWNERDRAW` + `WM_MEASUREITEM`/`WM_DRAWITEM` gives each item
-// palette-correct text and hover. The menu's own item ids, labels and dispatch
-// are untouched, so the tray's behavior is unchanged.
 
 pub use windows_sys::Win32::UI::Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT};
 pub use windows_sys::Win32::UI::WindowsAndMessaging::{MENUINFO, SetMenuInfo};
@@ -243,15 +171,6 @@ pub const ODT_LISTBOX: u32 = 2;
 pub const ODT_BUTTON: u32 = 4;
 pub const ODT_STATIC: u32 = 5;
 
-// GDI+ (`gdiplus.dll`) -- antialiased rounded geometry.
-//
-// GDI's own `RoundRect` rasterises with the selected 1px pen and aliased
-// brushes: its arcs are hard-stepped, which at 96 DPI reads as a chunky corner.
-// GDI+ fills a `GraphicsPath` with `SmoothingModeAntiAlias`, which is the
-// documented smoothed path for arbitrary geometry (learn.microsoft.com/windows/
-// win32/gdiplus/-gdiplus-antialiasing-with-lines-and-curves-about, verified
-// 2026-10-14). Same DLL family as gdi32, same windows-sys FFI path: no new
-// dependency, no C toolchain.
 
 pub use windows_sys::Win32::Graphics::GdiPlus::{
     CombineModeReplace, FillModeAlternate, GdipAddPathArcI, GdipClosePathFigure,
@@ -305,7 +224,6 @@ pub const WM_APP_TRAY: u32 = WM_APP + 1;
 /// Self-posted: stop the message loop (`go\win32.go:48`).
 pub const WM_APP_QUIT: u32 = WM_APP + 2;
 
-// `NOTIFYICONDATAW` flags and `Shell_NotifyIconW` verbs (`go\win32.go:52-59`).
 pub const NIM_ADD: u32 = 0x00000000;
 pub const NIM_DELETE: u32 = 0x00000002;
 
@@ -313,13 +231,11 @@ pub const NIF_MESSAGE: u32 = 0x00000001;
 pub const NIF_ICON: u32 = 0x00000002;
 pub const NIF_TIP: u32 = 0x00000004;
 
-// Menu / popup flags (`go\win32.go:62-67`).
 pub const MF_STRING: u32 = 0x00000000;
 pub const TPM_RIGHT_BUTTON: u32 = 0x0002;
 pub const TPM_BOTTOM_ALIGN: u32 = 0x0020;
 pub const TPM_RETURN_CMD: u32 = 0x0100;
 
-// `CreateIconFromResourceEx` / `CreateFileW` constants (`go\win32.go:70-79`).
 pub const ICON_RESOURCE_VERSION: u32 = 0x00030000;
 pub const GENERIC_WRITE: u32 = 0x40000000;
 pub const FILE_SHARE_READ_WRITE: u32 = 0x00000001 | 0x00000002;
@@ -338,7 +254,6 @@ pub const STD_OUTPUT_HANDLE: u32 = !10;
 /// `STD_ERROR_HANDLE`.
 pub const STD_ERROR_HANDLE: u32 = !11;
 
-// Show / paint / icon messages (`go\win32.go:175-185`).
 pub const SW_HIDE: i32 = 0;
 pub const SW_SHOW: i32 = 5;
 
@@ -363,7 +278,6 @@ pub const WM_GET_ICON: u32 = 0x007F;
 pub const ICON_SMALL: u32 = 0;
 pub const ICON_BIG: u32 = 1;
 
-// Window / control styles used by the settings window (`go\win32.go:188-200`).
 pub const WS_CAPTION: u32 = 0x00C00000;
 pub const WS_SYS_MENU: u32 = 0x00080000;
 pub const WS_MINIMIZE_BOX: u32 = 0x00020000;
@@ -393,14 +307,12 @@ pub const EN_CHANGE: u32 = 0x0300;
 pub const EN_SETFOCUS: u32 = 0x0100;
 pub const EN_KILLFOCUS: u32 = 0x0200;
 
-// List box messages used by the settings window (`go\win32.go:203-209`).
 pub const LB_ADD_STRING: u32 = 0x0180;
 pub const LB_DELETE_STRING: u32 = 0x0182;
 pub const LB_RESET_CONTENT: u32 = 0x0184;
 pub const LB_GET_CUR_SEL: u32 = 0x0188;
 pub const LB_GET_TEXT: u32 = 0x0189;
 
-// Paint constants used by the settings window (`go\win32.go:212-230`).
 pub const DT_LEFT: u32 = 0x0000;
 pub const DT_SINGLE_LINE: u32 = 0x0020;
 pub const DT_NO_PREFIX: u32 = 0x0800;
@@ -429,7 +341,6 @@ pub const BIF_NEW_DIALOG_STYLE: u32 = 0x0040;
 /// what an `INT` parameter receives on x64.
 pub const CW_USEDEFAULT: i32 = 0x8000_0000u32 as i32;
 
-// Owner-drawn window messages (`go\win32.go:289-298`).
 pub const WM_MOUSE_MOVE: u32 = 0x0200;
 pub const WM_L_BUTTON_DOWN: u32 = 0x0201;
 pub const WM_L_BUTTON_UP: u32 = 0x0202;
@@ -458,8 +369,6 @@ pub fn wheel_delta(wparam: usize) -> i32 {
     i32::from(hi as i16)
 }
 
-// `DrawTextW` alignment/ellipsis flags for the owner-drawn UI
-// (`go\win32.go:301-306`).
 pub const DT_CENTER: u32 = 0x0001;
 pub const DT_RIGHT: u32 = 0x0002;
 pub const DT_V_CENTER: u32 = 0x0004;
@@ -469,7 +378,6 @@ pub const DT_END_ELLIPSIS: u32 = 0x8000;
 /// two-line hint centers as one block under its title.
 pub const DT_EDITCONTROL: u32 = 0x2000;
 
-// Pen, blit, icon, cursor, and metrics constants (`go\win32.go:309-326`).
 pub const PS_SOLID: i32 = 0;
 
 pub const SRCCOPY: u32 = 0x00CC0020;
@@ -486,13 +394,6 @@ pub const TME_LEAVE: u32 = 0x00000002;
 
 pub const FW_SEMI_BOLD: i32 = 600;
 
-// Font output quality and precision (`CreateFontW` `iQuality`/`iOutPrecision`;
-// learn.microsoft.com/windows/win32/api/wingdi/nf-wingdi-createfontw, verified
-// 2026-10-14). This app passed `0` (= `DEFAULT_QUALITY`, "appearance does not
-// matter") for both, leaving text at the mercy of the system smoothing default;
-// `CLEARTYPE_QUALITY` asks for subpixel AA explicitly, and `OUT_TT_PRECIS`
-// prefers a TrueType outline face, which is the only kind ClearType can smooth
-// (the docs list bitmap/vector/device fonts as unsupported).
 pub const CLEARTYPE_QUALITY: u32 = 5;
 pub const OUT_TT_PRECIS: u32 = 4;
 pub const CLIP_DEFAULT_PRECIS: u32 = 0;
@@ -645,29 +546,6 @@ pub struct TrackMouseEvent {
     pub dw_hover_time: u32,
 }
 
-// Brand-surface bindings (Rust-only; `go\win32.go` has no counterpart).
-//
-// The identity pass in `design\make_logo.py` ships the app's own typefaces and
-// its own 256x256 Ribbon-P `.ico`. Applying them needs three procs the port
-// never declared:
-//
-//   * `AddFontMemResourceEx` (gdi32) -- install a face from a memory image for
-//     the process lifetime, so `design\fonts\*.ttf` can ship inside the binary
-//     with no install step and no system-font dependency. The image must stay
-//     valid while the font is in use, which the `'static` byte slices from
-//     `include_bytes!` guarantee.
-//     (learn.microsoft.com/windows/win32/api/wingdi/nf-wingdi-addfontmemresourceex,
-//     verified 2026-10-14.)
-//   * `GetClassLongPtrW`/`SetClassLongPtrW` (user32) -- read and write the
-//     window CLASS's icon slots. `GCLP_HICON` is the proof handle the redesign
-//     asserts non-zero; `WM_SETICON` alone would leave the class slot empty.
-//     (learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getclasslongptrw,
-//     verified 2026-10-14.)
-//   * `DestroyIcon` (user32) -- release an `HICON` this process created.
-//
-// `CreateIconFromResourceEx` (already exported above) is the loader: the
-// embedded `.ico` holds one BMP/DIB frame, which is exactly the "resource bits"
-// shape it consumes, so no temp file and no `LoadImageW` are needed.
 
 pub use windows_sys::Win32::Graphics::Gdi::AddFontMemResourceEx;
 pub use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -748,15 +626,12 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn struct_sizes_match_the_go_measurement() {
-        // `unsafe.Sizeof` on go1.27.0 amd64, one line per struct.
         assert_eq!(size_of::<WndClassEx>(), 80);
         assert_eq!(size_of::<Guid>(), 16);
         assert_eq!(size_of::<NotifyIconData>(), 976);
         assert_eq!(size_of::<Point>(), 8);
         assert_eq!(size_of::<MsgT>(), 48);
         assert_eq!(size_of::<Rect>(), 16);
-        // 68 is the field-width sum; Go's own Sizeof rounds it to the 8-byte
-        // alignment, and so does `#[repr(C)]`. `BeginPaint` writes 72 bytes.
         assert_eq!(size_of::<PaintStruct>(), 72);
         assert_eq!(size_of::<BrowseInfoW>(), 64);
         assert_eq!(size_of::<TrackMouseEvent>(), 24);
@@ -766,12 +641,10 @@ mod tests {
     #[test]
     fn notify_icon_data_offsets_match_the_vista_layout() {
         assert_eq!(offset_of!(NotifyIconData, cb_size), 0);
-        // 4-byte pad after cb_size, then the window handle.
         assert_eq!(offset_of!(NotifyIconData, h_wnd), 8);
         assert_eq!(offset_of!(NotifyIconData, u_id), 16);
         assert_eq!(offset_of!(NotifyIconData, u_flags), 20);
         assert_eq!(offset_of!(NotifyIconData, u_callback_message), 24);
-        // 4-byte pad after uCallbackMessage, then the icon handle.
         assert_eq!(offset_of!(NotifyIconData, h_icon), 32);
         assert_eq!(offset_of!(NotifyIconData, sz_tip), 40);
         assert_eq!(offset_of!(NotifyIconData, dw_state), 296);
@@ -869,11 +742,8 @@ mod tests {
     fn cw_use_default_sign_extends() {
         assert_eq!(CW_USEDEFAULT, i32::MIN);
         assert_eq!(CW_USEDEFAULT as u32, 0x8000_0000);
-        // Widening sign-extends -- what an INT parameter receives on x64.
         assert_eq!(CW_USEDEFAULT as i64, -2147483648);
         assert_eq!(CW_USEDEFAULT as i64 as u64, 0xFFFF_FFFF_8000_0000);
-        // The trap: the zero-extended form is a different value (pixel
-        // 2147483648, not "let Windows choose").
         assert_ne!(CW_USEDEFAULT as i64 as u64, 0x0000_0000_8000_0000);
         assert_ne!(
             (CW_USEDEFAULT as u32) as i64 as u64,
@@ -884,8 +754,6 @@ mod tests {
 
     #[test]
     fn complement_constants_are_the_negative_dwords() {
-        // Go: ^uintptr(0), ^uintptr(10), ^uintptr(11) -- the low 32 bits are
-        // (DWORD)-1, (DWORD)-11, (DWORD)-12.
         assert_eq!(ATTACH_PARENT_PROCESS, !0u32);
         assert_eq!(STD_OUTPUT_HANDLE, !10u32);
         assert_eq!(STD_ERROR_HANDLE, !11u32);
@@ -947,7 +815,6 @@ mod tests {
         assert_eq!(WS_BORDER, wam::WS_BORDER);
         assert_eq!(WS_V_SCROLL, wam::WS_VSCROLL);
         assert_eq!(WS_TAB_STOP, wam::WS_TABSTOP);
-        // Resource ids are passed as PCWSTR, so compare the integer value.
         assert_eq!(IDC_ARROW as usize, wam::IDC_ARROW as usize);
         assert_eq!(IDC_HAND as usize, wam::IDC_HAND as usize);
         assert_eq!(WM_NULL, wam::WM_NULL);
@@ -965,8 +832,6 @@ mod tests {
         assert_eq!(WM_L_BUTTON_DOWN, wam::WM_LBUTTONDOWN);
         assert_eq!(WM_L_BUTTON_UP, wam::WM_LBUTTONUP);
         assert_eq!(WM_SET_CURSOR, wam::WM_SETCURSOR);
-        // Brand-surface bindings: the class-icon slots, the small-icon metric,
-        // and the two brand font weights, each against windows-sys.
         assert_eq!(GCLP_HICON, wam::GCLP_HICON);
         assert_eq!(GCLP_HICONSM, wam::GCLP_HICONSM);
         assert_eq!(SM_CXSMICON, wam::SM_CXSMICON);
@@ -1010,7 +875,6 @@ mod tests {
             OPEN_EXISTING,
             windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING
         );
-        // Fix match owner-draw values: the dialog's buttons, list and statics.
         assert_eq!(ODS_SELECTED, windows_sys::Win32::UI::Controls::ODS_SELECTED);
         assert_eq!(ODS_DISABLED, windows_sys::Win32::UI::Controls::ODS_DISABLED);
         assert_eq!(ODS_HOTLIGHT, windows_sys::Win32::UI::Controls::ODS_HOTLIGHT);
@@ -1022,8 +886,6 @@ mod tests {
         assert_eq!(LBS_OWNERDRAWFIXED as i32, wam::LBS_OWNERDRAWFIXED);
         assert_eq!(LBS_HASSTRINGS as i32, wam::LBS_HASSTRINGS);
         assert_eq!(BS_OWNERDRAW as i32, wam::BS_OWNERDRAW);
-        // `SS_OWNERDRAW` lives behind the `Win32_System_SystemServices`
-        // feature, which this crate does not enable; pin the stable value.
         assert_eq!(SS_OWNERDRAW, 0x000D);
         assert_eq!(EN_CHANGE, wam::EN_CHANGE);
         assert_eq!(EN_SETFOCUS, wam::EN_SETFOCUS);

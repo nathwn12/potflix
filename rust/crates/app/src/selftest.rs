@@ -1,25 +1,3 @@
-//! `selftest` -- mirrors the Go root file `go\selftest.go`.
-//!
-//! The headless `--selftest` path: prove what M1/M2/M3 can prove with no user,
-//! no real Discord client and no settings window. `src\main.rs` reaches it only
-//! on the `--selftest` argv switch, AFTER the instance lock and the logger
-//! (`go\main.go:128-131`); it bypasses [`run_ui`](crate) wholly.
-//!
-//! # Where `go\events.go`'s emitters live
-//!
-//! The frozen module map (`src\lib.rs`) gives the app library exactly one module,
-//! `selftest`. The log-line emitters from `go\events.go` are therefore exposed
-//! here (`event_connected`, `event_push_attempt`, `event_decision`, ...) and
-//! called from `main.rs` as `selftest::event_*`: one writer per line, shared by
-//! the bin and the selftest, instead of duplicating formats.
-//!
-//! # Faked vs real (`go\selftest.go:303-368`)
-//!
-//! FAKE: the Discord pipe (an in-process fake under `\\.\pipe\potflix-fake-*`,
-//! never `discord-ipc-*`), the READY frames, the forced gate. REAL: the hidden
-//! window, the embedded icon, `Shell_NotifyIconW` add, the message loop, the log
-//! and its rotation, the second process, and the titleclean/player/presence
-//! logic.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -72,15 +50,10 @@ pub fn event_push(log: &Logger, details: &str, state: &str, ct: i64, total: i64)
 /// The observation boundary for the push (`events.go:59`): one line per poll
 /// that has a card, carrying the exact activity and the gate verdict.
 pub fn event_push_attempt(log: &Logger, a: &presence::Activity, v: &presence::gate::Verdict) {
-    // Dormant: a pause now parks and sends a paused card, so `Verdict::clear`
-    // is never set; kept so a clear could still be logged without callers
-    // changing.
     if v.clear {
         log.log("push attempt gate=clear activity=null");
         return;
     }
-    // The steady-state heartbeat-not-due and paused lines dominate the log; both
-    // keep the verdict but drop the payload suffix.
     if !v.send
         && (v.reason == presence::gate::REASON_HEARTBEAT_NOT_DUE
             || v.reason == presence::gate::REASON_PAUSED)
@@ -276,7 +249,6 @@ pub fn run_self_test(log: &Logger) -> ! {
     let transcript = debuglog::exe_dir_or_dot().join("m1-selftest.out");
     let mut out = Out::new(&transcript);
 
-    // (0) struct layout sanity: NOTIFYICONDATAW is 976 bytes on amd64.
     let nid_size = std::mem::size_of::<win32::NotifyIconData>();
     if nid_size != 976 {
         fail(
@@ -286,12 +258,10 @@ pub fn run_self_test(log: &Logger) -> ! {
     }
     out.line(&format!("struct layout: NOTIFYICONDATAW={nid_size} bytes"));
 
-    // (1) client-id resolution: source only, never the value.
     let (_, source) = clientid::resolve_client_id();
     out.line(&format!("client-id source: {source} (value not logged)"));
     log.log(&format!("selftest: client-id source={source}"));
 
-    // (2) hidden window + embedded icon + notify icon.
     let tray_window = match tray::create_tray_window() {
         Ok(window) => window,
         Err(err) => fail(&mut out, &format!("tray window init: {err}")),
@@ -317,7 +287,6 @@ pub fn run_self_test(log: &Logger) -> ! {
     out.line("notify-icon add returned true");
     log.log("selftest: notify-icon add result=true");
 
-    // (3) pump the message loop for ~3 s.
     let hwnd_addr = tray_window.hwnd as usize;
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(3));
@@ -344,7 +313,6 @@ pub fn run_self_test(log: &Logger) -> ! {
     tray::tray_delete(tray_window.hwnd);
     unsafe { win32::DestroyWindow(tray_window.hwnd) };
 
-    // (4) debug log written, and rotation works at a forced tiny cap.
     log.log("selftest: rotation check starting");
     match std::fs::metadata(log.path()) {
         Err(err) => fail(&mut out, &format!("debug log not written: {err}")),
@@ -391,7 +359,6 @@ pub fn run_self_test(log: &Logger) -> ! {
         rotated.len()
     ));
 
-    // (5) a second instance prints the exact line and exits 0.
     let exe = match std::env::current_exe() {
         Ok(path) => path,
         Err(err) => fail(&mut out, &format!("os.Executable: {err}")),
@@ -428,7 +395,6 @@ pub fn run_self_test(log: &Logger) -> ! {
         "selftest: second instance printed {got:?} and exited {exit_code}"
     ));
 
-    // (6) titleclean: the public surface.
     let cleaned = titleclean::clean("Show.S01E02.Pilot.1080p.mkv");
     if cleaned.title != "Show" || cleaned.episode_tag != "S1 E2" || cleaned.episode_name != "Pilot"
     {
@@ -452,7 +418,6 @@ pub fn run_self_test(log: &Logger) -> ! {
         cleaned.title, cleaned.episode_tag, cleaned.episode_name
     ));
 
-    // (7) player: the title predicate and the status mapping.
     for (title, want) in [
         ("Some Movie - PotPlayer", true),
         ("PotPlayer", true),
@@ -484,8 +449,6 @@ pub fn run_self_test(log: &Logger) -> ! {
     }
     out.line("player: title predicate and status mapping ok");
 
-    // (8) presence: the contract transition matrix, logged through the real
-    // event writer.
     let matrix: [(&str, PlayStatus, i64, i64); 6] = [
         ("A - PotPlayer", PlayStatus::RUNNING, 1000, 100000),
         ("A - PotPlayer", PlayStatus::RUNNING, 1250, 100250),
@@ -530,7 +493,6 @@ pub fn run_self_test(log: &Logger) -> ! {
         "presence: transition matrix produced {emits} decisions, last={last_tag}"
     ));
 
-    // (9) presence: payload helpers.
     let with_state = presence::with_state_time("S1 E2", " - 01:23");
     if with_state != "S1 E2 - 01:23" {
         fail(
@@ -554,8 +516,6 @@ pub fn run_self_test(log: &Logger) -> ! {
     }
     out.line("presence: WithStateTime and Fmt ok");
 
-    // (10) fleet decision 10: a repeated RUN seek within ~1 s is held and lands
-    // once the window expires.
     let mut debounce = Tracker::new();
     debounce.poll("D - PotPlayer", PlayStatus::RUNNING, 1000, 0);
     if let Some(held) = debounce.poll("D - PotPlayer", PlayStatus::RUNNING, 5000, 200) {
@@ -590,7 +550,6 @@ pub fn run_self_test(log: &Logger) -> ! {
     }
     out.line("presence: RUN debounce holds a repeat within 1 s and lands it after the window");
 
-    // (11) live PotPlayer window: report, never fail, when absent.
     if let Some(hwnd) = player::window::find_first() {
         let title = player::window::title(hwnd);
         let status = player::control::get_play_status(hwnd);
@@ -609,8 +568,6 @@ pub fn run_self_test(log: &Logger) -> ! {
         out.line("player: no PotPlayer window found; live control/title read deferred");
     }
 
-    // (12) M3: the Discord IPC transport against the in-process fake pipe. This
-    // never touches the real \\.\pipe\discord-ipc-* namespace.
     const M3_ID: &str = "123456789012345678";
     let srv = discord::FakeServer::new(0);
     if !srv.name().starts_with(r"\\.\pipe\potflix-fake-") {
@@ -829,7 +786,6 @@ pub fn run_self_test(log: &Logger) -> ! {
     ));
     log.log("selftest: m3 set_activity ok");
 
-    // (12c) null clear: SET_ACTIVITY with "activity":null.
     if let Err(err) = client.clear_activity() {
         m3fail(&mut out, &format!("ClearActivity: {err}"));
     }
@@ -868,7 +824,6 @@ pub fn run_self_test(log: &Logger) -> ! {
     out.line("m3: null clear SET_ACTIVITY activity=null");
     log.log("selftest: m3 null clear ok");
 
-    // (12d) PING -> PONG: the read pump answers a server ping on the wire.
     if let Err(err) = conn.write_frame(discord::OP_PING, b"selftest-ping") {
         m3fail(&mut out, &format!("write ping: {err}"));
     }
@@ -892,8 +847,6 @@ pub fn run_self_test(log: &Logger) -> ! {
     ));
     log.log("selftest: m3 ping/pong ok");
 
-    // (12e) reconnect: a dropped transport re-handshakes, OnDrop fires, and the
-    // generation advances.
     let gen_before = client.generation();
     conn.close(); // drop the server side; the client must reconnect
     conn = match accept_bounded(&srv, 5) {
@@ -1017,11 +970,6 @@ pub fn run_self_test(log: &Logger) -> ! {
             ),
         );
     }
-    // Owner regression (2026-10-28), proven on the line this run wrote (the log
-    // accumulates across runs, so read the LAST push-attempt line only): the
-    // header is the media title (`Watching Show` on the client), never the app
-    // name, and a card with no resolved artwork carries no assets at all -- no
-    // branded logo fallback, no status icon.
     let Some(last_sent) = log_data
         .lines()
         .rev()

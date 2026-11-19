@@ -1,104 +1,3 @@
-//! `store` -- mirrors the Go package `go\internal\store`.
-//!
-//! A crash-safe single-file key/value store for the Potflix library index and
-//! the metadata cache. It replaces two shapes that both paid full cost for a
-//! small change: a 565,380-byte JSON index rewritten in full on every dirty
-//! checkpoint, and 1,118 loose one-JSON-per-key cache files. Here ~25,000
-//! records of ~150 bytes live in one append-only frame log behind a 24-byte
-//! header: [`open`] reads the file sequentially and rebuilds the map in tens of
-//! milliseconds, a checkpoint appends only the keys that changed, and the delta
-//! folds back into a snapshot once it grows past [`Options::compact_threshold`].
-//!
-//! # File format (version 1, locked)
-//!
-//! ```text
-//! header, 24 bytes:
-//!   bytes  0..8   magic "PFLXST01"
-//!   u32    8..12  formatVersion = 1
-//!   u32   12..16  flags (0)
-//!   u32   16..20  crc32-IEEE over bytes 0..16
-//!   u32   20..24  reserved (0)
-//!
-//! frames, appended after the header, one per mutation:
-//!   u8    tag (1 = put, 2 = delete/tombstone)
-//!   u32   payloadLen
-//!   u32   crc32-IEEE(payload)
-//!   payload
-//!
-//!   tag 1 payload: uvarint keyLen, key, uvarint valueLen, value
-//!   tag 2 payload: uvarint keyLen, key
-//! ```
-//!
-//! Every integer is little-endian; lengths are LEB128 unsigned varints. The CRC
-//! is hand-rolled and table-driven ([`crc32`], no crate: the workspace
-//! dependency policy). Bytes are bytes: keys and values are `&[u8]`, not
-//! `&str`, because the Go original stores and returns arbitrary byte strings
-//! (`TestRoundTrip` round-trips a key with `\xff\xfe` in it) and also the empty
-//! key. The format is proved against files WRITTEN BY THE GO IMPLEMENTATION --
-//! `tests/fixtures/go-*.pflx`, reproduced byte for byte in this crate's tests.
-//!
-//! # Crash safety
-//!
-//! A frame is accepted only when its tag is known, its payloadLen fits in the
-//! bytes left in the file, its CRC matches, and its payload decodes exactly. The
-//! first frame that fails any of those checks ends replay: every earlier record
-//! is kept, the invalid tail is discarded, and the file is truncated back to the
-//! last valid frame boundary. A torn tail is the normal outcome of an abrupt
-//! process kill and is never reported as an error. A file whose header is wrong
-//! -- bad magic, unexpected version, or a header CRC mismatch -- IS an error: it
-//! is not this store's file. A file shorter than the header (a header write that
-//! never finished) is started over, because the store owns the file.
-//!
-//! # Compaction
-//!
-//! [`Db::compact`] writes a fresh file (header plus one put frame per live key,
-//! in SORTED key order, so the snapshot of a given state is byte-identical
-//! whatever order the mutations arrived in) to a temp file in the same
-//! directory, syncs it, and renames it over the original; the temp file is
-//! removed on failure. The delta accounting resets on every successful open
-//! repair and compaction.
-//!
-//! # Concurrency and process model
-//!
-//! One mutex guards the in-memory map and the append file, so [`Db::get`],
-//! [`Db::put`], [`Db::delete`], [`Db::len`], [`Db::for_each`], [`Db::commit`],
-//! [`Db::compact`] and [`Db::stats`] are safe from concurrent threads. Unlike
-//! the Go original, [`Db::for_each`] takes `&self`, but it does hold that mutex
-//! for the whole iteration, so **the callback must not call back into the same
-//! `Db`: `std::sync::Mutex` is not re-entrant and the call will deadlock**. Go
-//! returns a slice aliasing stored memory from `Get`; here it is an
-//! `Arc<[u8]>`: a refcount bump, not a copy, and still read-only by type.
-//!
-//! The file is held open read-write for the `Db`'s lifetime and the store
-//! assumes a single writing process -- the app holds a single-instance lock on
-//! `127.0.0.1:17843` -- so opening the same file from a second process is
-//! unsupported.
-//!
-//! # Removal while open
-//!
-//! The file is opened with a share mode that lets another party delete it while
-//! this process still holds it (`FILE_SHARE_DELETE` on Windows, [`sys`]), so
-//! removing the store file -- or the directory holding it -- never fails because
-//! this `Db` is open. The removal is reported rather than papered over: reads
-//! ([`Db::get`], [`Db::len`], [`Db::for_each`]) keep serving the in-memory
-//! records, because they claim no durability, and the next durability claim --
-//! [`Db::commit`], a mutation under `Options::sync_on_commit`, or [`Db::close`]
-//! -- returns [`Error::Removed`] once the file is no longer at the store's path.
-//! Bytes appended before that report went into the orphaned file and are not
-//! visible at the path; the error is the only signal, and the in-memory records
-//! stay authoritative. From then on every mutation and `commit` keeps reporting
-//! it, like any other append failure, until [`Db::compact`] writes a fresh
-//! snapshot at the path (recreating the file, when its directory still exists)
-//! and clears the failure.
-//!
-//! # Rust-specific notes
-//!
-//! * Keys and values are byte strings; every key parameter takes
-//!   `impl AsRef<[u8]>`, so `db.get("series|breaking bad|2008|1")` and
-//!   `db.get(b"k1")` both compile.
-//! * `Drop` flushes and releases like [`Db::close`], ignoring the result: there
-//!   is no caller left to report to. The Go original leaves a forgotten
-//!   `defer db.Close()` to the GC instead, losing the buffered tail.
 
 mod crc32;
 mod sys;
@@ -397,8 +296,6 @@ pub fn inspect(path: impl AsRef<Path>) -> Result<Inspection, Error> {
 
 impl Db {
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        // A panicking `for_each` callback must not poison the store for every
-        // later caller: the in-memory map and the file are still consistent.
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -435,8 +332,6 @@ impl Db {
         if inner.fail_err.is_some() {
             return Err(inner.failed());
         }
-        // Update memory first so a compaction triggered by this very append
-        // already sees the new record.
         inner
             .records
             .insert(key.as_ref().to_vec(), Arc::from(value));
@@ -581,8 +476,6 @@ impl Inner {
             return Ok(HEADER_SIZE as u64);
         }
         if size < HEADER_SIZE as u64 {
-            // A header write that never finished. The store owns the file, so
-            // start it over rather than fail.
             f.set_len(0).map_err(|e| Error::io("truncate", path, e))?;
             write_header(path, f)?;
             return Ok(HEADER_SIZE as u64);
@@ -712,8 +605,6 @@ impl Inner {
             frame_buf.extend_from_slice(payload_buf);
             frame_buf.len()
         };
-        // A full buffer flushes itself, exactly where `bufio.Writer` does: an
-        // OS error here is the frame's error, before any accounting.
         let full = {
             let Inner { buf, frame_buf, .. } = &mut *self;
             buf.extend_from_slice(frame_buf);
@@ -764,8 +655,6 @@ impl Inner {
         }
         drop(tmp); // go of the temp handle: the rename needs it closed
 
-        // Swap the file: get our pending bytes out, drop the handle, rename,
-        // reopen. The temp file is removed on every failure path.
         if let Err(e) = self.flush_buffer() {
             let _ = std::fs::remove_file(&tmp_path);
             return Err(self.fail(e));
@@ -773,8 +662,6 @@ impl Inner {
         self.f = None;
         if let Err(e) = std::fs::rename(&tmp_path, &path) {
             let _ = std::fs::remove_file(&tmp_path);
-            // The swap failed: the file was closed, so the handle has to come
-            // back before this can be reported as a compact failure.
             self.reopen()?;
             return Err(Error::io("compact rename", &path, e));
         }

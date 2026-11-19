@@ -1,27 +1,3 @@
-//! `metadata::kitsu` -- the Kitsu anime source (an independent database).
-//!
-//! Kitsu is keyless JSON:API (`https://kitsu.io/api/edge`): `GET
-//! /anime?filter[text]=<title>&page[limit]=<n>` resolves the title to an
-//! anime id, then `GET
-//! /episodes?filter[mediaId]=<id>&sort=number&page[limit]=20[&page[offset]=<n>]`
-//! carries one episode page (`seasonNumber`, `number`, `length`,
-//! `canonicalTitle`, a Kitsu-hosted thumbnail).
-//!
-//! Three behaviours that are contract, not detail:
-//!
-//! * the search pick is title-validated with [`pick_best_show`]: a
-//!   low-confidence best returns a definitive MISS rather than a wrong show
-//!   (the discipline the deleted iTunes leg lacked). The pick's `startDate`
-//!   year NEVER rejects: at equal title strength it prefers the candidate
-//!   carrying the query's year, but a missing year, or a year that disagrees
-//!   with the filename, is a nice-to-have display field, never a gate -- the
-//!   essentials are cover, title, episode and synopsis;
-//! * the episode fetch is exactly ONE page (the 20-entry page holding the
-//!   requested Number, or the first page when the query carries none), so one
-//!   lookup stays two requests. The native (`seasonNumber`, `number`) numbering
-//!   is kept verbatim: a positional renumber over a single page would be wrong,
-//!   and the resolver's number-exact match falls through to the next source
-//!   when the page lacks the Number.
 
 use std::time::Duration;
 
@@ -298,7 +274,6 @@ impl KitsuSource {
             return Ok(None);
         }
         let Some(winner) = pick_best_show(&q.title, &cands) else {
-            // Low-confidence best: a wrong title is worse than no title.
             return Ok(None);
         };
         let mut winner_idx = None;
@@ -311,7 +286,6 @@ impl KitsuSource {
         let Some(winner_idx) = winner_idx else {
             return Ok(None);
         };
-        // Soft year preference only: no year match keeps the title winner.
         let take =
             crate::yearpref::prefer_year_match(&q.title, q.year, &cands, &years, winner_idx);
         Ok(rows.get(take).cloned())
@@ -404,7 +378,6 @@ impl crate::resolver::Source for KitsuSource {
                 episode_count: attrs.episode_count.unwrap_or(0),
                 aliases,
             };
-            // The same floor `Find` applies: a fuzzy row never becomes a pick.
             if pick_best_show(&q.title, std::slice::from_ref(&cand)).is_none() {
                 continue;
             }
@@ -434,8 +407,6 @@ fn kitsu_media(anime: &KitsuAnime, attrs: &KitsuAnimeAttrs, title: String, kind:
         year: date_year(&attrs.start_date),
         artwork: kitsu_poster(attrs.poster_image.as_ref()),
         synopsis: cap_synopsis(&strip_html(&attrs.synopsis)),
-        // Genres live behind a second request per show; the episode page is
-        // the lookup's whole episode budget, so this stays empty.
         genres: String::new(),
         length: runtime_length(attrs.episode_length.unwrap_or(0)),
         show_url: normalize_url(&format!(

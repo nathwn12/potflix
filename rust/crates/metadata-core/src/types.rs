@@ -1,32 +1,3 @@
-//! `metadata::types` -- mirrors `go\internal\metadata\types.go`.
-//!
-//! The shared record types (resolved title, provider result, cache entry,
-//! options): the [`Query`] the poll loop derives from a filename, the [`Media`]
-//! record a provider returns and the cache stores, and the user-facing
-//! [`Resolution`].
-//!
-//! The JSON tags on [`Episode`], [`Button`] and [`Media`] ARE the on-disk cache
-//! wire format (`cache.go`), so they are copied verbatim from the Go structs:
-//! camelCase `sourceId` / `fetchedAt` / `showUrl` / `episodeUrl` / `movieUrl` /
-//! `trailerUrl`, lowercase `season` / `number` / `title` / `artwork` /
-//! `synopsis` / `url` / `length`, `label` / `url` on [`Button`], and Go's
-//! `omitempty` set -- present on year/artwork/synopsis/genres/length/showUrl/
-//! episodeUrl/movieUrl/trailerUrl/episodes, absent on source/sourceId/kind/
-//! title/fetchedAt. One wrong tag silently invalidates every cached record on
-//! the owner's machine.
-//!
-//! [`Kind`] is a plain JSON integer (Go's type has no custom marshaler, so the
-//! fixtures carry `"kind":1`), which `#[serde(transparent)]` preserves.
-//!
-//! [`Media::fetched_at`] is RFC3339 text -- exactly the bytes Go's `time.Time`
-//! writes -- kept as a `String` so a cached record round-trips byte for byte
-//! and this crate needs no date crate (the workspace pins none; `repair::time`
-//! owns the workspace's calendar arithmetic).
-//!
-//! Deliberately NOT ported here: Go's `Source` interface and `Options`. Both
-//! carry a `context.Context` and the provider set, which belong to the resolver
-//! (`metadata::resolver`) and the transport (`metadata-http::cancel`); this
-//! crate stays network-free.
 
 use serde::{Deserialize, Serialize};
 
@@ -227,7 +198,6 @@ pub fn normalize_url(raw: &str) -> String {
         None => u.to_string(),
     };
     match u.strip_prefix("https://") {
-        // Go requires more than the scheme itself.
         Some(rest) if !rest.is_empty() => u,
         _ => String::new(),
     }

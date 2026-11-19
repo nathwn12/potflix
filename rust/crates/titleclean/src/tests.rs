@@ -1,9 +1,3 @@
-//! Tests ported one-for-one from `clean_test.go` (including the `javacompat`
-//! cases), `export_test.go` and `tabledump_test.go`.
-//!
-//! Expectations in these files were produced by running the installed JDK
-//! (java 11.0.32, Locale en_US) against the same inputs; none are corpus data.
-//! No assertion may be weakened to make the port pass.
 
 use crate::clean::{alt_head_bad, clean, has_year, year_lead, JWS};
 use crate::javacompat::{
@@ -83,7 +77,6 @@ fn java_trunc_cuts_utf16_units() {
         (input.as_str(), 3, "AA\u{2026}"),
         (input.as_str(), 4, "AAA\u{2026}"),
         (input.as_str(), 5, "AAAA\u{2026}"),
-        // Java cut a surrogate pair; the UTF-8 encoder emits '?'
         (input.as_str(), 6, "AAAA?\u{2026}"),
         ("short", 10, "short"),
         ("", 5, ""),
@@ -230,13 +223,11 @@ fn jdk11_tables() {
         !jdk_is_mn('\u{07FD}'),
         "JDK 11 does not classify U+07FD as a non-spacing mark"
     );
-    // Drift rows through the whole clean() pipeline.
     let c = clean("Movie\u{1C90}1080p.mkv");
     assert_eq!(c.title, "Movie\u{1C90}", "Movie<U+1C90>1080p.mkv = {c:?}");
     assert_eq!(c.episode_tag, "");
     let c = clean("\u{10D0}bc.mkv");
     assert_eq!(c.title, "\u{10D0}bc", "<U+10D0>bc.mkv = {c:?}");
-    // A sample of areas that already matched.
     assert!(is_java_word('a') && is_java_word('_') && !is_java_word('\u{301}'));
     assert!(jdk_is_letter_or_digit('\u{E9}') && jdk_is_letter_or_digit('\u{7248}'));
     assert!(jdk_is_mn('\u{301}'), "U+0301 should be a non-spacing mark");
@@ -250,11 +241,6 @@ fn jdk11_tables() {
 
 #[test]
 fn jdk11_tables_are_ascending() {
-    // The port looks the tables up by binary search, so ascending order is a
-    // precondition the Go source states by construction (`map` literal order and
-    // sorted range lists). No range may cover a surrogate either: the port
-    // models a lone surrogate as U+FFFD, which is only equivalent while no table
-    // matches either code point.
     let sorted2 = |rs: &[(char, char)]| rs.windows(2).all(|w| w[0].1 < w[1].0);
     assert!(sorted2(crate::jdk11tables::JDK_WORD_RANGES));
     assert!(sorted2(crate::jdk11tables::JDK_MN_RANGES));
@@ -423,7 +409,6 @@ fn clean_section6() {
 #[test]
 fn clean_episode_patterns() {
     let cases: [CleanCase; 13] = [
-        // P3 MULTI, second-episode form (MULTI wins over SERIES: E4-5, not E4).
         (
             "Show S1950E04E05 Name.mkv",
             (
@@ -433,13 +418,11 @@ fn clean_episode_patterns() {
                 "Show \u{2014} S1950 E4-5 \"Name\"",
             ),
         ),
-        // P2 SERIES: empty head takes the tag alone; widened 4-digit season.
         (
             "Show S1950E04.mkv",
             ("Show", "S1950 E4", "", "Show \u{2014} S1950 E4"),
         ),
         ("S02E07.mkv", ("S2 E7", "S2 E7", "", "S2 E7")),
-        // P4 EPWORD: headless, headed, and Ep-abbreviation forms.
         ("Episode 104.mkv", ("E104", "E104", "", "E104")),
         (
             "BLEACH Kai - Episode 38 - FEAR FOR FIGHT.mkv",
@@ -454,8 +437,6 @@ fn clean_episode_patterns() {
             "Show Ep 12 Finale.mkv",
             ("Show", "E12", "Finale", "Show \u{2014} E12 \"Finale\""),
         ),
-        // P5 SEASON_EXTRA: numeric tail is an episode; otherwise the
-        // "Season NN -" connector is dropped and no tag is produced.
         (
             "Arcane Season 01 05 By Wild Cat.mkv",
             (
@@ -469,7 +450,6 @@ fn clean_episode_patterns() {
             "Season 03 - Stop-Motion Lego Intro.mkv",
             ("Stop-Motion Lego Intro", "", "", "Stop-Motion Lego Intro"),
         ),
-        // P6 CHAPTER year guard: a dated movie keeps "Chapter 1" as title text.
         (
             "John Wick Chapter 1 2014 1080p BluRay HEVC x265 5.1 BONE.mkv",
             (
@@ -479,17 +459,14 @@ fn clean_episode_patterns() {
                 "John Wick Chapter 1 2014 BONE",
             ),
         ),
-        // P8 TRAIL: a zero-prefixed tail is an episode ...
         (
             "Podcast 07.mkv",
             ("Podcast", "E7", "", "Podcast \u{2014} E7"),
         ),
-        // ... but a year tail is not (the YEAR suffix still applies).
         (
             "Show 05 2019.mkv",
             ("Show 05 (2019)", "", "", "Show 05 (2019)"),
         ),
-        // P9 ALT_EP guards: connector-headed head and bare-number tail rejected.
         (
             "The Hunger Games Mockingjay Part 2 Extended.mkv",
             (
@@ -511,32 +488,26 @@ fn clean_episode_patterns() {
 #[test]
 fn clean_tag_vocab_p10_p11() {
     let cases: [CleanCase; 9] = [
-        // P11 opus -> SCENE_HINT drops -RAV1NE; P10 5.1/unrated/av1 tags strip.
         (
             "The.Dictator.2012.UNRATED.1080p.BluRay.AV1.Opus.5.1-RAV1NE.mkv",
             ("The Dictator (2012)", "", "", "The Dictator (2012)"),
         ),
-        // P10 hdr\d*\+? leaves no bare "+"; nf strips; P11 av1 drops -SomniWare.
         (
             "Arcane.S01E03.HDR10+.AV1.WEB-DL.NF-SomniWare.mkv",
             ("Arcane", "S1 E3", "", "Arcane \u{2014} S1 E3"),
         ),
-        // P10 ddp broaden covers DDP5.1; hdr/atmos/x265 strip.
         (
             "Dune.Part.Two.2024.2160p.WEB-DL.HDR.DDP5.1.Atmos.x265.mkv",
             ("Dune Part Two (2024)", "", "", "Dune Part Two (2024)"),
         ),
-        // P10 aac broaden covers AAC5.1; -YTS group suffix drops.
         (
             "War.Dogs.2016.AAC5.1.BluRay.x264-YTS.mkv",
             ("War Dogs (2016)", "", "", "War Dogs (2016)"),
         ),
-        // P10 removed bare final: a real title word survives.
         (
             "The Final Battle.mkv",
             ("The Final Battle", "", "", "The Final Battle"),
         ),
-        // P10 extended/theatrical strip only in *-cut form.
         (
             "Avatar.2009.Extended.Cut.1080p.BluRay.x264.mkv",
             ("Avatar (2009)", "", "", "Avatar (2009)"),
@@ -554,7 +525,6 @@ fn clean_tag_vocab_p10_p11() {
                 "Original Japanese Theatrical Trailers",
             ),
         ),
-        // No bare "ma" add: "Ma" survives.
         (
             "Ma.2019.1080p.BluRay.mkv",
             ("Ma (2019)", "", "", "Ma (2019)"),

@@ -1,6 +1,3 @@
-//! Tenrai provider tests: the search-then-episodes round trip against a fake
-//! server (including the title validation the iTunes leg lacked), plus
-//! one live round trip against the real endpoint.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

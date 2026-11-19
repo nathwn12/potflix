@@ -1,13 +1,3 @@
-//! Wire tests for the `types.go` JSON tags, ported from the `cache_test.go`
-//! cases that pin them: `TestCacheRoundTrip`, `TestCacheSchema2IsMiss`,
-//! `TestCacheLegacyPositiveNoNewFields`, `TestCacheLargeEntryRoundTrip`.
-//!
-//! The cache record envelope (`key`/`schema`/`notFound`/`checkedAt`) and the
-//! store file belong to `metadata::cache`; what is pinned here is the `media`
-//! object those records carry, against the exact bytes Go wrote. The Go
-//! round-trip fixtures use `time.Now().UTC().Truncate(time.Millisecond)`; the
-//! port uses a fixed RFC3339 instant, which tests the same property (the
-//! timestamp is carried verbatim) without a clock.
 
 use crate::types::{
     Episode, Kind, Media, join_genres, millis_length, normalize_url, runtime_length,
@@ -72,7 +62,6 @@ fn legacy_positive_no_new_fields() {
     assert_eq!(m.episodes.len(), 1);
     let ep = &m.episodes[0];
     assert_eq!((ep.season, ep.number, ep.title.as_str()), (2, 1, "Pilot"));
-    // The pre-enrichment record carries none of the newer per-episode fields.
     assert_eq!(
         (
             ep.artwork.as_str(),
@@ -148,7 +137,6 @@ fn every_optional_tag_verbatim() {
         fetched_at: "2026-01-01T00:00:00Z".into(),
     };
     let encoded = serde_json::to_string(&media).expect("encode");
-    // U+00B7 is written raw (UTF-8), not escaped, by both serde_json and Go.
     let expected = format!(
         r#"{{"source":"tvmaze","sourceId":"169","kind":1,"title":"Breaking Bad","year":2008,"artwork":"https://example.com/poster.jpg","synopsis":"A chemistry teacher turns to crime.","genres":"Drama {dot} Crime","length":"45 min","showUrl":"https://example.com/show","episodeUrl":"https://example.com/episode","movieUrl":"https://example.com/movie","trailerUrl":"https://example.com/trailer","episodes":[{{"season":1,"number":1,"title":"Pilot","artwork":"https://example.com/still.jpg","synopsis":"The first one.","url":"https://example.com/ep1","length":"45 min"}}],"fetchedAt":"2026-01-01T00:00:00Z"}}"#,
         dot = '\u{00b7}'
@@ -198,7 +186,6 @@ fn normalize_url_upgrades_and_rejects() {
         normalize_url("https://example.com/x"),
         "https://example.com/x"
     );
-    // A bare scheme is rejected: the length must exceed "https://".
     assert_eq!(normalize_url("https://"), "");
     assert_eq!(normalize_url("http://"), "");
     assert_eq!(normalize_url("ftp://example.com/x"), "");
@@ -214,7 +201,6 @@ fn millis_length_rounds_half_up() {
     assert_eq!(millis_length(45 * 60_000), "45 min");
     assert_eq!(millis_length(60 * 60_000), "1h");
     assert_eq!(millis_length(139 * 60_000), "2h 19m");
-    // The +30000 rounds half up: 90 000 ms is 2 min, 89 999 ms is 1 min.
     assert_eq!(millis_length(90_000), "2 min");
     assert_eq!(millis_length(89_999), "1 min");
 }

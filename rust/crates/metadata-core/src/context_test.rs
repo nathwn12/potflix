@@ -1,10 +1,3 @@
-//! Ports `go\internal\metadata\context_test.go` (2 tests): the required path
-//! vectors (the Mr.Harbor release tree, the Zentaro Season folder, a
-//! generics-only path) and the `ResolveQuery` merges on top.
-//!
-//! Note on punctuation: titleclean normalises dots to spaces, so the folder show
-//! for the Mr.Harbor tree is "Mr Harbor", not "Mr. Harbor" (the dotted canonical
-//! form arrives later from the provider resolution).
 
 use crate::context::{context_from_path, resolve_query, under_extras_folder};
 use crate::types::{Kind, Query};
@@ -139,19 +132,15 @@ fn resolve_query_cases() {
     };
     assert_eq!(got, want, "ResolveQuery(mrharbor, mrharbor)");
 
-    // empty path is filename-only
     let got = resolve_query("01.mkv", "");
     assert_eq!(got.kind, Kind::UNKNOWN, "ResolveQuery(01.mkv, empty)");
 
-    // theme file never rescues
     let got = resolve_query(
         "[Studio Hour] Zentaro - OP - 001 - XA?B?C?D.mkv",
         ZENTARO_PATH,
     );
     assert_eq!(got.kind, Kind::UNKNOWN, "ResolveQuery(Zentaro OP, zentaro)");
 
-    // bare number under extras stays unknown: the synthetic inventory row
-    // M:\2SERIES\Harbor Lights\Featurettes\Season 5\Featurettes 5.1\Deleted Scenes\1.mkv
     let got = resolve_query(
         "1.mkv",
         r"M:\2SERIES\Harbor Lights\Featurettes\Season 5\Featurettes 5.1\Deleted Scenes\1.mkv",

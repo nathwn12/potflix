@@ -1,6 +1,3 @@
-//! The store-file open, split on the target exactly like the Go original
-//! (`store_windows.go` / `store_other.go`): Windows needs `CreateFileW` for the
-//! share mode, every other target is the portable `OpenOptions` open.
 
 #[cfg(not(windows))]
 mod other;

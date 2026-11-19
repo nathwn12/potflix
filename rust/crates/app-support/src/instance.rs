@@ -1,29 +1,3 @@
-//! `instance` -- mirrors the Go root file `go\instance.go`.
-//!
-//! Single-instance lock, exactly as the Java app:
-//! `new ServerSocket(17843, 10, InetAddress.getByName("127.0.0.1"))`, held in a
-//! static field for process life (never closed).
-//!
-//! Parity notes:
-//!
-//! * `127.0.0.1` only, TCP. The lock is a plain listening socket: nothing ever
-//!   accepts on it, so the accept queue is never used.
-//! * Exclusive bind: Rust's std does not set `SO_REUSEADDR` on Windows (the
-//!   Unix-only branch), so a second bind on the same address fails with
-//!   `WSAEADDRINUSE` -- the exclusive semantics the lock needs, matching Go's
-//!   raw `syscall.Socket` path, which also omits `SO_REUSEADDR`.
-//! * The listening handle is stored and never closed; it dies with the process.
-//!
-//! Deviation, recorded: Go binds with backlog 10; std's `TcpListener::bind`
-//! uses its own fixed backlog (128) and exposes no way to set it. The backlog is
-//! the accept-queue depth, which this lock never fills -- the observable contract
-//! (exclusive ownership of `127.0.0.1:17843` for the process lifetime) is
-//! identical. Reading the port is not a contract item; the *bind* is.
-//!
-//! A second instance prints [`ALREADY_RUNNING_MSG`] on stderr and exits
-//! [`ALREADY_RUNNING_EXIT_CODE`] (0) -- see [`exit_already_running`]. The Go
-//! caller takes the lock before the logger exists, so the second instance touches
-//! no log at all.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
@@ -110,8 +84,6 @@ mod tests {
         port
     }
 
-    // A second bind while the lock is held must fail, and the holder must still
-    // own the port afterwards (no handle stolen or dropped on the failure path).
     #[test]
     fn second_instance_fails_while_held() {
         let holder = acquire_fake_lock();
@@ -128,10 +100,6 @@ mod tests {
         assert_eq!(port_of(&holder), port, "the holder kept the port");
     }
 
-    // Rapid spam-open: a concurrent burst against a held lock all fails clean
-    // (each loser releases only its own temp socket); then, with the port freed,
-    // the same burst races and exactly one contender wins -- the OS serializes
-    // the bind, so there is no app-level window for two owners.
     #[test]
     fn spam_open_second_instances() {
         const BURST: usize = 32;
@@ -139,7 +107,6 @@ mod tests {
         let holder = acquire_fake_lock();
         let port = port_of(&holder);
 
-        // Phase A: burst vs the held lock -- every contender must fail.
         let results = burst(BURST, port);
         assert_eq!(results.len(), BURST, "every contender must have run");
         for won in results {
@@ -151,9 +118,6 @@ mod tests {
         );
         drop(holder);
 
-        // Phase B: burst racing for a free port -- exactly one winner. A round
-        // with zero winners means a third party stole the staged port between
-        // release and burst, so restage with a fresh port and retry.
         for _ in 0..3 {
             let stage = acquire_fake_lock();
             let race_port = port_of(&stage);
@@ -199,7 +163,6 @@ mod tests {
         outcomes
     }
 
-    // The second-instance line is a contract: exact bytes, exit 0.
     #[test]
     fn already_running_message_is_exact() {
         assert_eq!(ALREADY_RUNNING_MSG, "Potflix is already running.");
@@ -209,7 +172,6 @@ mod tests {
         assert_eq!(LOCK_BACKLOG, 10);
     }
 
-    // A lock on an ephemeral port is bound loopback-only.
     #[test]
     fn lock_is_loopback_only() {
         let listener = acquire_fake_lock();

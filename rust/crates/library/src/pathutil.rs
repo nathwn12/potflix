@@ -1,7 +1,3 @@
-//! `pathutil` -- the `path/filepath` behaviours `library.go` relies on, with
-//! Windows semantics (the same ones the Go original ran under). The workspace
-//! pins no path crate and `std::path` does not clean, so `Clean`, `Dir`,
-//! `Base`, `Ext`, `Join` and `normalizeScanDir` are transcribed here.
 
 /// `filepath.Separator` on Windows.
 pub(crate) const SEP: char = '\\';
@@ -22,9 +18,7 @@ pub(crate) fn volume_name(path: &str) -> &str {
         && is_sep(path.chars().next().unwrap_or(' '))
         && is_sep(path.chars().nth(1).unwrap_or(' '))
     {
-        // UNC: \\host\share
         let mut i = 2;
-        // host
         while i < b.len() && !is_sep(b[i] as char) {
             i += 1;
         }

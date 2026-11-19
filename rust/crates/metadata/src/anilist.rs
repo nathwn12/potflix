@@ -1,17 +1,3 @@
-//! `metadata::anilist` -- mirrors `go\internal\metadata\anilist.go`.
-//!
-//! AniList provider (anime branch, first half of the anime pair). One keyless
-//! GraphQL POST; episodes come from `streamingEpisodes`.
-//!
-//! Two behaviours that are contract:
-//!
-//! * the episode NUMBER is parsed from the entry's TITLE (`"Episode N - ..."`,
-//!   `"Episode N"`, `"Episode N.5"`, or a leading `"N - ..."`), and the
-//!   positional index is only the fallback when no number is present. Live
-//!   AniList media 21355 serves `streamingEpisodes` numbered 51..66 for an
-//!   episode-1 query, so a positional mapping would hand back a wrong title;
-//! * `Season` is always 0 (absolute numbering), so the resolver's number-exact
-//!   match must not require a season.
 
 use std::time::Duration;
 
@@ -88,9 +74,6 @@ struct AnilistStreaming {
     title: String,
     #[serde(default, deserialize_with = "null_default")]
     url: String,
-    // No `thumbnail`: `streamingEpisodes[].thumbnail` is a frame of the
-    // episode being watched (spoiler plus burned-in subtitles), so episode
-    // artwork is the series cover and the still is never even stored.
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -333,17 +316,12 @@ fn match_aliases(english: &str, synonyms: &[String], romaji: &str) -> Vec<String
 fn is_generic_token(token: &str) -> bool {
     matches!(
         token,
-        // English function words.
         "the" | "a" | "an" | "of" | "and" | "or" | "nor" | "in" | "on" | "at" | "to"
         | "for" | "from" | "with" | "by" | "as" | "vs" | "per" | "via"
-        // Articles and prepositions common in French, German, Spanish,
-        // Portuguese and Italian titles.
         | "de" | "la" | "le" | "les" | "des" | "du" | "el" | "il" | "der" | "die"
         | "das" | "und" | "et" | "y"
-        // Romanised Japanese particles.
         | "no" | "na" | "ni" | "wo" | "o" | "wa" | "ga" | "he" | "e" | "mo" | "ka"
         | "yo" | "ne" | "ya" | "sa" | "zo" | "ze"
-        // Release-form vocabulary: the kind of release, never which work.
         | "ova" | "ona" | "oad" | "tv" | "movie" | "film" | "special" | "season"
         | "series" | "part" | "cour" | "episode" | "edition" | "version"
         | "collection" | "volume" | "vol"
@@ -433,14 +411,9 @@ impl crate::resolver::Source for AnilistSource {
             "query": ANILIST_QUERY,
             "variables": {"search": q.title},
         });
-        // Read-only GraphQL search: side-effect-free, so the idempotent POST
-        // retry (backoff + jitter, honoring Retry-After) applies. A mutating
-        // POST would use `post_json` and never retry.
         let response = self.client.post_json_idempotent(cancel, self.base_url(), &payload)?;
         let parsed: AnilistResp = decode_capped(response)?;
         let items = anilist_items(parsed)?;
-        // Title identity check: no candidates is a definitive miss (a film
-        // query such as `inception` must return `Ok(None)`, not a wrong anime).
         let mut cands: Vec<metadata_core::match_::ShowCand> = Vec::with_capacity(items.len());
         let mut entries: Vec<AnilistMedia> = Vec::with_capacity(items.len());
         let mut years: Vec<i32> = Vec::with_capacity(items.len());
@@ -477,16 +450,6 @@ impl crate::resolver::Source for AnilistSource {
         let Some(winner_idx) = winner_idx else {
             return Ok(None);
         };
-        // Soft year preference only: no year match keeps the title winner.
-        // The override judges canonical titles (english + romaji); synonyms
-        // stay in `cands` for matching/scoring and may extend identity only
-        // with canonical corroboration ([`query_corroborated_by_canonical`]):
-        // an uncorroborated synonym must never authorize the swap (live
-        // `124756` carries a `"Monster"` synonym with year 2019 that would
-        // otherwise steal a `Monster`/2019 query from the 2004 series `19`),
-        // while a corroborated alias still may (live `1650` carries the
-        // `Space Battleship Yamato` synonym sharing `yamato` with `Uchuu
-        // Senkan Yamato`).
         let mut year_cands = cands.clone();
         for (cand, media) in year_cands.iter_mut().zip(entries.iter()) {
             let mut titles = canonical_aliases(&media.title.english, &media.title.romaji);
@@ -509,10 +472,6 @@ impl crate::resolver::Source for AnilistSource {
             return Ok(None);
         }
         let mut out = anilist_media(media, title, Kind::SERIES);
-        // The episode artwork is the series cover, never the streaming still:
-        // `streamingEpisodes[].thumbnail` is a frame of the episode being
-        // watched (spoiler plus burned-in subtitles), so it must never stand
-        // in as art.
         let cover = out.artwork.clone();
         let mut episodes: Vec<Episode> = Vec::with_capacity(media.streaming.len());
         for (i, entry) in media.streaming.iter().enumerate() {
@@ -562,7 +521,6 @@ impl crate::resolver::Source for AnilistSource {
                 episode_count: 0,
                 aliases: match_aliases(&media.title.english, &media.synonyms, &media.title.romaji),
             };
-            // The same floor `Find` applies: a fuzzy row never becomes a pick.
             if metadata_core::match_::pick_best_show(&q.title, std::slice::from_ref(&cand))
                 .is_none()
             {

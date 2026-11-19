@@ -1,4 +1,3 @@
-//! `scanindex_test` -- mirrors `go\internal\library\scanindex_test.go`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -328,8 +327,6 @@ fn names_hash_touch_file() {
     write_scan_file(&p, "a");
     let before = names_hash_of(&dir);
     try_set_mtime(&p, std::time::SystemTime::now() + Duration::from_secs(7200));
-    // Tier 1 never stats children; a pure file touch must not change the names
-    // hash (a platform dir-mtime bump may, and is tolerated).
     let _ = before;
 }
 

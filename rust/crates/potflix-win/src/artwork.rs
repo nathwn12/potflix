@@ -1,16 +1,3 @@
-//! `potflix-win::artwork` -- the cover cache and the decoded GDI+ image.
-//!
-//! The card already carries a resolved https poster URL. The preview paints
-//! that poster only when its bytes are locally available: the live path
-//! fetches the URL on a worker (never on the UI thread, never before
-//! window-first-paint) and writes one atomically-created cache file under
-//! `%LOCALAPPDATA%\Potflix\meta\artwork`. Tests and the capture harness seed
-//! the same cache with explicit bytes, so no test touches the network.
-//!
-//! Missing bytes are an absence, not a branded fallback: [`is_cached`] is the
-//! paint path's gate, and `SurfacePreview::art` only turns on when it answers
-//! true. GDI+ is the decoder/drawer already linked by this crate; there is no
-//! new dependency.
 
 use std::collections::HashSet;
 use std::io::Read;
@@ -178,9 +165,6 @@ pub fn cover_rects(img_w: u32, img_h: u32, slot: win32::Rect) -> Option<(win32::
         return None;
     }
     let (iw, ih) = (i64::from(img_w), i64::from(img_h));
-    // Compare the two aspects without floats: iw/ih > sw/sh <=> iw*sh > ih*sw.
-    // The wider side gives up its excess, so the source always carries the
-    // slot's aspect and the blit never has a band to leave behind.
     let (src_w, src_h) = if iw * slot_h > ih * slot_w {
         ((ih * slot_w + slot_h / 2) / slot_h, ih)
     } else {
@@ -226,8 +210,6 @@ impl Cover {
         // by GDI+ and checked before use.
         let status = unsafe { win32::GdipCreateBitmapFromFile(wide.as_ptr(), &mut image) };
         if status != 0 || image.is_null() {
-            // Undecodable bytes poison the slot forever: drop the file so the
-            // next paint refetches instead of missing forever.
             let _ = std::fs::remove_file(&path);
             return None;
         }
@@ -338,7 +320,6 @@ mod tests {
     /// portrait tile cannot read as a different shape than its neighbours.
     #[test]
     fn a_cover_crops_to_fill_its_slot_whatever_the_source_aspect() {
-        // The 32x48 result thumb: the portrait slot the rows use.
         let slot = win32::Rect {
             left: 10,
             top: 20,
@@ -347,7 +328,6 @@ mod tests {
         };
         let slot_ratio = 32.0 / 48.0;
 
-        // A 16:9 still in a portrait slot: crop the sides, never letterbox.
         let (src, dst) = cover_rects(1600, 900, slot).expect("a 16:9 cover has rects");
         assert_eq!(
             (dst.left, dst.top, dst.right, dst.bottom),
@@ -371,8 +351,6 @@ mod tests {
             "the crop carries the slot's aspect {slot_ratio:.3}, got {src_ratio:.3}"
         );
 
-        // A portrait poster (the common case) into the same slot: full width,
-        // crop the height.
         for (w, h) in [(2000u32, 3000u32), (913, 1426)] {
             let (src, dst) = cover_rects(w, h, slot).expect("portrait cover has rects");
             assert_eq!((dst.right - dst.left, dst.bottom - dst.top), (32, 48));
@@ -394,8 +372,6 @@ mod tests {
             );
         }
 
-        // A square source is wider than this slot, so it gives up the sides and
-        // keeps its full height -- the same rule, not a special case.
         let (src, _) = cover_rects(1000, 1000, slot).expect("square cover has rects");
         assert_eq!((src.top, src.bottom), (0, 1000), "a square keeps its height");
         assert!(
@@ -405,7 +381,6 @@ mod tests {
             src.right
         );
 
-        // Degenerate input draws nothing rather than inventing a rect.
         assert!(cover_rects(0, 900, slot).is_none());
         assert!(
             cover_rects(

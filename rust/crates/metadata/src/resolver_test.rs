@@ -1,4 +1,3 @@
-//! Ports `go\internal\metadata\resolver_test.go`.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -49,7 +48,6 @@ fn resolve_non_blocking_then_memory() {
         .expect("Resolve");
     assert!(!res.found, "expected Found=false on cache miss");
 
-    // The background fetch is stuck in the fake; LookupNow must wait for it.
     let waiter = resolver.clone();
     let waiter_q = q.clone();
     let handle = std::thread::spawn(move || waiter.lookup_now(&Cancel::background(), &waiter_q));
@@ -185,8 +183,6 @@ fn match_episode_season_aware_absolute() {
             title: "S1E2".to_string(),
             ..Episode::default()
         },
-        // The wanted season flattened into season 0, numbered continuously:
-        // S2E1 is total 3.
         Episode {
             season: 0,
             number: 3,
@@ -477,7 +473,6 @@ fn resolution_buttons_series_and_movie() {
             "series button not https: {button:?}"
         );
     }
-    // Cover rework: the series poster wins, the episode still never overrides.
     assert_eq!(res.artwork, "https://example.com/poster.jpg");
 
     let anime = FakeSource::with_media(
@@ -551,7 +546,6 @@ fn resolution_buttons_series_and_movie() {
         )
         .expect("movie LookupNow");
     assert!(res3.found && res3.is_movie && res3.year == 2017);
-    // An ftp trailer drops: only the https-forced movie button remains.
     assert_eq!(
         res3.buttons.len(),
         1,
@@ -759,7 +753,6 @@ fn failed_forced_refresh_preserves_positive() {
 
     let boom = FakeSource::with_error("fake", "transport down");
     let resolver = resolver_with(&d, vec![boom.shared()]);
-    // Warm the in-memory positive from disk (no provider call).
     let res = resolver
         .lookup_now(&Cancel::background(), &q)
         .expect("warm LookupNow");
@@ -789,7 +782,6 @@ fn cancelled_background_fetch_stores_nothing() {
         delay: Duration::from_millis(500),
         ..FakeSource::new("fake")
     };
-    // fetchCtx timeout = timeout * 4 = 80 ms, well under the 500 ms delay.
     let resolver = Resolver::new(crate::resolver::Options {
         dir: d.clone(),
         timeout: Duration::from_millis(20),
@@ -806,8 +798,6 @@ fn cancelled_background_fetch_stores_nothing() {
         worker.background_fetch(Cancel::background(), worker_q, &worker_key, worker_done)
     });
 
-    // The fetch must finish inside this gate; a gate that fires instead means
-    // the background fetch never completed.
     let gate = Cancel::with_deadline(Duration::from_secs(5));
     done.wait(&gate);
     assert!(!gate.is_cancelled(), "backgroundFetch never finished");
@@ -971,8 +961,6 @@ fn probed_entry_deleted_not_served() {
         .expect("Resolve after invalidation");
     assert!(!res.found, "want not-found, never warmed memory: {res:?}");
 
-    // Same, via the blocking lookup on a fresh resolver: the fetch is
-    // re-attempted instead of serving warmed memory.
     cache_store(&d, &key, &media).expect("cacheStore");
     let fake = FakeSource::with_error("fake", "boom");
     let calls = fake.counter();
@@ -988,8 +976,6 @@ fn probed_entry_deleted_not_served() {
         "the miss must be re-attempted"
     );
 
-    // Invalidated fresh negative: the lookup must fetch, not report a warmed
-    // miss.
     let nq = Query {
         kind: Kind::SERIES,
         title: "Probe Neg".to_string(),

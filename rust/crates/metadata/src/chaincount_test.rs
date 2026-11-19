@@ -1,4 +1,3 @@
-//! Ports `go\internal\metadata\chaincount_test.go`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -118,9 +117,6 @@ fn count(counts: &HashMap<String, i32>, name: &str) -> i32 {
 /// INVOKES cinemeta.Find but a movie miss still INVOKES the series-only fakes.
 #[test]
 fn chain_call_counts() {
-    // NOTE: the fixtures below carry no artwork, so every non-AniList winner
-    // also costs exactly one `anilist` backfill call (`fetch_media` fires it
-    // for unusable artwork); an AniList winner and a miss cost none.
     let tv_q = resolve_query("Breaking Bad S01E01.mkv", "");
     assert_eq!(tv_q.kind, Kind::SERIES, "tv fixture kind");
     let anime_q = resolve_query("[Anime Time] Re Zero - 01.mkv", "");
@@ -163,8 +159,6 @@ fn chain_call_counts() {
             answer_at: "justwatch",
             want: vec![
                 ("cinemeta", 1),
-                // Walked once on the way past, then once for the artwork
-                // backfill: the winning fixture carries no cover.
                 ("anilist", 2),
                 ("tenrai", 1),
                 ("kitsu", 1),
@@ -306,11 +300,6 @@ fn chain_call_counts() {
 /// control that proves the dead server would have been hit).
 #[test]
 fn kind_gate_no_network() {
-    // The positive control answers immediately on loopback and records each
-    // hit: an allowed query must surface a wire error AND leave a recorded
-    // hit, while a ruled-out query must leave the counter untouched. A dead
-    // port cost ~1 s per allowed query (11.1 s for the 11 sources); the mock
-    // keeps the same proof without the timeout.
     let hits: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let mock = failing_server(&hits);
     let mock_url = mock.url();
@@ -326,7 +315,6 @@ fn kind_gate_no_network() {
         title: "Inception".to_string(),
         ..Query::default()
     };
-    // Cinemeta serves both kinds, so its pre-wire gate is the empty title.
     let empty_q = Query {
         kind: Kind::MOVIE,
         ..Query::default()

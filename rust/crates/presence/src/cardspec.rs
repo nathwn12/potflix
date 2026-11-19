@@ -1,20 +1,3 @@
-//! `presence::cardspec` -- mirrors `go\internal\presence\cardspec.go`.
-//!
-//! The card specification: which lines the presence card carries and how the
-//! clean title, canonical title and episode tag compose into them.
-//!
-//! A [`CardSpec`] chooses what the card's two body lines say. Each line picks
-//! from a small fixed preset set ([`card_presets`]) - there is no template
-//! language. The zero value falls back to the default on every line, so no
-//! migration is needed for stored configs.
-//!
-//! [`default_card_spec`] is the shipped per-kind mapping: movie details
-//! `<year> · <genres>` over a runtime state; series details EMPTY over
-//! `SxxEyy · Episode`. The work-level synopsis stays in the artwork tooltip
-//! as a <=128-unit snippet (episode-pinned prose never rides); both body
-//! lines are identity/playback only, never the title. Any state
-//! preset whose final text would repeat the series title blanks instead.
-//! The paused " · Paused" marker rides the last populated body line.
 
 use player::window::{APP_NAME, SUFFIX};
 use serde::{Deserialize, Serialize};
@@ -164,10 +147,6 @@ impl CardSpec {
         if is_idle_title(raw_title) {
             return ("Browsing".to_string(), "Idle".to_string());
         }
-        // UNKNOWN: the parsed title (in the header) plus the parsed code if
-        // any on line 2; no art, no prose, no timestamps (the composer
-        // strips those). Presets do not reach this card: there is nothing
-        // resolved to restyle.
         if r.unknown {
             let mut state = unknown_code_state(raw_title, r);
             if a.is_some_and(|x| x.paused) {
@@ -178,10 +157,6 @@ impl CardSpec {
         let spec = self.normalized();
         let mut details = compose_details_for(raw_title, r, is_movie, &spec.details);
         let mut state = compose_state_for(raw_title, a, r, is_movie, &spec.state);
-        // PAUSED under the default state line: the default branches mark a
-        // populated state themselves; when the state is empty the marker
-        // rides the last populated body line instead -- the details when one
-        // exists, else a bare marker on the state.
         if a.is_some_and(|x| x.paused)
             && spec.state == CARD_STATE_DEFAULT
             && state.is_empty()
@@ -192,10 +167,6 @@ impl CardSpec {
                 details = with_state_time(&details, PAUSED_MARKER);
             }
         }
-        // One rule for both surfaces (wire and Card-view preview): no body line
-        // repeats the header. The header carries the media title, so a series'
-        // own title on line 1 blanks; the episode state still carries
-        // `SxxEyy · Episode`. A movie's line 1 keeps `<year> · <genres>`.
         let header = compose_name_inner(raw_title, r);
         if !details.is_empty() && details == header {
             details.clear();

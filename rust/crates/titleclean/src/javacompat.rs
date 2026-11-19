@@ -1,6 +1,3 @@
-//! The Java-compatibility layer: pattern translation, Java's `$` end positions,
-//! Java `Matcher` replacement, UTF-16 arithmetic and the JDK-11 membership
-//! tables. Mirrors `go\internal\titleclean\javacompat.go`.
 
 use crate::jdk11tables::{JDK_FULL_UPPER, JDK_MN_RANGES, JDK_UPPER_RANGES, JDK_WORD_RANGES};
 use crate::regexlite::Regex;

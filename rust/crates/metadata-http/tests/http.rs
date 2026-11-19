@@ -1,8 +1,3 @@
-//! Wire-contract, retry, and decode tests for `metadata::http`
-//! (`go\internal\metadata\http.go`).
-//!
-//! Everything here runs against a loopback server: no test reaches the
-//! network.
 
 mod common;
 
@@ -58,8 +53,6 @@ fn get_sends_the_shared_user_agent_and_accept() {
         header_values(&heads[0], "accept"),
         vec!["application/json".to_string()]
     );
-    // gzip/brotli are deliberately off (the workspace pins `ureq` with
-    // `default-features = false`), so the providers answer identity.
     for value in header_values(&heads[0], "accept-encoding") {
         assert!(
             !value.contains("gzip") && !value.contains("br"),
@@ -112,8 +105,6 @@ fn post_json_sends_content_type_and_payload() {
 fn decode_capped_rejects_non_2xx_without_the_body() {
     let server = TestServer::start(vec![Reply::too_many_requests(None)]);
     let client = HttpClient::new(Duration::from_secs(8));
-    // The server answers 429 to every attempt, so every retry also sees 429
-    // and `get` hands the last response back - bounded, never a loop.
     let response = client
         .get(&Cancel::background(), &server.url("/meta"))
         .expect("429 is a response, not a transport error");
@@ -287,8 +278,6 @@ fn a_500_is_not_retried() {
 fn retry_after_is_bounded_and_cancellable() {
     let server = TestServer::start(vec![Reply::too_many_requests(Some("3600"))]);
     let client = HttpClient::new(Duration::from_secs(8));
-    // A 3600 s Retry-After must be capped at 10 s; the 50 ms deadline proves
-    // the cap never turned into a 3600 s sleep.
     let cancel = Cancel::with_deadline(Duration::from_millis(50));
     let started = Instant::now();
     let err = client

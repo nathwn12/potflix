@@ -1,18 +1,3 @@
-//! `metadata::match_` -- mirrors `go\internal\metadata\match.go`.
-//!
-//! Candidate-title matching against provider results (the scoring that decides
-//! which hit is the right series/episode). TVmaze returns its search hits in its
-//! own rank order, which puts a spinoff above the main show, so the resolver
-//! re-ranks them with [`pick_best_show`].
-//!
-//! # Accent folding is a hand-rolled table
-//!
-//! [`folded_accent`] is a LINEAR switch transcribed rune for rune from the Go
-//! source, deliberately not a Unicode crate: `æ`→`ae`, `œ`→`oe`, `ß`→`ss`
-//! (inside the `s` group), `þ`→`th`, `ð`→`d`, `ı`→`i`. Mn marks are stripped
-//! BEFORE the switch, so a combining accent vanishes rather than folding. The
-//! Mn test uses `titleclean`'s JDK-11 table (`jdk_is_mn`), the only Unicode
-//! general-category data the workspace allows into the graph.
 
 use std::collections::HashSet;
 
@@ -69,7 +54,6 @@ fn folded_accent(r: char) -> Option<&'static str> {
         }
         'œ' => Some("oe"),
         'ŕ' | 'ŗ' | 'ř' => Some("r"),
-        // 'ß' → "ss", the rest of the group → "s".
         'ß' => Some("ss"),
         'ś' | 'ŝ' | 'ş' | 'š' | 'ș' => Some("s"),
         'ţ' | 'ť' | 'ŧ' | 'ț' => Some("t"),

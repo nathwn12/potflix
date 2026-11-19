@@ -1,8 +1,3 @@
-//! `cancel_link` -- the stand-in for Go's `context.WithTimeout`/`context.WithCancel`
-//! derivation that `metadata-http::cancel::Cancel` does not offer. A
-//! [`CancelLink`] watches a parent scope on a small polling thread and cancels
-//! every registered child scope the moment the parent fires, so a per-lookup
-//! timeout scope still aborts when the pass (or the scan) is cancelled.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

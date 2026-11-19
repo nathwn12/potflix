@@ -1,39 +1,3 @@
-//! `window` -- mirrors the Go root files `go\window.go` + `go\settings_sections.go`.
-//!
-//! The tray-resident settings window: folders list, Scan / Refresh, the live
-//! `indexed N of M files | metadata K of J` line with its `- catching up` state,
-//! library export/import, `Clear metadata` / `Clear index`, `Report`, startup,
-//! scan-speed segments. The scan progress is phase-aware: the bar is driven by
-//! `Resolved` of `KeysTotal` so it cannot read full while metadata remains.
-//!
-//! # Owner-drawn, no child controls (`go\window.go:37-70`)
-//!
-//! There are no child controls: every rect-table id below is a key into a
-//! hit-test table, the whole client area is owner-drawn, and there is no
-//! `WM_CTLCOLOR*`/`WM_DRAWITEM` anywhere. Hit-testing and actions run through
-//! ONE dispatch (`release_at` / `activate_focused` -> `do_button_action` /
-//! `do_settings_action` / `do_card_action`), and the disabled state is enforced
-//! AT INPUT via [`scan_blocked_reason`] - porting only the dim paint would lose
-//! the guard.
-//!
-//! # Integer geometry (`go\window.go:3466-3484`)
-//!
-//! Every value is integer-scaled `(v*dpi+48)/96` from the 460x680 logical
-//! design, and font heights are negative. An `f32`/`f64` scale would change
-//! hit-tests versus paint, so the port keeps `i32` everywhere.
-//!
-//! # One OS thread
-//!
-//! The tray wndproc + main wndproc + `GetMessageW` loop must share one OS
-//! thread; workers (poll, scan, report) may never touch the UI - their payloads
-//! ride mutex-guarded snapshots and only ever repaint via `InvalidateRect` plus
-//! an async `PostMessageW`. The UI state lives in [`UiState`], which the
-//! tests construct directly (isolated) and production wraps in a process
-//! global.
-
-// The Win32 surface is inherently pointer-taking: every entry point accepts an
-// `HWND`/`HDC` and hands it to `windows-sys`. The handles are opaque and the
-// module never dereferences them itself, so the lint is silenced module-wide.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -51,8 +15,6 @@ use presence::{Action, Activity, CardSpec, Resolved};
 
 use app_support::config::{CardKind, CardLine, CardSpecs};
 
-// The picker's own two imports: the latch types the dialog reads/writes and the
-// store's key derivations it keys those writes with.
 use metadata::overrides::{season_key_for, series_key_for};
 use metadata::{Candidate, Kind, Override, Scope};
 
@@ -199,16 +161,6 @@ pub const VK_DOWN: u32 = 0x28;
 pub const SW_SHOW_NORMAL: i32 = 1;
 pub const DT_WORD_BREAK: u32 = 0x0010;
 
-// Palette -- the repo's own brand system (`brand`, ported from
-// `design\make_logo.py`).
-//
-// The incumbent ramp was an ad-hoc grey ladder with the Netflix red dropped in:
-// it carried the red but none of the identity, because the identity lives in
-// `design\` and nothing read it. Every value below is now a brand token, and
-// every pair the app paints is measured in `brand`'s `brand_contrast_gate`.
-//
-// The roles are kept (canvas / chrome / panel / control / text) so no paint site
-// had to change shape; only the values moved to the brand palette.
 
 /// `rgb(r, g, b)` (`go\window.go:3487`).
 #[must_use]
@@ -216,7 +168,6 @@ pub const fn rgb(r: u32, g: u32, b: u32) -> u32 {
     r | (g << 8) | (b << 16)
 }
 
-// --- Surfaces: the approved narrow tokens (mock `potflix-preview/index.html`).
 
 /// The canvas `#0F1012`. Also the window's own background brush, so
 /// the DWM caption and the client area meet with no seam.
@@ -234,7 +185,6 @@ pub const COL_BORDER: u32 = brand::HAIRLINE_V2;
 /// Strong divider `#565A63` (selected underline weight lives here).
 pub const COL_BORDER_STRONG: u32 = brand::STRONG_V2;
 
-// --- Text: approved narrow roles (`#F2F3F5` / `#A7ABB4` / `#8A8F99`). ----
 
 /// Body text `#F2F3F5`.
 pub const COL_TEXT: u32 = brand::CARD_HDR;
@@ -245,7 +195,6 @@ pub const COL_MUTED: u32 = brand::MUTED_V2;
 /// Disabled text `#8A8F99`.
 pub const COL_MUTED_DIM: u32 = brand::DIM_V2;
 
-// --- Accent: the approved red `#E5343F`, hover `#F04B55`. -------------------
 
 pub const COL_ACCENT: u32 = brand::ACCENT_V2;
 pub const COL_ACCENT_HOV: u32 = brand::ACCENT_HOV_V2;
@@ -259,8 +208,6 @@ pub const COL_ACCENT_WASH: u32 = rgb(0x3A, 0x1C, 0x21);
 /// (`4.97:1` on the card surface, `6.31:1` on the canvas).
 pub const COL_DANGER: u32 = brand::DANGER_TEXT;
 
-// --- AMOLED theme: pure-black OLED surfaces. `Dark` is today's palette
-// exactly; AMOLED remaps only the four surfaces, never borders/text/accent.
 
 /// AMOLED canvas `#000000` (Dark `#0F1012`).
 pub const COL_BG_AMOLED: u32 = rgb(0x00, 0x00, 0x00);
@@ -318,7 +265,6 @@ pub fn themed(color: u32) -> u32 {
     }
 }
 
-// --- The named state set: every control paints from these, never a literal. --
 
 /// Control, default.
 pub const STATE_BG: u32 = COL_ROW;
@@ -338,7 +284,6 @@ pub const STATE_TEXT_DISABLED: u32 = COL_MUTED_DIM;
 /// bar keeps the accent; focus must never read as selection.
 pub const STATE_FOCUS: u32 = COL_MUTED;
 
-// --- Geometry tokens: a 4px grid, and the house squircle. -------------------
 
 /// Spacing grid, logical px at 96 DPI. Every layout number is one of these.
 pub const SP_1: i32 = 4;
@@ -388,7 +333,6 @@ pub const SCROLLBAR_W: i32 = 5;
 pub const SCROLLBAR_INSET: i32 = 6;
 pub const SCROLLBAR_MIN_THUMB: i32 = 24;
 
-// --- Type scale: logical px at 96 DPI, one size per role. ------------------
 
 /// The wordmark (`POTFLIX`), in Archivo Black, tracked.
 pub const FS_WORDMARK: i32 = brand::FS_WORDMARK;
@@ -416,7 +360,6 @@ pub const FS_SETTINGS_TITLE: i32 = 15;
 pub const FS_SET_CAP: i32 = 11;
 pub const FS_EXPLAINER: i32 = 12;
 
-// Button paint styles (`go\window.go:194-200`).
 pub const BTN_SUBTLE: i32 = 0;
 pub const BTN_ACCENT: i32 = 1;
 pub const BTN_OUTLINE: i32 = 2;
@@ -617,7 +560,6 @@ pub struct NamedTextRect {
     pub rc: Rect,
 }
 
-// Layout metrics (`go\window.go:495-499`).
 pub const MAIN_CLIENT_W: i32 = 460;
 pub const MAIN_CLIENT_H: i32 = 680;
 pub const MAIN_MARGIN: i32 = 20;
@@ -638,11 +580,6 @@ pub const CARD_MIN_H: i32 = 270;
 pub const APP_MIN_W: i32 = 420;
 pub const APP_MIN_H: i32 = 680;
 
-// --- The main view's vertical stack, logical px at 96 DPI. ------------------
-//
-// These are the composition's skeleton, shared by `compute_layout_total` (the
-// hit-test table) and the paint path, so a rect can never disagree with what is
-// drawn in it.
 
 /// The chrome header band: mark, wordmark, subtitle.
 pub const HEADER_H_L: i32 = 64;
@@ -820,8 +757,6 @@ pub fn tab_strip_rects(cw: i32, dpi: i32) -> (Rect, Rect) {
     let (left, content_w) = content_span(cw, dpi);
     let top = sc(TAB_TOP_L);
     let bottom = top + sc(TAB_H_L);
-    // Equal segments with one gap: the same rule the action grid uses, so both
-    // segments are exactly equal at every DPI.
     let seg_w = (content_w - sc(SP_2)) / 2;
     (
         Rect {
@@ -876,11 +811,6 @@ pub fn compute_layout_total(total: i32, cw: i32, ch: i32, dpi: i32, top: i32) ->
     let (margin, content_w) = content_span(cw, dpi);
 
     let mut l = UiLayout::default();
-    //
-    // One column, top to bottom: chrome header, tab strip, section micro-label,
-    // the folder panel, then the action grid and the status line. Every number
-    // is a token or a sum of tokens, so the composition moves as one piece and
-    // the panel's height is whatever the grid leaves it.
     let header_h = sc(HEADER_H_L);
     let tab_top = sc(TAB_TOP_L);
     let tab_h = sc(TAB_H_L);
@@ -941,11 +871,6 @@ pub fn compute_layout_total(total: i32, cw: i32, ch: i32, dpi: i32, top: i32) ->
     }
     l.list_top = top;
     l.list_capacity = max_rows;
-    // The viewport is full-height once anything is hidden, whichever offset the
-    // list is scrolled to: the `+N more` line's height is reserved whenever the
-    // list overflows at all, so scrolling never resizes the panel (and its
-    // scrollbar track) under the pointer. The line itself still paints only
-    // while something hides below (`l.overflow > 0` at the paint site).
     let viewport = if total > max_rows { max_rows } else { vis };
     let mut panel_h = pad * 2 + row_h;
     if viewport > 0 {
@@ -981,10 +906,6 @@ pub fn compute_layout_total(total: i32, cw: i32, ch: i32, dpi: i32, top: i32) ->
             bottom: y + row_h,
         });
     }
-    // The scrollbar lives inside the panel's right padding gutter, so it never
-    // overlaps a row or the `+N more` line. Gated on real overflow (`total >
-    // max_rows`), not on `l.overflow` (hidden-below): the track must persist
-    // at the last viewport too, or it blinks out exactly when reached.
     if total > max_rows {
         let sb_w = sc(SCROLLBAR_W);
         let inset = sc(SCROLLBAR_INSET);
@@ -998,13 +919,6 @@ pub fn compute_layout_total(total: i32, cw: i32, ch: i32, dpi: i32, top: i32) ->
         l.thumb = scrollbar_thumb(track, total, max_rows, top, sc(SCROLLBAR_MIN_THUMB));
     }
 
-    //
-    // ONE grid for every action, all three rows of it. Equal columns
-    // (`col_w = (content_w - gap) / 2`), one gap between columns and one between
-    // rows, and exactly one primary control (`Scan`, accent) -- the rest are
-    // secondary. This replaces the incumbent's two off-grid columns plus a
-    // right-aligned bare `Close to tray` text and a stray left-aligned `Report`
-    // on a fourth, unaligned row.
     let col_w = (content_w - btn_gap) / 2;
     let (x0, x1) = (margin, margin + col_w + btn_gap);
     let y_of = |row: i32| footer_top + row * (btn_h + btn_gap);
@@ -1015,8 +929,6 @@ pub fn compute_layout_total(total: i32, cw: i32, ch: i32, dpi: i32, top: i32) ->
         bottom: y + btn_h,
     };
     l.btns = vec![
-        // The tab strip's two segments are controls too, so they hover, press,
-        // focus and paint through the same machinery as the grid above.
         UiButton {
             id: BTN_CARD,
             label: "Card".into(),
@@ -1029,8 +941,6 @@ pub fn compute_layout_total(total: i32, cw: i32, ch: i32, dpi: i32, top: i32) ->
             style: BTN_TAB,
             rc: l.settings,
         },
-        // No run/folder controls: Potflix does not scan a library (owner order
-        // 2026-11-03). The wide view keeps only the window action below.
         UiButton {
             id: BTN_REPORT,
             label: report_button_label().into(),
@@ -1083,7 +993,6 @@ pub fn compute_settings_layout(
     let status_h = sc(STATUS_BAR_H_L);
     let status_top = (ch - status_h).max(0);
 
-    // Top bar gear returns to the Card; the self tab stays wired but hidden.
     let gear_side = sc(GEAR_SIDE_L);
     let gear = Rect {
         left: (cw - margin - gear_side).max(0),
@@ -1103,7 +1012,6 @@ pub fn compute_settings_layout(
     let spec = crate::settings::startup_toggle_label(startup);
     let _ = scan_speed;
 
-    // Stack cursor below the pinned title.
     let mut y = topbar_h + title_h + gap;
     let push_label = |l: &mut SettingsLayout, id: &str, y: &mut i32| {
         let rc = Rect {
@@ -1129,8 +1037,6 @@ pub fn compute_settings_layout(
         *y += row_h;
     };
 
-    // Title is pinned: owned by the layout as the first label so the audit
-    // cannot drift from what the paint draws.
     l.labels.push(NamedTextRect {
         id: "settings.title".into(),
         rc: Rect {
@@ -1141,24 +1047,16 @@ pub fn compute_settings_layout(
         },
     });
 
-    // No media-folders group: Potflix never scans a library. Everything it
-    // knows is built on the fly from what is actually playing, so the folder
-    // manager and its scan controls are gone by owner order (2026-11-03).
     push_label(&mut l, "settings.behaviour", &mut y);
     push_row(&mut l, BTN_DISCORD, "Discord connection".into(), BTN_OUTLINE, &mut y);
     push_row(&mut l, BTN_CLOSE, "Close to tray".into(), BTN_OUTLINE, &mut y);
     push_row(&mut l, BTN_STARTUP, spec.into(), BTN_OUTLINE, &mut y);
-    // Theme row: one 48px band under BEHAVIOUR. Left column carries the
-    // "Theme" title plus the 12px muted description; right column carries
-    // the two 36px segments (`AMOLED` | `Dark`). Selected uses the
-    // text-colour underline (`BTN_TOGGLE_*`), never red.
     {
         let theme_top = y;
         let theme_h = sc(48);
         let seg_h = sc(BTN_H);
         let seg_gap = sc(SP_2);
         let text_gap = sc(SP_3);
-        // Right-aligned control: two equal 36px-height segments.
         let seg_w = sc(72);
         let control_w = seg_w * 2 + seg_gap;
         let control_left = (margin + content_w - control_w).max(margin);
@@ -1211,7 +1109,6 @@ pub fn compute_settings_layout(
     push_label(&mut l, "settings.lib", &mut y);
     push_row(&mut l, BTN_CLEAR_CACHE, "Clear metadata".into(), BTN_DANGER, &mut y);
 
-    // Top-bar controls: gear back to Card, self hidden but wired.
     l.btns.push(UiButton {
         id: BTN_CARD,
         label: "⚙".into(),
@@ -1224,7 +1121,6 @@ pub fn compute_settings_layout(
         style: BTN_TAB_SEL,
         rc: Rect::default(),
     });
-    // Legacy footer Back stays wired for Esc/keyboard, hidden in the new body.
     l.btns.push(UiButton {
         id: BTN_BACK,
         label: "Back".into(),
@@ -1705,8 +1601,6 @@ pub fn compute_card_narrow(
     let status_h = sc(STATUS_BAR_H_L);
     let status_top = (ch - status_h).max(topbar_h);
     l.header = Rect { left: 0, top: 0, right: cw, bottom: topbar_h };
-    // No tab strip in the redesign: the top bar replaces it. Keep the rects
-    // empty so the old tab paint has nothing to draw twice.
     l.tab_strip = Rect::default();
     l.card_link = Rect::default();
     let gear_side = sc(GEAR_SIDE_L);
@@ -1718,12 +1612,6 @@ pub fn compute_card_narrow(
     };
     l.settings = gear;
 
-    // Hero: 64x96 poster, title/meta/status, ghost Fix match on the status row.
-    // Tiny viewports cannot fit hero + search + footer above the
-    // status bar: when the hero would collide with the pinned footer, the
-    // hero band collapses (search and footer stay reachable instead of
-    // overlapping). The collapse is all-or-nothing so a half-height hero can
-    // never clip the poster.
     let hero_top = topbar_h + gap;
     let hero_pad = sc(SP_3);
     let poster_w = sc(HERO_POSTER_W_L);
@@ -1780,7 +1668,6 @@ pub fn compute_card_narrow(
         };
     }
 
-    // Search row: field + 96px red Search.
     let search_top = l.object.bottom + gap;
     let search_h = sc(BTN_H);
     let search_w = sc(SEARCH_BTN_W_L);
@@ -1803,14 +1690,8 @@ pub fn compute_card_narrow(
         bottom: search_top + search_h,
     };
 
-    // Results panel fills to the status bar; tiny viewports scroll below it.
-    // No scope row: universal search runs both chains for every query, so the
-    // list starts directly under the search row.
     let panel_top = l.picker_bar.bottom + gap;
     let panel = if panel_top > status_top {
-        // Pinned bands already exceed the client: extend the panel below the
-        // fold so footer controls never overlap the search row. The
-        // pinned status bar overlays it (chrome, skipped in overlap checks).
         Rect {
             left: margin,
             top: panel_top,
@@ -1826,10 +1707,6 @@ pub fn compute_card_narrow(
         }
     };
     l.stage = panel;
-    // List area above the pinned footer (Apply 36 + gaps). The footer anchors
-    // to the visible bottom (`status_top`), never to `panel.bottom`: when the
-    // pinned bands already exceed a tiny client the panel extends below the
-    // fold, but Apply stays inside the client above the status bar.
     let foot = status_top.min(panel.bottom);
     let apply_top = foot - sc(SP_2) - sc(32) - sc(SP_1) - sc(BTN_H);
     l.picker_results = Rect {
@@ -1838,7 +1715,6 @@ pub fn compute_card_narrow(
         right: panel.right,
         bottom: (apply_top - sc(SP_1)).max(panel_top).min(foot),
     };
-    // Preview surfaces unused in narrow redesign: empty so old paint skips.
     l.preview = Rect::default();
     l.surfaces = [Rect::default(), Rect::default(), Rect::default()];
     l.rail = Rect {
@@ -1879,9 +1755,6 @@ pub fn compute_card_narrow(
             rc: search_rc,
         },
     ];
-    // Hero ghost on the status row, right-aligned — present only while a live
-    // title is playing (and the hero band is shown), absent (not
-    // disabled) with nothing playing or when tiny clients collapse the hero.
     if state.playing && !hide_hero {
         let ghost_w = sc(96);
         let text_l = l.obj_cover.right + hero_pad;
@@ -1898,9 +1771,6 @@ pub fn compute_card_narrow(
             },
         });
     }
-    // Apply pinned to the visible bottom (one 32px text row of breathing room
-    // to the status bar). `foot` is the visible bottom, so Apply stays inside
-    // the client even when the panel overflows a tiny viewport.
     l.btns.push(UiButton {
         id: BTN_PICKER_APPLY,
         label: "Apply to playing title".into(),
@@ -1912,7 +1782,6 @@ pub fn compute_card_narrow(
             bottom: apply_top + sc(BTN_H),
         },
     });
-    // Back stays wired for Esc/keyboard, hidden in the new anatomy.
     l.btns.push(UiButton {
         id: BTN_CARD_BACK,
         label: "Back".into(),
@@ -1955,7 +1824,6 @@ pub fn compute_card_layout_state(
     let has_selection = state.has_selection;    let sc = |v: i32| scale_px(dpi, v);
     let spec = specs.for_kind(kind);
     let compact = ch < sc(480);
-    // Wide branch only: narrow returns above via `compute_card_narrow`.
     let header_h = if compact { 0 } else { sc(HEADER_H_L) };
     let tab_top = if compact { sc(SP_2) } else { sc(TAB_TOP_L) };
     let tab_h = sc(TAB_H_L);
@@ -1991,7 +1859,6 @@ pub fn compute_card_layout_state(
     l.card_link = card_tab;
     l.settings = settings_tab;
 
-    // One segmented row over `items`; the last cell lands exactly on `right`.
     let segments = |left: i32,
                     right: i32,
                     top: i32,
@@ -2101,8 +1968,6 @@ pub fn compute_card_layout_state(
         right: col_left + adv_w,
         bottom: adv_top + adv_h,
     };
-    // The search's own readout shares the disclosure row: it never costs a line
-    // of its own, so the field can explain a failure without moving the list.
     l.picker_status = Rect {
         left: advanced_rc.right + gap,
         top: adv_top + sc(SP_2),
@@ -2112,8 +1977,6 @@ pub fn compute_card_layout_state(
     let panel_top = adv_top + adv_h + sc(SP_2);
     let panel_h = sc(166);
     let footer_top = status_top - sc(SP_3) - sc(BTN_H);
-    // Very short clients have no footer row of their own: Back shares the
-    // disclosure row, and a disclosure with nowhere to open stays shut.
     let share_row = footer_top < adv_top + adv_h + sc(SP_2) + sc(BTN_H);
     let advanced = advanced && !share_row;
     if advanced {
@@ -2145,8 +2008,6 @@ pub fn compute_card_layout_state(
     };
     l.stage = stage;
     l.tooltip = Rect::default();
-    // The results list occupies the stage: the two are painted exclusively, so
-    // one rect cannot be both a preview and a result set.
     l.picker_results = stage;
 
     if wide {
@@ -2241,8 +2102,6 @@ pub fn compute_card_layout_state(
         }
     }
     l.rows = vec![l.title, l.meta, l.synopsis];
-    // The rail is the whole column the object and its query live in; the stage
-    // is what is left over for the preview or the results.
     l.rail = Rect {
         left: col_left,
         top: l.object.top,
@@ -2284,9 +2143,6 @@ pub fn compute_card_layout_state(
         },
     ];
     if advanced {
-        // Universal search: no scope segments and no category words. The
-        // disclosure keeps the designer field toggles (covers are always on,
-        // so no artwork row) and the line-2 state presets.
         let field_items: Vec<(i32, String, i32)> = vec![
             (
                 BTN_FIELD_DETAILS,
@@ -2364,16 +2220,11 @@ pub fn compute_card_layout_state(
             }
         },
     });
-    // The list's own actions. Both exist ONLY with a selection and only inside
-    // the results list -- never as a peer of the field, never at rest.
     if has_selection {
         let row_h = sc(32);
         let gap = sc(SP_1);
         let mut bottom = l.picker_results.bottom - sc(SP_2);
         if state.can_apply {
-            // Applying a match changes what the CURRENTLY PLAYING title is;
-            // with nothing playing there is nothing to apply it to, so the
-            // control is absent rather than disabled-and-lying.
             l.btns.push(UiButton {
                 id: BTN_PICKER_APPLY,
                 label: "Apply to playing title".into(),
@@ -2388,8 +2239,6 @@ pub fn compute_card_layout_state(
             bottom -= row_h + gap;
         }
         if !advanced {
-            // With the Advanced disclosure already open this link is redundant,
-            // and its row would crowd out the result the user is looking at.
             l.btns.push(UiButton {
                 id: BTN_FIX_MATCH,
                 label: "Not this one? Open advanced match\u{2026}".into(),
@@ -2435,8 +2284,6 @@ pub fn compute_card_layout_shipped_v1(
     let sc = |v: i32| scale_px(dpi, v);
     let spec = specs.for_kind(kind);
     let compact = ch < sc(480);
-    // The split workspace needs a readable stage for three surfaces; below
-    // this width (or height) the narrow stack shows one surface at full width.
     let wide = cw >= sc(1180) && ch >= sc(700);
     let header_h = if compact { 0 } else { sc(HEADER_H_L) };
     let tab_top = if compact { sc(SP_2) } else { sc(TAB_TOP_L) };
@@ -2474,7 +2321,6 @@ pub fn compute_card_layout_shipped_v1(
     l.card_link = card_tab;
     l.settings = settings_tab;
 
-    // One segmented row over `items`; the last cell lands exactly on `right`.
     let segments = |left: i32,
                     right: i32,
                     top: i32,
@@ -2522,10 +2368,6 @@ pub fn compute_card_layout_shipped_v1(
         })
         .collect()
     };
-    // The picker band is one row in every composition: the query field, the
-    // explicit Movie/TV choice, the primary Search/Match action, and (when the
-    // width allows) a status readout. The field keeps the same trailing-year
-    // contract as the Fix match dialog; no second Year control exists.
     let picker_items = |left: i32, right: i32, top: i32| -> (Rect, Rect, Rect, Rect, Rect) {
         let gap = sc(6);
         let wide_enough = right - left >= sc(520);
@@ -2577,7 +2419,6 @@ pub fn compute_card_layout_shipped_v1(
         let (s_sta, sta) = name(designer.state, "State", "State");
         let (s_syn, syn) = name(designer.synopsis, "Synopsis", "Synopsis");
         let (s_tim, tim) = name(designer.timers, "Timers", "Time");
-        // Covers are always on: no artwork entry.
         vec![
             (BTN_FIELD_DETAILS, det, s_det),
             (BTN_FIELD_STATE, sta, s_sta),
@@ -2587,8 +2428,6 @@ pub fn compute_card_layout_shipped_v1(
     };
 
     if wide {
-        // Split workspace: the editor rail on the left, the three live Discord
-        // surfaces on the right, all visible at once.
         let m = sc(32);
         let content_w = (cw - 2 * m).max(sc(600));
         let content_top = tab_bottom + sc(SP_4);
@@ -2621,9 +2460,6 @@ pub fn compute_card_layout_shipped_v1(
         };
         let stage_w = l.stage.right - l.stage.left;
         let stage_h = l.stage.bottom - l.stage.top;
-        // At the 1180x700 workspace the profile surface needs the lower band
-        // to keep its 132px cover and the timer labels inside the panel; at
-        // taller clients the member list takes its full 180px.
         let member_h = if stage_h < sc(520) {
             sc(140)
         } else {
@@ -2652,7 +2488,6 @@ pub fn compute_card_layout_shipped_v1(
         l.surfaces = [member, profile, activity];
         l.preview = profile;
 
-        // The profile surface's media rows.
         let pad = sc(SP_4);
         let banner_h = sc(30);
         let avatar_h = sc(54);
@@ -2688,8 +2523,6 @@ pub fn compute_card_layout_shipped_v1(
         l.rows = vec![l.title, l.meta, l.synopsis];
         l.tooltip = Rect::default();
 
-        // The rail's stack: heading, context, preview switch, fields, state
-        // presets, wire summary, footer actions.
         l.labels = vec![
             NamedTextRect {
                 id: "card.designer".into(),
@@ -2760,10 +2593,6 @@ pub fn compute_card_layout_shipped_v1(
                 rc: l.settings,
             },
         ];
-        // The picker band: one query field and the one primary action. The
-        // field is the same single-input contract as the dialog; the layout
-        // carries no second year control and no kind choice: universal
-        // search runs both chains for every query.
         let (pf, _pm, _pt, ps, pstat) = picker_items(
             l.picker_bar.left,
             l.picker_bar.right,
@@ -2782,8 +2611,6 @@ pub fn compute_card_layout_shipped_v1(
             style: BTN_ACCENT,
             rc: ps,
         });
-        // Preview switch row (all three already visible; the choice marks the
-        // focused surface and keeps the keyboard path identical to narrow).
         l.btns.extend(segments(
             rail_inner_l,
             rail_inner_r,
@@ -2791,7 +2618,6 @@ pub fn compute_card_layout_shipped_v1(
             sc(30),
             &surface_items(surface),
         ));
-        // Fields: 3 + 2 rows.
         let fi = field_items(false);
         l.btns.extend(segments(
             rail_inner_l,
@@ -2807,7 +2633,6 @@ pub fn compute_card_layout_shipped_v1(
             sc(34),
             &fi[3..],
         ));
-        // State presets: 2 + 2 rows.
         let mut si: Vec<(i32, String, i32)> = states
             .iter()
             .enumerate()
@@ -2870,7 +2695,6 @@ pub fn compute_card_layout_shipped_v1(
             bottom: (l.wire.bottom + sc(SP_1) + sc(16)).min(footer_top - sc(SP_1)),
         };
     } else {
-        // Narrow stack: preview, then the field rows, the footer and status.
         let (margin, content_w) = content_span(cw, dpi);
         l.rail = Rect {
             left: margin,
@@ -2918,8 +2742,6 @@ pub fn compute_card_layout_shipped_v1(
         let pad = sc(if compact { SP_2 } else { SP_3 });
         let art_w = if compact { sc(48) } else { sc(72) };
         let art_h = if compact { sc(64) } else { sc(112) };
-        // Centre the media block in the panel: the narrow stack gives the
-        // preview the leftover height, so a top-aligned block would float.
         let art_top = preview.top
             + ((preview.bottom - preview.top - art_h).max(0) / 2).max(pad);
         l.art = Rect {
@@ -3160,9 +2982,6 @@ pub fn preview_rows(act: &Activity, have: bool) -> [String; 5] {
     if header.is_empty() {
         header = "(Discord app name)".into();
     }
-    // The small slot is never populated: the wire carries no `small_image`
-    // (the composer clears it and the serializer drops it), so the preview
-    // reports the cover alone and never paints a corner icon.
     let images = act.large_image.clone();
     let mut buttons = "none".to_string();
     if !act.buttons.is_empty() {
@@ -3294,8 +3113,6 @@ pub fn parse_length_ms(length: &str) -> i64 {
     if s.is_empty() {
         return 0;
     }
-    // Providers spell the units with a space (`166 min`); fold that one space
-    // so the token pass below sees `166min`.
     let s = s.replace(" min", "min").replace(" h", "h").replace(" m", "m");
     if s.contains(':') {
         let parts: Vec<&str> = s.split(':').collect();
@@ -4582,9 +4399,6 @@ fn picker_search_run(
             failed: Vec::new(),
         });
     }
-    // A retry starts from the cached rows so its result is the whole answer,
-    // not just the legs it re-asked. An initial partial entry retries its own
-    // failed legs for the same reason.
     let providers: Vec<String> = if only.is_empty() {
         let from_cache = cached
             .as_ref()
@@ -4602,7 +4416,6 @@ fn picker_search_run(
     } else {
         only.to_vec()
     };
-    // A retry never includes a provider the scope does not use.
     let providers: Vec<String> = providers
         .into_iter()
         .filter(|p| filter.providers().contains(&p.as_str()))
@@ -4666,11 +4479,6 @@ fn picker_search_run(
         }
     }
     rows.retain(|cand| filter.includes_candidate(cand));
-        // The dialog's stored rows use the same ranking the live list paints
-        // ([`crate::search::merge_candidates_for`], which the streamed batches
-        // merge through): a finished live search and its cache replay then
-        // paint identical rows in the identical order, whatever provider
-        // answered first.
         let rows = crate::search::merge_candidates_for(title, year, None, vec![rows]);
     let rows: Vec<Candidate> = rows
         .into_iter()
@@ -4963,30 +4771,6 @@ pub fn open_external_url(url: &str) -> bool {
     ret as isize > 32
 }
 
-// "Fix match" -- the manual latch picker's pure half.
-//
-// Everything in this section is UI-free and unit-tested: the copy (frozen), the
-// enable rule, the pre-fill, the scope/keys table and the status strings. The
-// dialog window and its worker live further down; nothing here touches an HWND
-// except through the [`Rect`] table the paint/creation paths both read.
-//
-// # Scope -> key rules (the store's own derivations; spelled out here once)
-//
-//   * `Scope::Movie`  -> `movie_key(path)`    (`overrides::movie_key`): the
-//     media file's FULL path. A movie offers NO scope radios -- there is only
-//     one target -- and the dialog pins it directly.
-//   * `Scope::Season` -> `season_key_for(path)`: the folder that directly
-//     holds the episode (the `Season N` / `SNN` folder itself, otherwise the
-//     release-style folder that IS that season).
-//   * `Scope::Series` -> `series_key_for(path)`: the show folder, one level
-//     above a `Season N` folder when there is one.
-//
-// When the two derived keys are EQUAL the folder is both the season and the
-// show (a release-style folder like `Atri S01 1080p BDRip`, or an
-// absolute-numbered show folder with the episodes inside it): the dialog then
-// offers ONE radio for that folder instead of two identical targets, and says
-// so in its note. The choice is `Scope::Series` because the label describes the
-// folder as the show; the keys are identical either way.
 
 /// The Card hero's ghost repair verb. Approved copy drops the ellipsis.
 pub const FIX_MATCH_LABEL: &str = "Fix match";
@@ -5474,8 +5258,6 @@ pub fn parse_title_year(input: &str) -> (String, i32) {
                 (1900..=1999).contains(&y) || (2000..=LATEST_RELEASE_YEAR).contains(&y)
             })
     };
-    // A parenthesized suffix inverts the `Title (Year)` the Card paints:
-    // `Dune (2021)` -> `("Dune", 2021)`, `(2021)` alone -> year-only.
     if text.ends_with(')')
         && let Some(open) = text.rfind('(')
     {
@@ -5490,8 +5272,6 @@ pub fn parse_title_year(input: &str) -> (String, i32) {
             return (head, year);
         }
     }
-    // A comma/colon glued to the year (`Dune,2021`, `Dune:2021`) splits
-    // before the whitespace rule below sees one token.
     let t = text.trim_end().to_string();
     {
         let comma = t.rfind(',');
@@ -5513,15 +5293,12 @@ pub fn parse_title_year(input: &str) -> (String, i32) {
     }
     let mut parts = t.rsplitn(2, char::is_whitespace);
     let last = parts.next().unwrap_or("");
-    // The whitespace split leaves `Dune,` as the head for `Dune, 2021`: strip
-    // the one trailing separator so the title is `Dune`.
     let last_clean = last.trim_end_matches([',', ':', ')']).trim_start_matches('(');
     if !is_year(last_clean) {
         return (t, 0);
     }
     let mut head = parts.next().unwrap_or("").trim_end().to_string();
     head = head.trim_end_matches([',', ':']).trim_end().to_string();
-    // A bare `(2021)` leaves head `(` after the split; that is year-only.
     if head == "(" {
         head.clear();
     }
@@ -5654,7 +5431,6 @@ pub struct ScopeChoice {
 #[must_use]
 pub fn fix_match_scope_choices(path: &str, is_movie: bool) -> Vec<ScopeChoice> {
     if is_movie {
-        // No radios: the one target is the movie file's own key.
         return Vec::new();
     }
     let (Some(season_key), Some(series_key)) = (season_key_for(path), series_key_for(path)) else {
@@ -5667,8 +5443,6 @@ pub fn fix_match_scope_choices(path: &str, is_movie: bool) -> Vec<ScopeChoice> {
     }
     let folder = path_parent_name(path).to_string();
     if season_key == series_key {
-        // One folder is both the season and the show: one radio, labelled with
-        // that folder, plus the plain note the brief asks for.
         let note = if picker_is_season_folder(&folder) || folder_reads_as_season(&folder) {
             Some(
                 "This folder is both the show folder and its season, so one match covers every \
@@ -5940,7 +5714,6 @@ pub fn fix_match_layout(dpi: i32, screen: FixScreen, radios: usize) -> FixMatchL
     };
     l.title = title;
     l.sub = sub;
-    // The 1px `COL_BORDER` rule under the header, full client width.
     l.rule = Rect {
         left: 0,
         top: sc(70),
@@ -5961,8 +5734,6 @@ pub fn fix_match_layout(dpi: i32, screen: FixScreen, radios: usize) -> FixMatchL
                 right: m + sc(300),
                 bottom: sc(126),
             };
-            // The field frame is the border: the edit geometry expanded by
-            // 2px on every side, so the edit itself never moves.
             let pad = sc(2);
             l.name_frame = Rect {
                 left: m - pad,
@@ -6026,9 +5797,6 @@ pub fn fix_match_layout(dpi: i32, screen: FixScreen, radios: usize) -> FixMatchL
                 });
                 top += sc(24);
             }
-            // A movie offers no scope radios: collapse the dead strip and
-            // pull the status and buttons up, so no blank band remains.
-            // A series keeps the full stack.
             let (note_top, status_top, bt, bb, client_h) = if radios == 0 {
                 (sc(410), sc(410), sc(440), sc(476), sc(496))
             } else {
@@ -6215,9 +5983,6 @@ fn fix_match_worker(job: FixJob) -> FixOutcome {
                 .and_then(cached_search)
                 .map(|c| c.rows)
                 .unwrap_or_default();
-            // Universal search: both kinds, every leg `All` names, ONE list.
-            // The file's shape is only a ranking prior from here on -- a movie
-            // answer is still a row for a series file, never filtered out.
             let providers: Vec<String> = if only.is_empty() {
                 crate::search::KindFilter::All
                     .providers()
@@ -6272,9 +6037,6 @@ fn fix_match_worker(job: FixJob) -> FixOutcome {
                 }
             }
             failed.sort();
-            // Same ranking the Card list paints, so the dialog's live rows and
-            // a later cache replay agree on provider and order; the local
-            // evidence is the same one the dialog opened with.
             let rows = crate::search::merge_candidates_evidenced(
                 &name,
                 year,
@@ -6612,7 +6374,6 @@ const CLASS_EDIT: &str = "EDIT";
 const CLASS_BUTTON: &str = "BUTTON";
 const CLASS_LISTBOX: &str = "LISTBOX";
 
-// Control styles the picker composes with (stable Win32 values).
 const WS_POPUP_W: u32 = 0x8000_0000;
 const WS_CAPTION_W: u32 = crate::win32::WS_CAPTION;
 const WS_SYSMENU_W: u32 = crate::win32::WS_SYS_MENU;
@@ -6650,8 +6411,6 @@ fn ensure_fix_match_class(hinst: windows_sys::Win32::Foundation::HINSTANCE) -> b
         wc.lpfnWndProc = Some(fix_match_wnd_proc);
         wc.hInstance = hinst;
         wc.hCursor = cursor;
-        // The class brush erases the dialog canvas; kept for the process life
-        // like the main window's own class brush.
         wc.hbrBackground =
             unsafe { crate::win32::CreateSolidBrush(themed(COL_BG)) } as usize as *mut core::ffi::c_void;
         wc.lpszClassName = class.as_ptr();
@@ -6711,11 +6470,6 @@ impl FixMatchState {
         let q = metadata_core::context::resolve_query(&now.raw_title, &now.path);
         let (seed_query, seed_from_card, seed_movie) = {
             let st = ui();
-            // The dialog opens on the kind of the record that is actually
-            // selected (else the shown card's kind, else the filename's), never
-            // on a stale search choice. The card's query belongs to the file it
-            // was seeded for: playing a DIFFERENT file (a switch, or a next
-            // episode) re-seeds from that file instead of reusing the old one.
             let same_file = st.picker_path == now.path;
             let movie = st
                 .picker
@@ -6725,10 +6479,6 @@ impl FixMatchState {
             (st.picker.query.clone(), same_file, movie)
         };
         let is_movie = if !seed_from_card || seed_query.trim().is_empty() {
-            // No selected record for THIS file: the folder decides the
-            // movie-vs-series intent (a file beside its own episode siblings is
-            // an episode), and only a folder with no episode siblings falls
-            // back to the filename's own kind.
             match crate::search::detect_shape(&now.path) {
                 crate::search::MediaShape::Series => false,
                 crate::search::MediaShape::Movie => q.kind == Kind::MOVIE,
@@ -6821,15 +6571,10 @@ impl FixMatchState {
             };
             return Err(message);
         }
-        // The name field starts from the resolver's own parse of the raw
-        // title; the user edits from there. A query typed for ANOTHER file is
-        // not this file's query, so a switch re-seeds.
         let seed = fix_match_seed_query(&seed_query, seed_from_card, &now.raw_title, &now.path);
         state.set_text(FM_ID_NAME, &seed);
         state.seed = seed.clone();
         state.apply_screen();
-        // Same cache path as the card: a title the poll already prefetched
-        // opens the dialog populated, with no network wait.
         if ui().cache_enabled {
             state.seed_from_cache(&seed);
         }
@@ -6903,9 +6648,6 @@ impl FixMatchState {
             unsafe { crate::win32::SendMessageW(h, WM_SETFONT, font as usize, 1) };
             Ok(())
         };
-        // Statics: the header rule, the labels, the status, the legacy busy
-        // static (kept, hidden; the owner-drawn empty panel covers it), the
-        // applied line, plus the owner-drawn empty panel and progress strip.
         for id in [
             FM_ID_TITLE,
             FM_ID_SUB,
@@ -6922,13 +6664,8 @@ impl FixMatchState {
         for id in [FM_ID_RULE, FM_ID_EMPTY, FM_ID_PROGRESS] {
             add(id, CLASS_STATIC, base | crate::win32::SS_OWNERDRAW)?;
         }
-        // The field frame first (it sits behind the borderless edit).
         add(FM_ID_NAME_FRAME, CLASS_STATIC, base | crate::win32::SS_OWNERDRAW)?;
-        // The one query edit, borderless: the owner-drawn frame above is the
-        // border. It keeps `ES_AUTOHSCROLL`; the year is parsed from its text.
         add(FM_ID_NAME, CLASS_EDIT, base | tab | ES_AUTOHSCROLL)?;
-        // The explicit Movie/TV choice: the first radio opens the group, so
-        // the arrow keys move within it without leaving the dialog tab order.
         add(
             FM_ID_KIND_MOVIE,
             CLASS_BUTTON,
@@ -6939,10 +6676,6 @@ impl FixMatchState {
             CLASS_BUTTON,
             base | tab | BS_AUTORADIOBUTTON | crate::win32::BS_OWNERDRAW,
         )?;
-        // The results list: fixed-height owner-drawn rows with strings kept,
-        // so `LB_ADD_STRING` still stores the row text and `WM_DRAWITEM`
-        // paints the two-line chip from the candidates table. No `WS_BORDER`:
-        // the owner-drawn rows and the empty panel carry the surface.
         add(
             FM_ID_LIST,
             CLASS_LISTBOX,
@@ -6952,13 +6685,6 @@ impl FixMatchState {
                 | crate::win32::LBS_HASSTRINGS
                 | tab,
         )?;
-        // Owner-drawn push buttons: every one paints through the main
-        // window's button anatomy (`paint_button_face`) in `WM_DRAWITEM`.
-        // Search is the secondary outline, Match the single accent primary,
-        // Cancel subtle, Use-my-text quiet text; the matched screen's three
-        // are secondaries. The scope radios are owner-drawn autoradios: the
-        // system keeps the `BM_GETCHECK` state, `WM_DRAWITEM` paints the
-        // circle, and clicks re-check explicitly (see `set_radio_checked`).
         let owner = crate::win32::BS_OWNERDRAW;
         add(FM_ID_SEARCH, CLASS_BUTTON, base | tab | owner)?;
         add(
@@ -6978,7 +6704,6 @@ impl FixMatchState {
             base | tab | owner | BS_DEFPUSHBUTTON,
         )?;
         add(FM_ID_CANCEL, CLASS_BUTTON, base | tab | owner)?;
-        // The matched screen's three actions.
         add(FM_ID_REFRESH, CLASS_BUTTON, base | tab | owner)?;
         add(FM_ID_CHANGE, CLASS_BUTTON, base | tab | owner)?;
         add(FM_ID_AUTO, CLASS_BUTTON, base | tab | owner)?;
@@ -6991,9 +6716,6 @@ impl FixMatchState {
     fn apply_screen(&mut self) {
         use windows_sys::Win32::Foundation::RECT;
         if self.screen == FixScreen::Search {
-            // The selected candidate overrides the filename classification, so
-            // the radios/layout always reflect the candidate kind. A same-kind
-            // pick is a no-op, preserving a Series-vs-Season user pick.
             self.sync_scope_to_selection();
         }
         self.layout = fix_match_layout(self.dpi, self.screen, self.choices.len());
@@ -7019,7 +6741,6 @@ impl FixMatchState {
                 );
             }
         };
-        // The window's own outer size follows the screen's client size.
         let mut wrc = wr(Rect {
             left: 0,
             top: 0,
@@ -7068,15 +6789,10 @@ impl FixMatchState {
                     place(*id, rc, true);
                 }
                 place(FM_ID_PROGRESS, l.progress, self.busy);
-                // The list shows only when it has rows and no job runs; the
-                // owner-drawn empty panel covers the same area in every other
-                // case so the box is never blank.
                 let show_list = !self.busy && !self.candidates.is_empty();
                 let show_empty = !show_list;
                 place(FM_ID_EMPTY, l.empty, show_empty);
                 place(FM_ID_LIST, l.list, show_list);
-                // Legacy busy static: kept for the control table, hidden — the
-                // empty panel carries the busy line now.
                 place(FM_ID_SEARCHING, l.searching, false);
                 place(FM_ID_SCOPE_LABEL, l.scope_label, !self.choices.is_empty());
                 let radios = [FM_ID_RADIO_A, FM_ID_RADIO_B];
@@ -7093,11 +6809,8 @@ impl FixMatchState {
                 let status = self.status_text_for_screen();
                 place(FM_ID_STATUS, l.status, !status.is_empty());
                 for (id, rc) in l.buttons.clone() {
-                    // The quiet secondary appears with the no-results copy only;
-                    // Match and Cancel are always available.
                     place(id, rc, id != FM_ID_USE_TEXT || self.no_results_shown());
                 }
-                // The matched screen's controls are hidden here.
                 for id in [FM_ID_APPLIED, FM_ID_REFRESH, FM_ID_CHANGE, FM_ID_AUTO] {
                     place(
                         id,
@@ -7117,8 +6830,6 @@ impl FixMatchState {
                 self.set_text(FM_ID_KIND_MOVIE, FIX_MATCH_KIND_MOVIE);
                 self.set_text(FM_ID_KIND_TV, FIX_MATCH_KIND_TV);
                 self.reset_kind_state();
-                // While busy the disabled Search button doubles as a loading
-                // indicator; the empty panel and the strip carry it too.
                 let search_label = if self.busy {
                     self.busy_label.clone()
                 } else {
@@ -7152,7 +6863,6 @@ impl FixMatchState {
                 }
                 let status = self.status_text_for_screen();
                 place(FM_ID_STATUS, l.status, !status.is_empty());
-                // The search screen's controls are hidden here.
                 for id in [
                     FM_ID_NAME_LABEL,
                     FM_ID_NAME_FRAME,
@@ -7295,7 +7005,6 @@ fn paint_fix_match_radio(
         return;
     }
     fill_rect_solid(hdc, rc, COL_BG);
-    // A square circle is a rounded rect with half-diameter corners.
     let d = sc(16);
     let cy = (rc.top + rc.bottom) / 2;
     let top = cy - d / 2;
@@ -7717,8 +7426,6 @@ fn fix_match_paint_item(
             // SAFETY: fonts created below and deleted after the paint.
             unsafe {
                 let title_font = brand::display(sc(FS_TITLE));
-                // The body/hint reads at body size (13), not the 11px hint
-                // size: the 200px panel has room and the hint is guidance.
                 let body_font = brand::ui(sc(FS_BODY), brand::UI_WEIGHT);
                 if title_font.is_null() || body_font.is_null() {
                     if !title_font.is_null() {
@@ -7794,8 +7501,6 @@ impl FixMatchState {
         }
         self.is_movie = is_movie;
         self.choices = fix_match_scope_choices(&self.path, is_movie);
-        // A Movie/TV switch re-latches, it never re-searches: the same rows are
-        // re-ordered with the newly chosen kind as the soft prior.
         if !self.candidates.is_empty() {
             let (name, year) = self.parsed_query();
             let evidence = crate::search::LocalEvidence::from_path(&self.path);
@@ -8173,10 +7878,6 @@ impl FixMatchState {
         let cache_key = cache_on.then(|| key.clone());
         let mut only: Vec<String> = Vec::new();
         if cache_on && let Some(cached) = cached_search(&key) {
-            // An `All` entry already carries both kinds: every row is listed,
-            // never narrowed to the radio's kind, and re-ranked with this
-            // file's own shape and local evidence so the instant paint matches
-            // the worker's.
             let rows = crate::search::merge_candidates_evidenced(
                 &name,
                 year,
@@ -8281,9 +7982,6 @@ impl FixMatchState {
         if self.busy {
             return;
         }
-        // The candidate drives the scope: sync the stored flag/table first so
-        // the provisional save, the full pin and the radios all see the
-        // candidate kind, not the filename fallback.
         self.sync_scope_to_selection();
         let cand = self.selected_candidate();
         let (Some(cand), Some((scope, key))) = (cand, self.selected_target()) else {
@@ -8296,9 +7994,6 @@ impl FixMatchState {
         let path = self.path.clone();
         match fix_match_save_provisional(&cand, scope, &key, &path) {
             Ok(_) => {
-                // Non-blocking: the dialog stays busy for the full fetch, but
-                // the correction is already on disk -- the card refreshes on
-                // the next poll tick and the status already says matched.
                 ui().set_status_text(FIX_MATCH_FETCHING_STATUS);
                 self.status = Some(FIX_MATCH_FETCHING_STATUS.to_string());
                 self.spawn_job(FixJob::Latch {
@@ -8397,9 +8092,6 @@ impl FixMatchState {
             FixOutcome::Search(rows) => {
                 self.searched = true;
                 self.candidates = rows;
-                // The picked row belongs to the listed set: a batch that no
-                // longer carries it drops the pick (the next list's
-                // auto-highlight is not a choice), one that does keeps it.
                 if let Some(picked) = self.picked.as_deref()
                     && !self.candidates.iter().any(|c| fix_pick_key(c) == picked)
                 {
@@ -8410,8 +8102,6 @@ impl FixMatchState {
                 self.apply_screen();
             }
             FixOutcome::SearchDone => {
-                // The dialog's own Search is one shot (it publishes
-                // `Search`), so a stream end never reaches this screen.
             }
             FixOutcome::Latched(status) => {
                 self.status = Some(status);
@@ -8426,10 +8116,6 @@ impl FixMatchState {
                 self.apply_screen();
             }
             FixOutcome::ProvisionalKept(status) => {
-                // The full table never arrived, but the correction did: the
-                // card already shows it (next poll rendered the provisional),
-                // so the dialog reports the pending copy -- informational, not
-                // the red error -- and stays open. The store is not touched.
                 self.status_error = false;
                 self.status = Some(status);
                 self.apply_screen();
@@ -8494,29 +8180,14 @@ pub unsafe extern "system" fn fix_match_wnd_proc(
         }
         if msg == crate::win32::WM_DESTROY {
             let ptr = fix_match_state_ptr(hwnd);
-            // No thread quit here, ever (see the invariant on
-            // [`fix_match_wnd_proc`]): the modal loop exits when this dialog
-            // ceases to exist, so every close route -- Cancel, the titlebar
-            // X, Esc, Match, Refresh, Use-automatic -- ends at the
-            // `IsWindow(dlg) == 0` check with nothing left queued. A nested
-            // or stale destroy (the `create_controls` failure path zeroes
-            // userdata first, or a second open racing the first) must not
-            // clear the outer dialog's handle.
             let is_tracked =
                 hwnd as usize == FIX_MATCH_HWND.load(std::sync::atomic::Ordering::SeqCst);
             if !ptr.is_null() {
-                // Move the closing status out BEFORE freeing the box: the
-                // modal run reads it after its loop ends.
                 let state = Box::from_raw(ptr);
-                // The dialog's edited query/kind is the same canonical search
-                // state the Card workspace owns: write it back before the box
-                // is freed.
                 *FIX_MATCH_LAST_QUERY
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) =
                     (state.find_text(), state.is_movie);
-                // Stop the strip timer while the dialog still exists; the
-                // no-quit invariant below still holds.
                 state.kill_progress_timer();
                 if is_tracked {
                     *FIX_MATCH_RESULT
@@ -8540,14 +8211,12 @@ pub unsafe extern "system" fn fix_match_wnd_proc(
             } else if is_tracked {
                 FIX_MATCH_HWND.store(0, std::sync::atomic::Ordering::SeqCst);
             }
-            // Deliberately no `PostQuitMessage`: see the invariant above.
             return 0;
         }
         if msg == WM_TIMER {
             let ptr = fix_match_state_ptr(hwnd);
             if !ptr.is_null() && wparam == FIX_MATCH_TIMER_ID && (*ptr).busy {
                 (*ptr).progress_phase = (*ptr).progress_phase.wrapping_add(1);
-                // Invalidates this dialog's own controls only.
                 crate::win32::InvalidateRect((*ptr).h(FM_ID_PROGRESS), std::ptr::null(), 1);
                 crate::win32::InvalidateRect((*ptr).h(FM_ID_EMPTY), std::ptr::null(), 1);
             }
@@ -8621,10 +8290,6 @@ pub unsafe extern "system" fn fix_match_wnd_proc(
                 FM_ID_AUTO if code == crate::win32::BN_CLICKED => state.start_auto(),
                 FM_ID_LIST if code == LBN_DBLCLK => state.start_latch(),
                 FM_ID_LIST if code == LBN_SELCHANGE => {
-                    // A new pick can flip the kind (movie <-> series): refresh
-                    // the radios/layout on a change, otherwise keep the
-                    // Series-vs-Season user pick untouched. The pick itself is
-                    // recorded so the next batch keeps this row.
                     state.pick_selected_row();
                     if state.sync_scope_to_selection() {
                         state.apply_screen();
@@ -8647,8 +8312,6 @@ pub unsafe extern "system" fn fix_match_wnd_proc(
                 FM_ID_NAME
                     if code == crate::win32::EN_SETFOCUS || code == crate::win32::EN_KILLFOCUS =>
                 {
-                    // The field frame lights on focus: repaint this dialog's
-                    // own frame static only.
                     crate::win32::InvalidateRect(state.h(FM_ID_NAME_FRAME), std::ptr::null(), 1);
                 }
                 _ => {}
@@ -8749,8 +8412,6 @@ fn fix_match_run(owner: HWND, now: &app_support::config::NowPlaying) -> Option<S
             let (exit, repost) = fix_match_pump_step(true, r == 0, r == -1);
             if exit {
                 if repost {
-                    // Not ours: hand the app's own quit back to the queue so
-                    // `tray::message_loop` still sees it.
                     crate::win32::PostQuitMessage(msg.wParam as i32);
                 }
                 break;
@@ -8762,9 +8423,6 @@ fn fix_match_run(owner: HWND, now: &app_support::config::NowPlaying) -> Option<S
                 crate::win32::DestroyWindow(dlg);
                 continue;
             }
-            // Enter in the name/year edits starts Search; Enter on the results
-            // list starts Match. Checked here because the edits swallow
-            // `VK_RETURN` before the parent wndproc ever sees it.
             if msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN as usize {
                 let focus = windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus();
                 let state = &mut *ptr;
@@ -8828,9 +8486,6 @@ pub fn open_fix_match() {
         if !query.trim().is_empty() {
             st.picker.set_query(query);
         }
-        // The dialog's own kind shaped the override IT saved; it must not
-        // rewrite the main search's explicit scope (that write path is the
-        // Advanced filter, and a dialog close is not a search edit).
     }
     if let Some(status) = status {
         ui().set_status_text(status);
@@ -8909,9 +8564,6 @@ impl UiState {
         self.pressed_x = -1;
         self.focus_id = 0;
         self.synopsis_pinned = false;
-        // A preload that landed while the card was closed is applied before
-        // priming, so the list opens on the playing title's rows with no
-        // network wait.
         self.on_preload_done();
         self.prime_picker();
         self.invalidate();
@@ -8930,10 +8582,6 @@ impl UiState {
         let Some(now) = app_support::config::live_now_playing() else {
             return;
         };
-        // The field follows the playing file: an empty field is seeded, and a
-        // path change (a switch, or the next episode) re-seeds even when the
-        // title is unchanged. A query the user typed for THIS file survives
-        // every later poll; a query for the previous file does not.
         let switched = !self.picker_path.is_empty() && self.picker_path != now.path;
         if self.picker.query.trim().is_empty() || switched {
             self.picker
@@ -8954,7 +8602,6 @@ impl UiState {
             self.picker.busy = true;
             self.picker.push_search(generation, rows);
             self.picker.finish_search_now(generation);
-            // Approved copy: no "(cached)" marker on the Card.
             self.preload.applied = true;
         }
     }
@@ -8975,10 +8622,6 @@ impl UiState {
             return None;
         }
         let narrowed = rows_for_year(pre.rows.clone(), year);
-        // A year the file carried must not empty the instant paint: providers
-        // disagree about release years, so a strict narrow is allowed to fall
-        // back to the preload's own rows. Either way the local evidence
-        // re-ranks them, so the instant paint matches the dialog's order.
         let prefer = if self.picker_path.trim().is_empty() {
             None
         } else {
@@ -9025,18 +8668,12 @@ impl UiState {
         if title.trim().is_empty() {
             return;
         }
-        // Universal search: the backend still classifies the playing file,
-        // but the search itself always runs both chains under `All`.
         let _inferred = crate::search::auto_filter(
             crate::search::detect_shape(&now.path),
             crate::search::detect_class(&now.path),
         );
         let filter = crate::search::KindFilter::All;
         let key = crate::search::search_cache_key(&title, year, filter);
-        // A path change is a re-latch even when the work's key is unchanged:
-        // the next episode keeps the show identity and re-derives its own
-        // season/episode, and a switch to another file behind the same title
-        // must not keep a consumed preload.
         let path_changed = !self.preload.path.is_empty() && self.preload.path != now.path;
         if path_changed {
             self.preload.path = now.path.clone();
@@ -9045,9 +8682,6 @@ impl UiState {
                 self.prime_picker();
             }
         }
-        // A card opened before the poll loop published the playing title gets
-        // its seed on the first poll that has one. One prime per preload key;
-        // a query the user clears afterwards is never re-seeded.
         if self.cur_view == View::Card
             && !self.picker.busy
             && self.preload.key == key
@@ -9059,7 +8693,6 @@ impl UiState {
         if self.preload.key == key && (self.preload.ready || self.preload_cancel.is_some()) {
             return;
         }
-        // A different work: the query belonged to the previous title.
         let changed = !self.preload.title.is_empty()
             && (!self.preload.title.trim().eq_ignore_ascii_case(title.trim())
                 || (self.preload.year > 0 && year > 0 && self.preload.year != year));
@@ -9113,9 +8746,6 @@ impl UiState {
         let path = now.path.clone();
         std::thread::spawn(move || {
             let start = Instant::now();
-            // A failed or cancelled pass still publishes (with no rows): that
-            // is what clears the cancel and lets a later poll retry, instead of
-            // leaving the key stuck as in-flight forever.
             let rows = match search(&title, year, filter, &only, &|_| {}) {
                 Ok(report) if cancel.err().is_none() => report.rows,
                 _ => Vec::new(),
@@ -9193,9 +8823,6 @@ impl UiState {
             View::Card => {
                 self.enter_card();
                 if !playing {
-                    // The caller's `false` is authoritative even if the global
-                    // now-playing mirror still carries a previous title: no
-                    // player means no filename-derived scope.
                     self.picker.set_filter(crate::search::KindFilter::All);
                     self.picker.set_query(String::new());
                 }
@@ -9217,7 +8844,6 @@ impl UiState {
 
     /// `enterSettings` (`go\window.go:1230`).
     pub fn enter_settings(&mut self) {
-        // The registry is the source of truth; the config only caches it.
         self.startup_state =
             crate::settings::sync_startup_cache(&app_support::config::config_path());
         let cfg = app_support::config::load_config();
@@ -9310,7 +8936,6 @@ impl UiState {
             return false;
         }
         let Some(l) = self.layout_card(hwnd) else {
-            // Headless (unit tests): clamp against the logical capacity alone.
             let capacity = 1usize;
             let max = picker_max_top(self.picker.candidates.len(), capacity);
             let want = (self.picker.top as i32).saturating_add(rows).clamp(0, max as i32);
@@ -9537,8 +9162,6 @@ impl UiState {
                     && self.sel_row >= 0
                     && (self.sel_row as usize) < n =>
             {
-                // Stash the blocking shell-out; the wndproc runs it with `UI`
-                // released (`run_blocking_ui`), never under the guard.
                 self.pending_blocking = Some(BlockingUi::OpenFolder);
                 true
             }
@@ -9650,8 +9273,6 @@ impl UiState {
         CardLayoutState {
             advanced: self.advanced_open,
             has_selection,
-            // Applying changes the playing title, so it needs a playing title
-            // AND a row the user picked: an auto highlight is not a choice.
             can_apply: self.has_picked_candidate() && playing,
             playing,
             filter: self.picker.filter,
@@ -9719,13 +9340,11 @@ impl UiState {
         x: i32,
         y: i32,
     ) -> Option<BlockingUi> {
-        // The status bar is chrome: a release at/below it never fires a row.
         let pressed = button_at_point_above_status(&layout.btns, layout.status.top, x, y);
         if pressed == 0 {
             return None;
         }
         self.focus_id = pressed;
-        // Tabs route through the same `switch_tab` the wndproc uses.
         if self.switch_tab(pressed) {
             return None;
         }
@@ -9793,8 +9412,6 @@ impl UiState {
         y: i32,
         dpi: i32,
     ) -> Option<BlockingUi> {
-        // Inside an open picker the button table wins, exactly as `release_at`
-        // does: Apply/Fix are actions, result rows are selections.
         if self.picker.open && pt_in_rect(layout.picker_results, x, y) {
             let pb = self.pressed_btn;
             self.pressed_btn = 0;
@@ -9841,8 +9458,6 @@ impl UiState {
         if !reason.is_empty() || id != BTN_FIX_MATCH {
             return reason;
         }
-        // The picker's own enable rule (no tooltip lie: the same rule dims the
-        // button and refuses the click).
         fix_match_blocked_reason(app_support::config::live_now_playing().is_some(), id)
     }
 
@@ -9901,8 +9516,6 @@ impl UiState {
                 {
                     nx = true;
                 }
-                // Absolute: the viewport row plus the scroll offset, so the
-                // highlight tracks the folder, not the slot.
                 let want = if nr >= 0 { l.list_top + nr } else { -1 };
                 if nb == self.hover_btn && want == self.hover_row && nx == self.hover_x {
                     return false;
@@ -9989,11 +9602,6 @@ impl UiState {
                     return None;
                 };
                 if self.picker.open && pt_in_rect(l.picker_results, x, y) {
-                    // One table: actions win over selection. Row hits resolve
-                    // through `picker_result_at` (the same `picker_row_rects`
-                    // the paint reads), and a release only selects when its
-                    // press armed the same row -- a button-up with no matching
-                    // press activates nothing.
                     let pb = self.pressed_btn;
                     self.pressed_btn = 0;
                     self.pressed_x = -1;
@@ -10007,10 +9615,6 @@ impl UiState {
                     }
                     if let Some(idx) = picker_result_at(&l, &self.picker, x, y, window_dpi(hwnd)) {
                         if pb == BTN_PICKER_RESULT_AT + idx as i32 {
-                            // Selecting a row previews it locally; it sends nothing.
-                            // With something playing, the pick IS the latch: the
-                            // same click applies it, so a user never has to hunt for
-                            // the Apply row after choosing.
                             self.select_candidate(idx);
                             self.reveal_picker_selected(hwnd);
                             self.focus_id = BTN_PICKER_SEARCH;
@@ -10111,9 +9715,6 @@ impl UiState {
                 let r = row_at_point_above_status(&l.rows, l.status.top, x, y);
                 if r >= 0 {
                     let abs = l.list_top + r;
-                    // The list takes focus on click, mirroring the keyboard: a
-                    // stale button ring would otherwise keep Enter on a button
-                    // instead of the row just clicked.
                     let was_focused = self.focus_id != 0;
                     self.focus_id = 0;
                     if self.sel_row != abs || was_focused {
@@ -10209,7 +9810,6 @@ impl UiState {
     /// Returns a [`BlockingUi`] the wndproc must run with `UI` RELEASED.
     #[must_use]
     pub fn do_settings_action(&mut self, hwnd: HWND, id: i32) -> Option<BlockingUi> {
-        // Media action rows: the same commands as Main.
         if id == BTN_ADD {
             return Some(BlockingUi::AddDir);
         }
@@ -10234,7 +9834,6 @@ impl UiState {
             self.on_report_at(hwnd, &path);
             return None;
         }
-        // Behaviour pills: each flips its stored bool.
         if id == BTN_DISCORD {
             self.on_toggle_discord();
             return None;
@@ -10270,8 +9869,6 @@ impl UiState {
     /// ([`BlockingUi::FixMatch`] opens the manual latch picker).
     #[must_use]
     pub fn do_card_action(&mut self, _hwnd: HWND, id: i32) -> Option<BlockingUi> {
-        // One table: result rows are buttons too. Selecting previews locally
-        // and never sends; Apply (or playing auto-latch) is the only writer.
         if id >= BTN_PICKER_RESULT_AT
             && ((id - BTN_PICKER_RESULT_AT) as usize) < self.picker.candidates.len()
         {
@@ -10284,15 +9881,10 @@ impl UiState {
             return None;
         }
         if id == BTN_FIX_MATCH {
-            // Singleton-safe: a second open while the modal dialog lives is
-            // refused here as well as in `open_fix_match` (the tray menu
-            // pumps every thread message while the loop runs).
             if !fix_match_dialog_hwnd().is_null() {
                 self.set_status_text(FIX_MATCH_ALREADY_OPEN_REASON);
                 return None;
             }
-            // The enable rule, enforced AT INPUT as well as in the paint: a
-            // dimmed button that still opened the picker would be a lie.
             if fix_match_enabled(app_support::config::live_now_playing().as_ref()) {
                 return Some(BlockingUi::FixMatch);
             }
@@ -10319,8 +9911,6 @@ impl UiState {
             return None;
         }
         if id == BTN_PICKER_SEARCH {
-            // One verb, one job: Search always runs the query. Selecting a row
-            // is what previews it, and applying a match is its own control.
             if self.picker.search_allowed() {
                 self.card_picker_search();
             } else if self.picker.busy {
@@ -10460,11 +10050,7 @@ impl UiState {
             return false;
         };
         self.picker.selected = idx;
-        // The viewport follows the selection, so a selected row is always the
-        // row the paint shows highlighted and the click resolves.
         self.picker.top = idx.min(self.picker.candidates.len().saturating_sub(1));
-        // The pick lives in the picker model, so every query edit, scope change
-        // or new search clears it with the result set it belonged to.
         self.picker.pick_row(picked_row_key(&cand));
         self.set_local_preview(&cand);
         self.invalidate();
@@ -10521,8 +10107,6 @@ impl UiState {
     /// what is on screen as it lands.
     pub fn card_picker_search(&mut self) -> bool {
         let Some((generation, title, year, filter)) = self.picker.begin_search() else {
-            // Either busy (already says so) or the query itself is refused:
-            // say which, in the field's own line.
             if !self.picker.busy
                 && let Some(issue) = crate::search::query_issue(&self.picker.query)
             {
@@ -10553,13 +10137,11 @@ impl UiState {
                     cached.rows.len()
                 ));
                 self.picker.finish_search_now(generation);
-                // Approved copy: no "(cached)" marker on the Card.
                 self.invalidate();
                 return true;
             }
             only = cached.failed.clone();
         } else if self.cache_enabled && year > 0 {
-            // A yearless entry still paints the typed year's rows at once.
             let yearless = crate::search::search_cache_key(&title, 0, filter);
             if let Some(cached) = cached_search(&yearless) {
                 let rows = rows_for_year(cached.rows, year);
@@ -10592,10 +10174,6 @@ impl UiState {
                 &only,
                 &emit as &(dyn Fn(Vec<metadata::Candidate>) + Send + Sync),
             ) {
-                // The finish repaints the final merged answer over the last
-                // batch: the painted list and the stored cache entry are the
-                // same rows in the same order, not the arrival order of the
-                // last leg to answer.
                 Ok(report) => {
                     if !report.rows.is_empty() {
                         push(FixOutcome::Search(report.rows));
@@ -10620,7 +10198,6 @@ impl UiState {
     #[must_use]
     pub fn has_picked_candidate(&self) -> bool {
         if !self.picker.open {
-            // Nothing on screen can be a choice: the list is closed.
             return false;
         }
         match (self.picker.selected_candidate(), self.picker.picked.as_deref()) {
@@ -10641,11 +10218,8 @@ impl UiState {
     pub fn card_picker_match(&mut self) -> bool {
         if !self.has_picked_candidate() {
             if self.picker.busy {
-                // Nothing picked yet and the job is running: the old wait.
                 return false;
             }
-            // A row the user never picked is not a target, even if it is
-            // highlighted by the search's initial index.
             self.picker.status = "Pick a result row first.".to_string();
             self.invalidate();
             return false;
@@ -10662,8 +10236,6 @@ impl UiState {
         };
         let path = now.path;
         let matched_movie = crate::search::matched_kind_is_movie(&cand);
-        // The matched record's own kind owns the latch target: a series is
-        // never latched as a movie because the search was seeded the other way.
         let (scope, key) = if matched_movie {
             let key = metadata::overrides::movie_key(&path);
             if key.is_empty() {
@@ -10695,9 +10267,6 @@ impl UiState {
                 self.picker_path = path.clone();
                 self.picker.generation += 1;
                 let generation = self.picker.generation;
-                // Every batch of the search that was still streaming carries
-                // the old generation, so it is stale from here on; the queue is
-                // cleared so none of it is even applied.
                 self.picker_slot
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -10830,19 +10399,12 @@ impl UiState {
 
     /// `onSettingsKeyDownEx` (`go\window.go:1358`).
     pub fn on_settings_key_down_ex(&mut self, hwnd: HWND, vk: u32, shift: bool) -> bool {
-        // The Card picker owns its text-entry keys before the generic focus
-        // travel. Backspace arrives as WM_CHAR; Enter searches (or matches an
-        // open result); Escape closes the result overlay; Up/Down move the
-        // result selection while it is open.
         if self.cur_view == View::Card {
             if self.picker.open && vk == VK_ESCAPE {
                 self.picker.close_results();
                 return true;
             }
             if self.focus_id == BTN_PICKER_FIELD && vk == VK_RETURN {
-                // Enter on the field is the one search verb; while results are
-                // open it previews the highlighted row instead of running a
-                // second, differently-named action.
                 if self.picker.open {
                     let idx = self.picker.selected;
                     self.select_candidate(idx);
@@ -10859,9 +10421,6 @@ impl UiState {
                     } else {
                         (self.picker.selected + 1).min(n - 1)
                     };
-                    // Moving the highlight previews the row it lands on: the
-                    // keyboard and the mouse select the same way. The viewport
-                    // follows the selection (`select_candidate` owns `top`).
                     self.select_candidate(next);
                     self.reveal_picker_selected(hwnd);
                     self.invalidate();
@@ -10888,8 +10447,6 @@ impl UiState {
                 return true;
             }
         }
-        // The Main folder list owns its navigation keys while it has rows;
-        // every other key keeps the ported focus/scroll/activate behaviour.
         if self.on_main_list_key(hwnd, vk) {
             return true;
         }
@@ -10964,8 +10521,6 @@ impl UiState {
                     return false;
                 }
                 let id = self.focus_id;
-                // Stash the blocking action for the wndproc to run with `UI`
-                // RELEASED (`run_blocking_ui`); never run it under this guard.
                 self.pending_blocking = self.activate_focused(hwnd, id);
                 true
             }
@@ -10977,7 +10532,6 @@ impl UiState {
     pub fn refresh_dir_list(&mut self) {
         self.ui_dirs = app_support::config::load_config().dirs;
         let n = self.ui_dirs.len() as i32;
-        // A shrunk list must never leave the selection pointing past its end.
         self.sel_row = clamp_sel_row(self.sel_row, self.ui_dirs.len());
         if self.hover_row >= n {
             self.hover_row = -1;
@@ -11118,10 +10672,6 @@ impl UiState {
             return "Playing in PotPlayer".to_string();
         }
         if self.local_preview.is_some() {
-            // One true sentence, whatever PotPlayer is doing: this preview has
-            // not been sent. The old "nothing playing" claimed playback was
-            // idle even while a title played, which the neighbouring previews
-            // contradicted in the same frame.
             let _ = playing;
             return LOCAL_PREVIEW_STATUS.to_string();
         }
@@ -11182,9 +10732,6 @@ impl UiState {
             kind.is_movie(),
             &self.card_specs_state.for_kind(kind),
         );
-        // One source of truth: the preview applies the same designer choices
-        // the UI publishes to the sender, so the panel and the wire cannot
-        // drift.
         (self.designer.apply(card), true)
     }
 
@@ -11256,9 +10803,6 @@ impl UiState {
             return;
         }
         self.card_specs_state = cfg.effective_card_specs();
-        // The sender composes with the mirror at its next poll, so the new
-        // preset takes effect with no restart. A failed save publishes
-        // nothing: the mirror keeps the last good specs.
         app_support::config::set_live_card_specs(self.card_specs_state.clone());
         let cur = self.card_specs_state.for_kind(kind);
         let (_, states) = presence::cardspec::card_presets();
@@ -11490,15 +11034,6 @@ impl UiState {
         } else if let Some(e) = &err {
             app_logf(&format!("{lname}: failed: {}", e.message));
         } else {
-            // `onScanDone` (`go\window.go:2749`). The `unresolved-at-scan-time` field
-            // is the per-FILE `stats.not_found`, not the per-KEY `keys_not_found`
-            // the done-text gate above reads — the two agree only when a file
-            // yields exactly one key (`scan.rs:180`/`183` carries a third meaning
-            // under the same name: `not_found` = `files_pending`). The summary is
-            // sampled before the async catch-up pass runs, so an honest nonzero
-            // here can coexist with a later successful fetch. Deliberate
-            // departure from Go's `not-found` field name, which reads as a
-            // verdict; this one states the sampling instant.
             app_logf(&format!(
                 "{lname}: complete files={} skipped={} unique={} resolved={} cached={} fetched={} unresolved-at-scan-time={} errors={} denied={} foldersScanned={} foldersSkipped={} filesSkipped={}",
                 stats.files,
@@ -11552,9 +11087,6 @@ impl UiState {
             "{lname}: started (dirs={} force={force})",
             dirs.len()
         ));
-        // Worker thread: it may never touch the UI nor lock the process-wide
-        // `UI` mutex; it publishes a snapshot and posts async messages
-        // (production wiring posts to `hwnd`).
         let cancel_clone = cancel.clone();
         let shared = self.scan_shared.clone();
         let run = self.scan_run.clone();
@@ -11594,9 +11126,6 @@ impl UiState {
                     }
                     Err(e) => {
                         let message = e.message().to_string();
-                        // `library::Error` carries only a message and no
-                        // cancel flag, so a failed run is a cancel exactly
-                        // when the cancel fired.
                         let cancelled = cancel_clone.is_cancelled();
                         snap.stats = Stats {
                             cancelled,
@@ -11669,7 +11198,6 @@ impl UiState {
         self.set_status_text(text);
     }
 
-    // -- settings handlers (`go\settings_sections.go:594-694`) -----------------
 
     /// `onClearMetadata` (`go\settings_sections.go:594`), post-confirm half only:
     /// the modal `confirm_clear` runs OUTSIDE the `UI` guard in `run_blocking_ui`.
@@ -11832,13 +11360,6 @@ pub fn create_ui_font(height: i32, weight: i32) -> Gdi::HFONT {
     brand::ui(height.abs(), weight)
 }
 
-// Antialiased geometry (GDI+).
-//
-// The whole client area is already painted into one memory DC and blitted, so
-// one GDI+ `Graphics` wrapped around that DC's HDC smooths every rounded fill
-// and ring in the frame. It lives in a thread-local because the paint is
-// single-threaded on the UI thread and because `fill_round_rect` is called from
-// a dozen paint sites that have no business threading a context through.
 
 thread_local! {
     /// The current frame's `GpGraphics*` as a raw address (0 = none).
@@ -11910,7 +11431,6 @@ fn gdip_fill_round_rect(rc: Rect, color: u32, radius: i32) -> bool {
         return false;
     }
     let r = radius.clamp(0, (rc.right - rc.left).min(rc.bottom - rc.top) / 2); // SAFETY: every handle is created and released within this call, and `g` is
-    // the frame's live Graphics while the paint is in flight.
     unsafe {
         let mut path: *mut gp::GpPath = std::ptr::null_mut();
         if gp::GdipCreatePath(gp::FillModeAlternate, std::ptr::from_mut(&mut path)) != 0 {
@@ -12126,9 +11646,6 @@ fn draw_ui_text(hdc: Gdi::HDC, s: &str, rc: Rect, format: u32, font: Gdi::HFONT,
     // SAFETY: font/color selected then restored; `u` outlives the call.
     unsafe {
         Gdi::SetTextColor(hdc, color);
-        // Transparent text background: the `WM_DRAWITEM` HDC defaults to
-        // OPAQUE, which would paint a system-white block behind every
-        // owner-drawn label on the dark fills.
         Gdi::SetBkMode(hdc, crate::win32::TRANSPARENT);
         let old = Gdi::SelectObject(hdc, font);
         let u = utf16_z(s);
@@ -12229,8 +11746,6 @@ fn paint_media_title(
         | crate::win32::DT_SINGLE_LINE
         | crate::win32::DT_NO_PREFIX
         | crate::win32::DT_V_CENTER;
-    // Two pixels of slack: a descender that lands exactly on the last row is
-    // already clipped, and the proof reads ink, not metrics.
     let room = height - sc(3);
     for font in [display, body, hint] {
         // SAFETY: measurement only; the previous font is restored.
@@ -12410,8 +11925,6 @@ fn draw_ui_text_tracked(
 ) {
     // SAFETY: the spacing value is restored before returning.
     let old = unsafe { crate::win32::SetTextCharacterExtra(hdc, extra_px) };
-    // Transparent text background (see `draw_ui_text`); the delegated call
-    // sets it again, harmlessly.
     unsafe {
         Gdi::SetBkMode(hdc, crate::win32::TRANSPARENT);
     }
@@ -12438,8 +11951,6 @@ fn paint_header(hdc: Gdi::HDC, rc: Rect, dpi: i32) {
     let sc = |v: i32| scale_px(dpi, v);
     let (left, content_w) = content_span(rc.right - rc.left, dpi);
     fill_rect_solid(hdc, rc, COL_SURFACE);
-    // A hairline under the band so the chrome and the canvas meet on a line, not
-    // a guess.
     fill_rect_solid(
         hdc,
         Rect {
@@ -12558,8 +12069,6 @@ fn paint_section_label(hdc: Gdi::HDC, rc: Rect, dpi: i32, label: &str, count: i3
         tracked_px(sc(FS_LABEL), brand::TRACK_LABEL),
     );
 
-    // A count of zero has nothing to report; the badge appears with the first
-    // folder and the section header alone is the empty state.
     if count > 0 {
         let badge = Rect {
             left: badge_left,
@@ -12622,9 +12131,6 @@ fn paint_panel(hdc: Gdi::HDC, l: &UiLayout, dpi: i32, st: &UiState) {
         );
     } else {
         for (i, r) in l.rows.iter().enumerate() {
-            // Absolute folder index: the viewport row plus the scroll offset.
-            // `abs` is below `ui_dirs.len()` by construction (`vis` rows from
-            // `list_top` cover `list_top..list_top + vis`, clamped to `total`).
             let abs = l.list_top + i as i32;
             let selected = abs == st.sel_row;
             let mut fill = COL_ROW;
@@ -12633,9 +12139,6 @@ fn paint_panel(hdc: Gdi::HDC, l: &UiLayout, dpi: i32, st: &UiState) {
             }
             fill_round_rect(hdc, *r, fill, sc(R_ROW));
             if selected {
-                // The selection indicator is the accent bar down the row's left
-                // edge (`4.11:1` on the panel) plus the fill step -- two cues, so
-                // selection never rests on colour alone.
                 fill_round_rect(
                     hdc,
                     Rect {
@@ -12683,9 +12186,6 @@ fn paint_panel(hdc: Gdi::HDC, l: &UiLayout, dpi: i32, st: &UiState) {
             );
         }
         if l.scrolled() {
-            // Position-only scrollbar in the panel's right gutter: the track
-            // plus the proportional thumb mirroring `list_top`. Wheel,
-            // PageUp/PageDown, Home/End scroll; the thumb is paint, not drag.
             fill_round_rect(hdc, l.scrollbar, brand::TRACK, sc(R_BAR));
             if l.thumb.right > l.thumb.left && l.thumb.bottom > l.thumb.top {
                 fill_round_rect(hdc, l.thumb, COL_MUTED, sc(R_BAR));
@@ -12722,10 +12222,6 @@ fn paint_button_face(
     let r = sc(R_CTRL);
     match b.style {
         BTN_ACCENT => {
-            // The view's one primary control. Resting: the brand red. Hover: one
-            // step up. Pressed: the receding plane INSIDE a red edge -- the
-            // Ribbon P's own two-facet language, and the reason the silhouette
-            // stays red (`4.11:1` on the canvas) while the interior recedes.
             let fill = if disabled {
                 COL_SURFACE
             } else if pressed {
@@ -12747,8 +12243,6 @@ fn paint_button_face(
             draw_ui_text(hdc, &b.label, b.rc, fmt, button_font, tc);
         }
         BTN_TOGGLE | BTN_TOGGLE_ON => {
-            // A field toggle. On: quiet lit fill and a WHITE indicator (several
-            // can be on at once); off: a hairline segment with muted text.
             let on = b.style == BTN_TOGGLE_ON;
             if on || (hovered && !disabled) {
                 fill_round_rect(hdc, b.rc, COL_ROW, r);
@@ -12775,9 +12269,6 @@ fn paint_button_face(
             }
         }
         BTN_TAB | BTN_TAB_SEL => {            // A segment of a segmented control: one anatomy for the tab strip,
-            // the scan-speed segments and the card presets. Lit = the card fill
-            // plus the red indicator under the label; unlit = flat on the canvas
-            // with the boundary hairline and muted text.
             let lit = b.style == BTN_TAB_SEL;
             if lit || (hovered && !disabled) {
                 fill_round_rect(hdc, b.rc, COL_ROW, r);
@@ -12804,8 +12295,6 @@ fn paint_button_face(
             }
         }
         BTN_DANGER => {
-            // A destructive action is still a real control on the grid; only its
-            // label carries the warning, in a red that clears the body gate.
             let fill = if pressed {
                 COL_SURFACE
             } else if hovered {
@@ -12819,9 +12308,6 @@ fn paint_button_face(
             draw_ui_text(hdc, &b.label, b.rc, fmt, button_font, tc);
         }
         BTN_TEXT => {
-            // A quiet text action, not an outline button: no fill at rest, no
-            // outline ever. Hover carries the fill step; the label is
-            // left-aligned and vertically centered, muted at rest.
             if (hovered || pressed) && !disabled {
                 fill_round_rect(hdc, b.rc, COL_ROW_HOVER, r);
             }
@@ -12846,9 +12332,6 @@ fn paint_button_face(
             draw_ui_text(hdc, &b.label, label_rc, left_fmt, button_font, tc);
         }
         _ => {
-            // BTN_OUTLINE / BTN_SUBTLE: the secondary control. The fill is the
-            // card surface and the EDGE hairline is the boundary that carries the
-            // non-text gate (`4.09:1` on the canvas).
             let fill = if disabled || pressed {
                 COL_SURFACE
             } else if hovered {
@@ -12875,8 +12358,6 @@ fn paint_button(hdc: Gdi::HDC, b: &UiButton, dpi: i32, button_font: Gdi::HFONT, 
     paint_button_face(hdc, b, dpi, button_font, hovered, pressed, disabled, dim);
 }
 
-// `paintPreviewRows` lived here for the developer-dump preview; the media
-// composition draws its own title/meta/synopsis rows.
 
 /// `paintScanBar` (`go\window.go:2517`).
 fn paint_scan_bar(hdc: Gdi::HDC, status: Rect, dpi: i32, st: &UiState) {
@@ -13002,11 +12483,8 @@ fn paint_status_version(hdc: Gdi::HDC, status: Rect, dpi: i32) {
     if status.right <= status.left || status.bottom <= status.top {
         return;
     }
-    // The 16px inset: the version never touches the window's right edge.
     let rc = status_version_rect(status, dpi);
     let ver_font = version_font(dpi);
-    // GetTextExtent proof at this DPI: the short form must fit inside the
-    // inset rect, or the right edge clips again.
     let need = narrow::text_width_px(hdc, ver_font, &app_version_short());
     debug_assert!(
         need <= (rc.right - rc.left).max(1),
@@ -13148,8 +12626,6 @@ fn paint_main_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState) {
     fill_background(hdc, rc);
 
     let mut l = compute_layout_from(&st.ui_dirs, cw, ch, dpi, st.scroll_top);
-    // The tab strip's lit segment is a function of the CURRENT view, not of the
-    // layout, so it is resolved in one place for both segments.
     for b in l.btns.iter_mut() {
         if b.style == BTN_TAB || b.style == BTN_TAB_SEL {
             let lit = (b.id == BTN_CARD && st.cur_view == View::Card)
@@ -13167,9 +12643,6 @@ fn paint_main_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState) {
         | crate::win32::DT_END_ELLIPSIS;
 
     paint_header(hdc, l.header, dpi);
-    // The folder count lives badged on the section header it counts, which is
-    // where it belongs; the incumbent painted it as a bare right-aligned
-    // numeral 340px from the label it described.
     paint_section_label(
         hdc,
         l.section,
@@ -13227,8 +12700,6 @@ fn paint_narrow_bar(
     gear_rc: Rect,
     gear_hovered: bool,
 ) {
-    // No live Discord handle on a snapshot/desktop run: the chip names the
-    // down link; the connected state paints no chrome at all.
     narrow::bar(hdc, bar_rc, dpi, &discord_bar_text(st), gear_rc, gear_hovered);
 }
 
@@ -13247,7 +12718,6 @@ fn paint_narrow_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &CardLa
         | crate::win32::DT_V_CENTER
         | crate::win32::DT_END_ELLIPSIS;
 
-    // Bar: gear is the measured 32px rect.
     if let Some(gear) = l.card_btn(BTN_SETTINGS) {
         paint_narrow_bar(
             hdc,
@@ -13263,7 +12733,6 @@ fn paint_narrow_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &CardLa
             st.hover_btn == BTN_SETTINGS || st.pressed_btn == BTN_SETTINGS,
         );
     }
-    // Hero.
     let (mut model, _have) = card_preview_model(st);
     #[cfg(not(test))]
     if !model.art_url.is_empty() && !crate::artwork::is_cached(&model.art_url) {
@@ -13288,9 +12757,6 @@ fn paint_narrow_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &CardLa
             "Preview is local; Apply needs playback.".to_string(),
         ),
     };
-    // The hero always paints; its ghost exists only while a live title is
-    // playing (the layout omits it otherwise, so an empty rect paints no
-    // ghost but keeps the object card).
     {
         let fix_rc = l.card_btn(BTN_FIX_MATCH).unwrap_or_default();
         narrow::hero(
@@ -13311,7 +12777,6 @@ fn paint_narrow_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &CardLa
             st.pressed_btn == BTN_FIX_MATCH,
         );
     }
-    // Search row: field + 96px red Search.
     for b in &l.btns {
         if b.id == BTN_PICKER_FIELD {
             paint_picker_field(
@@ -13333,7 +12798,6 @@ fn paint_narrow_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &CardLa
             paint_button(hdc, &bb, dpi, button_font, st);
         }
     }
-    // Results panel filling to the 24px status bar.
     fill_round_rect(hdc, l.stage, COL_CARD, sc(R_PANEL));
     stroke_round_rect_w(hdc, l.stage, COL_BORDER, sc(R_PANEL), sc(STROKE_HAIR));
     let n = st.picker.candidates.len();
@@ -13343,8 +12807,6 @@ fn paint_narrow_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &CardLa
         right: l.picker_results.right - sc(SP_3),
         bottom: l.picker_results.top + sc(SP_2) + sc(16),
     };
-    // The match-count header exists only after a search ran; before the first
-    // search the panel keeps only the centred teaching state.
     if st.picker.searched {
         draw_ui_text(
             hdc,
@@ -13390,8 +12852,6 @@ fn paint_narrow_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &CardLa
             Gdi::DeleteObject(sub_font);
         }
     } else {
-        // One table: rows paint from the same `picker_row_rects` the hit test
-        // and the layout's result buttons read, so pixels and targets agree.
         let top = st
             .picker
             .top
@@ -13404,9 +12864,6 @@ fn paint_narrow_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &CardLa
             let is_movie = c.kind == Kind::MOVIE;
             let anime = crate::search::is_anime(c);
             let meta = narrow::result_meta(is_movie, anime, c.year, c.episode_count as i32);
-            // Covers are always on: kick one background fetch per poster URL,
-            // then paint whatever bytes have landed. The hit geometry still
-            // reads from the layout table (`picker_row_rects` above).
             #[cfg(not(test))]
             if !c.poster.is_empty() && !crate::artwork::is_cached(&c.poster) {
                 crate::artwork::ensure_async(&c.poster);
@@ -13427,7 +12884,6 @@ fn paint_narrow_card(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &CardLa
             );
         }
     }
-    // Apply pinned to the panel bottom (disabled with no pick).
     for b in &l.btns {
         if b.id == BTN_PICKER_APPLY {
             let mut bb = b.clone();
@@ -13488,11 +12944,9 @@ fn paint_narrow_settings(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &Se
             st.hover_btn == BTN_CARD || st.pressed_btn == BTN_CARD,
         );
     }
-    // Pinned title.
     if let Some(t) = l.labels.iter().find(|x| x.id == "settings.title") {
         draw_ui_text(hdc, "Settings", t.rc, fmt_left, title_font, COL_TEXT);
     }
-    // Caps labels: 11px caps.
     for lab in &l.labels {
         if lab.id == "settings.title" {
             continue;
@@ -13515,8 +12969,6 @@ fn paint_narrow_settings(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &Se
             tracked_px(sc(FS_SET_CAP), brand::TRACK_LABEL),
         );
     }
-    // Body rows via the one settings_row primitive. The toggle pills read the
-    // same stored bools the click flips, so paint and hit-test share one state.
     let discord_on = st.discord_enabled;
     let close_on = st.close_to_tray;
     let row_info = |id: i32| -> Option<(&'static str, &'static str, narrow::NarrowCtl)> {
@@ -13545,9 +12997,6 @@ fn paint_narrow_settings(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &Se
             _ => None,
         }
     };
-    // Theme row: label+desc via settings_row(None), segments via buttons.
-    // No row paints inside the status bar: a row straddling `status_top`
-    // paints only its clipped band above it.
     let mut theme_done = false;
     for b in &l.btns {
         if b.id == BTN_THEME_AMOLED || b.id == BTN_THEME_DARK {
@@ -13559,7 +13008,6 @@ fn paint_narrow_settings(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &Se
         let Some((label, desc, ctl)) = row_info(b.id) else {
             continue;
         };
-        // Theme band is painted once below; skip its two segment ids here.
         let Some(vis) = clip_rect_above_status(b.rc, status_top) else {
             continue;
         };
@@ -13587,7 +13035,6 @@ fn paint_narrow_settings(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState, l: &Se
                 "Pure black for OLED panels",
                 narrow::NarrowCtl::None,
             );
-            // Two 36px segments right-aligned.
             for b in &l.btns {
                 if (b.id == BTN_THEME_AMOLED || b.id == BTN_THEME_DARK)
                     && let Some(seg) = clip_rect_above_status(b.rc, status_top)
@@ -13667,8 +13114,6 @@ fn card_preview_model(st: &UiState) -> (SurfacePreview, bool) {
         String::new()
     };
     let duration = parse_length_ms(&st.preview_length());
-    // Covers are always on: the artwork toggle is gone, so the model always
-    // carries art and the cached-bytes gate below decides the tile.
     let mut model = surface_preview(
         &act,
         have,
@@ -13677,8 +13122,6 @@ fn card_preview_model(st: &UiState) -> (SurfacePreview, bool) {
         duration,
         true,
     );
-    // A URL is not a cover. Only a locally decodable image turns the slot on,
-    // so the blank-tile failure cannot recur while a fetch is pending.
     model.art &= crate::artwork::is_cached(&model.art_url);
     (model, have)
 }
@@ -13803,8 +13246,6 @@ fn paint_picker_field(
         sc(STROKE_HAIR),
     );
     let pad = sc(SP_2);
-    // The counter reserves its own band at the right end of the field, so the
-    // typed text ellipsizes before it instead of running under it.
     let counter_w = if picker.query.is_empty() { 0 } else { sc(46) };
     let text = if picker.query.is_empty() {
         "Title or title + year"
@@ -13851,8 +13292,6 @@ fn paint_picker_field(
     if focused && !picker.busy {
         let mut caret_x = rc.left + pad;
         if !picker.query.is_empty() {
-            // Measure the query in the same font the field paints, so the
-            // caret sits after the last glyph instead of at a guessed offset.
             unsafe {
                 let old = Gdi::SelectObject(hdc, font);
                 let u: Vec<u16> = picker.query.encode_utf16().collect();
@@ -13927,9 +13366,6 @@ fn paint_picker_results(
             top + pos == picker.selected,
         );
     }
-    // Position-only scrollbar in the panel's right gutter when rows hide below
-    // the viewport: the same track/thumb vocabulary as the Main folder list.
-    // The thumb is paint, not drag.
     let capacity = picker_capacity(l, dpi);
     let count = picker.candidates.len() as i32;
     if count > capacity as i32 && capacity > 0 {
@@ -13956,8 +13392,6 @@ fn paint_picker_results(
     let foot = Rect {
         left: l.picker_results.left + sc(SP_3),
         top: rows.last().map_or(head.bottom, |r| r.bottom + sc(SP_1)),
-        // The list's own buttons sit on the panel's last 32/64 px; the hint
-        // must not paint over them.
         right: l.picker_results.right - sc(SP_3),
         bottom: l
             .card_btn(BTN_PICKER_APPLY)
@@ -14064,8 +13498,6 @@ fn paint_member_surface(
     };
     draw_ui_text(hdc, "Members", head, crate::win32::DT_LEFT | crate::win32::DT_SINGLE_LINE, label, COL_MUTED);
     if preview_is_empty(have, p) {
-        // No object: say there is nothing to preview instead of painting an
-        // empty member row that looks like a failed render.
         draw_ui_text(
             hdc,
             PREVIEW_EMPTY_TEXT,
@@ -14162,8 +13594,6 @@ fn paint_profile_surface(
     stroke_round_rect_w(hdc, rc, COL_BORDER, sc(R_PANEL), sc(STROKE_HAIR));
     let pad = sc(SP_4);
     if preview_is_empty(have, p) {
-        // Nothing recorded and nothing selected: the surface states that, so a
-        // cold card never renders as a blank panel under the identity block.
         draw_ui_text(
             hdc,
             PREVIEW_EMPTY_TEXT,
@@ -14208,15 +13638,11 @@ fn paint_profile_surface(
             bottom: (name.bottom + sc(14)).min(rc.bottom),
             ..name
         };
-        // The handle line stays empty: this build exposes no connected Discord
-        // identity to the window, so nothing is invented and `You` stands in.
         let _ = handle;
     }
     if p.art {
         paint_cover(hdc, art, dpi, cover);
     }
-    // With no artwork the cover column collapses: the text takes the full
-    // panel width instead of leaving a dead gutter.
     let (header, details, state) = if p.art {
         (header, details, state)
     } else {
@@ -14277,9 +13703,6 @@ fn paint_activity_surface(
     };
     draw_ui_text(hdc, "Activity", head, crate::win32::DT_LEFT | crate::win32::DT_SINGLE_LINE, label, COL_MUTED);
     if preview_is_empty(have, p) {
-        // The synopsis block belongs to a title. With no title there is no
-        // "No synopsis for this title." to print and no hero to draw: the
-        // surface says the one true thing instead.
         draw_ui_text(
             hdc,
             PREVIEW_EMPTY_TEXT,
@@ -14398,8 +13821,6 @@ fn paint_card_view(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState) {
             };
         }
         if b.id == BTN_PICKER_SEARCH {
-            // One verb, one label, always: Search searches. A second name on
-            // the same control was the "second match action" the owner named.
             b.label = "Search".to_string();
             b.style = if st.picker.search_allowed() {
                 BTN_ACCENT
@@ -14410,9 +13831,6 @@ fn paint_card_view(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState) {
     }
 
     let (mut model, have) = card_preview_model(st);
-    // Artwork is lazy and off-thread: a visible card starts at most one fetch
-    // for its URL, and the worker posts back when the cover is cached. The
-    // render tests compile this out, so no test touches the network.
     #[cfg(not(test))]
     if !model.art_url.is_empty() && !crate::artwork::is_cached(&model.art_url) {
         crate::artwork::ensure_async(&model.art_url);
@@ -14423,7 +13841,6 @@ fn paint_card_view(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState) {
         None
     };
     if model.art && cover.is_none() {
-        // A cache file that no longer decodes is an absence, not a blank tile.
         model.art = false;
     }
     let button_font = brand::ui(sc(FS_CONTROL), brand::UI_WEIGHT);
@@ -14438,26 +13855,17 @@ fn paint_card_view(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState) {
         | crate::win32::DT_V_CENTER
         | crate::win32::DT_END_ELLIPSIS;
 
-    // The rail surface first: its labels are painted on top of it, and the
-    // object card inside it must not be covered by its fill.
     if l.wide {
         fill_round_rect(hdc, l.rail, COL_SURFACE, sc(R_PANEL));
         stroke_round_rect_w(hdc, l.rail, COL_BORDER, sc(R_PANEL), sc(STROKE_HAIR));
     }
-    // Cover, title, year/kind and the plain connection state. Everything below
-    // is either this object's presence preview or a correction to it.
     fill_round_rect(hdc, l.object, COL_SURFACE, sc(R_PANEL));
     stroke_round_rect_w(hdc, l.object, COL_BORDER, sc(R_PANEL), sc(STROKE_HAIR));
     paint_cover(hdc, l.obj_cover, dpi, cover.as_ref());
     match st.preview_hero_meta() {
         Some((title, meta)) => {
             draw_ui_text(hdc, &title, l.obj_title, fmt_left, title_font, COL_TEXT);
-            // The meta line is the narrow hero's own string: one formatter
-            // ([`hero_meta_for`] via [`UiState::preview_hero_meta`]), so the
-            // wide card cannot drop the runtime the narrow card shows.
             draw_ui_text(hdc, &meta, l.obj_meta, fmt_left, body_font, COL_MUTED);
-            // The one sentence that decides whether this is a real presence or
-            // a preview that was never sent. A local preview says so in words.
             let playing = app_support::config::live_now_playing().is_some();
             draw_ui_text(
                 hdc,
@@ -14499,8 +13907,6 @@ fn paint_card_view(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState) {
     if l.header.bottom > l.header.top {
         paint_header(hdc, l.header, dpi);
     }
-    // The rail surface is painted above the object card so the card is not
-    // covered; nothing to fill here.
     for lab in &l.labels {
         match lab.id.as_str() {
             "card.preview-label" => draw_ui_text(hdc, "Discord preview", lab.rc, fmt_left, hint_font, COL_MUTED),
@@ -14559,8 +13965,6 @@ fn paint_card_view(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState) {
             st.designer.synopsis,
         );
         if have {
-            // The selected surface carries a quiet accent edge; the segment
-            // row above is the control that moves it.
             let sel = match st.preview_surface {
                 PreviewSurface::Member => member,
                 PreviewSurface::Profile => profile,
@@ -14568,7 +13972,6 @@ fn paint_card_view(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState) {
             };
             stroke_round_rect_w(hdc, sel, COL_ACCENT, sc(R_PANEL), sc(STROKE_FOCUS));
         }
-        // The wire summary: exactly the fields the composer will send.
         let wire_fmt = crate::win32::DT_LEFT
             | crate::win32::DT_SINGLE_LINE
             | crate::win32::DT_NO_PREFIX
@@ -14801,8 +14204,6 @@ fn run_blocking_ui(hwnd: HWND, action: BlockingUi) {
         }
         BlockingUi::OpenLogFolder => crate::settings::on_open_log_folder(),
         BlockingUi::OpenFolder => {
-            // The row is read under a short guard, then the shell call runs
-            // with the guard released, like every other arm.
             let dir = {
                 let st = ui();
                 let idx = clamp_sel_row(st.sel_row, st.ui_dirs.len());
@@ -14890,8 +14291,6 @@ fn min_track_size(view: View, dpi: i32) -> (i32, i32) {
 pub fn create_main_window() -> Result<(), String> {    use windows_sys::Win32::UI::WindowsAndMessaging::{
         AdjustWindowRectEx, CreateWindowExW, RegisterClassExW, WNDCLASSEXW,
     };
-    // The theme is live before the first brush/paint: AMOLED when absent or
-    // unreadable, Dark only when stored.
     set_live_theme(app_support::config::load_config().effective_theme());
     // SAFETY: COM init for the folder picker; a failure is non-fatal.
     unsafe {
@@ -14906,10 +14305,6 @@ pub fn create_main_window() -> Result<(), String> {    use windows_sys::Win32::U
         )
     };
     let bg = unsafe { crate::win32::CreateSolidBrush(themed(COL_BG)) };
-    // The Ribbon P, loaded from the embedded `.ico` BEFORE the class is
-    // registered: a class's icon slots are read at registration, and a class
-    // that declares none gets the generic application icon from the window
-    // manager -- which is exactly the defect this fixes.
     let mark = brand::mark_icon();
     let mark_small = brand::mark_icon_small();
 
@@ -14963,38 +14358,20 @@ pub fn create_main_window() -> Result<(), String> {    use windows_sys::Win32::U
     if hwnd.is_null() {
         return Err("CreateWindowExW failed".into());
     }
-    // Rust-only chrome: pin the OS caption, title text and 1px frame to the
-    // dark palette so the stock white title bar never appears. `WS_CAPTION`
-    // stays (custom-drawn chrome would re-open the reentrancy class of
-    // `3503ddb`): `DwmSetWindowAttribute` copies four bytes and dispatches
-    // nothing to this wndproc, so this is NOT a re-entrant site -- no `UI`
-    // guard or regression-test change (cf. `run_blocking_ui`).
     crate::win32::apply_dark_caption(hwnd, themed(COL_BG), COL_TEXT);
-    // Pre-22000 DWM reads the same flag at 19 instead of 20; best-effort.
     let _ = apply_dark_mode_fallback_19(hwnd);
-    // Apply the mark to the WINDOW slots as well as the class slots. The class
-    // slots are what `GetClassLongPtrW(GCLP_HICON)` reports; `WM_SETICON` is
-    // what the titlebar, alt-tab and the taskbar actually read, and the two are
-    // separate. Both are set from the one asset, and the handle the write
-    // produced is recorded so the proof can quote it.
     let class_icon = brand::apply_window_icon(hwnd);
     {
         let mut st = ui();
         st.main_hwnd = hwnd as usize;
         st.ui_icon = class_icon as usize;
-        // The stored theme is live from the first frame (not only after the
-        // Settings view loads it).
         st.theme_state = app_support::config::load_config()
             .effective_theme()
             .to_string();
         set_live_theme(&st.theme_state);
-        // Production is the only place the persistent search cache is live: a
-        // unit test's stub search never reads or writes the owner's file.
         st.cache_enabled = true;
         st.picker_search = Arc::new(default_picker_search);
         st.refresh_dir_list();
-        // The first frame a user sees: search while nothing is playing, the
-        // library while something is (the shipped behaviour for a player).
         st.open_cold_view_with(app_support::config::live_now_playing().is_some());
     }
     if class_icon.is_null() {
@@ -15010,13 +14387,6 @@ pub fn create_main_window() -> Result<(), String> {    use windows_sys::Win32::U
 
 /// `showMainWindow` (`go\window.go:346`).
 pub fn show_main_window() {
-    // `UI` is RELEASED before every Win32 call below. `center_window`'s
-    // `MoveWindow` and `UpdateWindow` both synchronously re-enter
-    // `main_wnd_proc` (`WM_WINDOWPOSCHANGED`/`WM_SIZE`, `WM_PAINT`), whose
-    // handlers re-lock `UI` via `ui()`. Holding this non-reentrant guard across
-    // them self-deadlocks the UI thread -- the shipped blank-white "(Not
-    // Responding)" startup hang. Go's `showMainWindow` (`go\window.go:346`) holds
-    // no lock, so this is a port-introduced regression.
     let (hwnd, needs_center) = {
         let mut st = ui();
         if st.main_hwnd == 0 {
@@ -15099,20 +14469,11 @@ pub unsafe extern "system" fn main_wnd_proc(
 ) -> isize {
     match msg {
         crate::win32::WM_CLOSE => {
-            // Closing parks the window back to the tray -- but only while there
-            // IS a tray icon to come back from. A tray-less process (the
-            // notify-icon add failed) keeps the window as its only way in and
-            // its only way out, so hiding it there is a zombie: no icon, no
-            // window, and the single-instance port still held, so a relaunch
-            // answers "already running" and exits. `QA7-G1`.
             if crate::tray::tray_icon_added() {
                 unsafe {
                     crate::win32::ShowWindow(hwnd, crate::win32::SW_HIDE);
                 }
             } else {
-                // Quit the way the tray Exit does: the flag stops the poll loop
-                // and the quit message ends the message loop, then the app tail
-                // clears, deletes the icon and closes Discord in order.
                 crate::tray::request_quit();
                 unsafe {
                     crate::win32::DestroyWindow(hwnd);
@@ -15126,10 +14487,6 @@ pub unsafe extern "system" fn main_wnd_proc(
             return 0;
         }
         crate::win32::WM_PRINT | crate::win32::WM_PRINTCLIENT => {
-            // `PrintWindow` renders through `WM_PRINT`; `DefWindowProcW` draws
-            // only the frame, so the client area is ours to paint into the
-            // caller's DC. Without this every headless frame is an empty
-            // bitmap, whatever the theme.
             let hdc = wparam as windows_sys::Win32::Graphics::Gdi::HDC;
             if !hdc.is_null() {
                 paint_to_hdc(hdc, get_client_rect(hwnd), window_dpi(hwnd));
@@ -15182,9 +14539,6 @@ pub unsafe extern "system" fn main_wnd_proc(
         }
         crate::win32::WM_L_BUTTON_UP => {
             let (x, y) = mouse_xy(lparam as usize);
-            // The action dispatch may open a modal dialog / show the window,
-            // which pumps the queue and re-enters this wndproc: the `UI` guard
-            // is dropped before `run_blocking_ui` (never held across it).
             let blocking = ui().release_at(hwnd, x, y);
             if let Some(b) = blocking {
                 run_blocking_ui(hwnd, b);
@@ -15192,10 +14546,6 @@ pub unsafe extern "system" fn main_wnd_proc(
             return 0;
         }
         crate::win32::WM_MOUSEWHEEL => {
-            // Wheel over the picker list scrolls it; over the folder list it
-            // scrolls that; anywhere else (or an unscrollable list) it is a
-            // no-op. Both scrolls only invalidate (async), so this is NOT a
-            // re-entrant site.
             let notches = crate::win32::wheel_delta(wparam) / crate::win32::WHEEL_DELTA;
             let card_picker = {
                 let st = ui();
@@ -15230,8 +14580,6 @@ pub unsafe extern "system" fn main_wnd_proc(
                 if st.on_settings_key_down(hwnd, vk) {
                     st.invalidate();
                 }
-                // `VK_RETURN` may focus a button whose action is blocking; run
-                // it after the guard drops (`run_blocking_ui`).
                 st.pending_blocking.take()
             };
             if let Some(b) = blocking {
@@ -15454,9 +14802,6 @@ mod tests {
     #[test]
     fn compute_layout_buttons() {
         let l = compute_layout(&dirs(2), MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
-        // Two tab segments plus the two remaining window actions (Report,
-        // Close to tray). The scan and folder controls are gone by owner
-        // order (2026-11-03).
         assert_eq!(l.btns.len(), 4);
         let mut seen = std::collections::HashSet::new();
         for b in &l.btns {
@@ -15570,7 +14915,6 @@ mod tests {
             );
             assert_eq!(card.top, sc(TAB_TOP_L), "dpi {dpi}");
             assert_eq!(card.bottom, sc(TAB_TOP_L) + sc(TAB_H_L), "dpi {dpi}");
-            // The strip sits below the header band and above the section label.
             assert!(card.top >= l.header.bottom, "dpi {dpi}");
             assert!(card.bottom <= l.section.top, "dpi {dpi}");
             for b in l
@@ -15585,7 +14929,6 @@ mod tests {
                     b.id
                 );
             }
-            // The folder count's badge shares the section line, at its right end.
             let rects = main_text_rects(cw, ch, dpi, &l, 2);
             let sec = rects.iter().find(|r| r.id == "main.section").unwrap();
             let badge = rects.iter().find(|r| r.id == "main.badge").unwrap();
@@ -15612,8 +14955,6 @@ mod tests {
         assert!(l1.rows.len() == 1 && l4.rows.len() == 4);
         let (l20, h20) = card_h(20);
         let (_, h5) = card_h(5);
-        // The panel grows to the height the action grid leaves it, then clamps:
-        // the viewport holds `list_capacity` rows and the rest is `+N more`.
         assert!(
             h20 > h5,
             "the 20-folder panel {h20} must exceed the 5-folder {h5}"
@@ -15656,8 +14997,6 @@ mod tests {
             s.top >= l.header.bottom,
             "the tab strip must sit below the header band"
         );
-        // The tab segment is itself a control, so it is excluded from the
-        // overlap scan the way every other control is compared.
         for b in l
             .btns
             .iter()
@@ -15697,9 +15036,6 @@ mod tests {
 
     #[test]
     fn tab_switching_shares_one_route() {
-        // From every view, activating a tab lands on its view through the one
-        // `activate_focused` route (the keyboard path); the mouse path in
-        // `release_at` funnels Settings/Card through the same call.
         for view in [View::Main, View::Settings, View::Card] {
             let mut st = UiState::default();
             st.cur_view = view;
@@ -15712,8 +15048,6 @@ mod tests {
             let _ = st.activate_focused(NULL, BTN_SETTINGS);
             assert_eq!(st.cur_view, View::Settings, "from {view:?} BTN_SETTINGS");
         }
-        // Same-view clicks are no-ops: the view stays and the per-view
-        // transient state the `enter_*` functions would reset is untouched.
         let mut st = UiState::default();
         st.cur_view = View::Card;
         st.hover_btn = 99;
@@ -15745,12 +15079,6 @@ mod tests {
     #[test]
     fn settings_hit_test() {
         let l = compute_settings_layout(MAIN_CLIENT_W, MAIN_CLIENT_H, 96, false, "balanced", "amoled");
-        // Approved narrow, five rows: Discord connection, Close to tray, Run
-        // at startup, Theme (AMOLED|Dark segments), Clear metadata -- plus the
-        // Card gear and the 2 hidden wiring rects. Everything else (Metadata
-        // cache, Card layout, the Discord field toggles, the line-2 presets,
-        // Clear index, Export, Import, Open log, Scan speed) is gone by owner
-        // order (2026-11-03).
         assert_eq!(l.btns.len(), 9);
         for id in [
             BTN_DISCORD,
@@ -15764,8 +15092,6 @@ mod tests {
             let rc = l
                 .settings_btn(id)
                 .unwrap_or_else(|| panic!("id {id} missing"));
-            // Scrollable body: horizontal bounds hold, vertical may extend past
-            // the client; hidden wiring rects are empty and skipped here.
             if rc.right <= rc.left || rc.bottom <= rc.top {
                 continue;
             }
@@ -15773,8 +15099,6 @@ mod tests {
                 rc.right <= MAIN_CLIENT_W + 1 && rc.left >= -1 && rc.top >= 0,
                 "id {id} escapes horizontally: {rc:?}"
             );
-            // Below-the-fold rows are scroll-reached: no hit-test at the folded
-            // viewport (the clamped point would hit a different visible row).
             if rc.top >= MAIN_CLIENT_H {
                 continue;
             }
@@ -15783,9 +15107,6 @@ mod tests {
                 id
             );
         }
-        // Visible buttons never overlap (empty wiring rects excluded: they have
-        // no area and `rects_intersect` already ignores them, but filter for
-        // clarity).
         let visible: Vec<_> = l
             .btns
             .iter()
@@ -15793,8 +15114,6 @@ mod tests {
             .collect();
         for (i, a) in visible.iter().enumerate() {
             for b in visible.iter().skip(i + 1) {
-                // Rows below the fold share the scroll body; only same-viewport
-                // overlap is a defect. Both below the client is not overlap.
                 if a.rc.top >= MAIN_CLIENT_H && b.rc.top >= MAIN_CLIENT_H {
                     continue;
                 }
@@ -15820,7 +15139,6 @@ mod tests {
             on.btns.iter().find(|b| b.id == BTN_STARTUP).unwrap().label,
             "[x] Start with Windows"
         );
-        // LIBRARY group holds exactly one row: Clear metadata.
         let lib_idx = l.labels.iter().position(|x| x.id == "settings.lib").unwrap();
         let lib_top = l.labels[lib_idx].rc.bottom;
         let rc = l.settings_btn(BTN_CLEAR_CACHE).unwrap();
@@ -15831,13 +15149,11 @@ mod tests {
                 "library id {id} is gone from Settings"
             );
         }
-        // The startup toggle spans the content width, one row under its label.
         let beh_idx = l.labels.iter().position(|x| x.id == "settings.behaviour").unwrap();
         let rc = l.settings_btn(BTN_STARTUP).unwrap();
         assert_eq!(rc.left, l.labels[beh_idx].rc.left);
         assert_eq!(rc.right, l.labels[beh_idx].rc.right);
         assert!(rc.top >= l.labels[beh_idx].rc.bottom);
-        // Status bar is pinned full-bleed 24px.
         assert_eq!(l.status.bottom - l.status.top, STATUS_BAR_H_L);
         assert_eq!(l.status.bottom, MAIN_CLIENT_H);
     }
@@ -15876,7 +15192,6 @@ mod tests {
             let sl = compute_settings_layout(cw, ch, dpi, false, "balanced", "amoled");
             let srects = settings_text_rects(cw, ch, dpi, &sl);
             for r in &srects {
-                // Scrollable body: hidden wiring rects are empty by design.
                 if r.rc.right <= r.rc.left || r.rc.bottom <= r.rc.top {
                     continue;
                 }
@@ -15893,20 +15208,15 @@ mod tests {
             }
             for (i, a) in srects.iter().enumerate() {
                 for b in srects.iter().skip(i + 1) {
-                    // Scrollable body slides under the pinned status bar and
-                    // title: body-vs-chrome overlap is the scroll, not a defect.
                     let chrome = |id: &str| {
                         id == "settings.status" || id == "settings.title"
                     };
                     if chrome(&a.id) || chrome(&b.id) {
                         continue;
                     }
-                    // Below-the-fold scroll rows share the body; only same-
-                    // viewport overlap is a defect.
                     if a.rc.top >= ch && b.rc.top >= ch {
                         continue;
                     }
-                    // Hidden wiring rects have no area and never intersect.
                     if a.rc.right <= a.rc.left
                         || a.rc.bottom <= a.rc.top
                         || b.rc.right <= b.rc.left
@@ -15941,7 +15251,6 @@ mod tests {
     /// appear on the Card.
     #[test]
     fn card_list_actions_are_tab_stops_with_advanced_closed() {
-        // The pure order: no scope segments, both hero/panel actions Tab stops.
         let closed = card_focus_order_for(false, true, true);
         for id in [
             BTN_FIX_MATCH,
@@ -15949,8 +15258,6 @@ mod tests {
         ] {
             assert!(closed.contains(&id), "a visible Card action {id} is a Tab stop");
         }
-        // The removed scope ids (85/81/82/87/88) are gone: no scope segment
-        // is ever a Tab stop again.
         for id in [85, 81, 82, 87, 88] {
             assert!(
                 !closed.contains(&id),
@@ -15970,23 +15277,16 @@ mod tests {
                 "a Settings-CARD control {id} is a Card Tab stop"
             );
         }
-        // The visible order: repair above Apply, matching the layout.
         let fix_at = closed.iter().position(|&id| id == BTN_FIX_MATCH);
         let apply_at = closed.iter().position(|&id| id == BTN_PICKER_APPLY);
         assert!(fix_at < apply_at, "tab order follows the eye");
-        // Approved pinning: Apply stays a stop even when disabled; the static
-        // order keeps Fix, the live order drops it with nothing playing.
         let no_player = card_focus_order_for(false, true, false);
         assert!(no_player.contains(&BTN_FIX_MATCH));
         assert!(no_player.contains(&BTN_PICKER_APPLY));
-        // At rest the order is the static narrow order.
         let at_rest = card_focus_order_for(false, false, false);
         assert!(at_rest.contains(&BTN_FIX_MATCH) && at_rest.contains(&BTN_PICKER_APPLY));
         assert_eq!(at_rest, card_focus_order(), "the at-rest order is unchanged");
 
-        // And through the real window: a full Tab cycle over a live list visits
-        // exactly the stops the layout draws, repair action included, with the
-        // disclosure closed. A live title is playing, so the hero Fix is in.
         let cand = Candidate {
             kind: Kind::MOVIE,
             title: "Dune".to_string(),
@@ -17824,13 +17124,11 @@ mod tests {
             seen_ok.load(Ordering::SeqCst)
         };
 
-        // Filed on the first try: the filed URL is shown.
         assert_eq!(
             report_issue_status(FILED, None, &opened),
             report_launch_text(FILED)
         );
 
-        // Filed on the label-less retry: the URL shows; the cause is the log's.
         let err = repair::Error::caused_by(
             "repair: CreateIssue: filed without labels",
             "could not add label: 'needs-repair' not found",
@@ -17840,7 +17138,6 @@ mod tests {
             report_launch_text(FILED)
         );
 
-        // Nothing filed: the reason and the prefilled URL both show.
         open_ok.store(false, Ordering::SeqCst);
         let text = report_issue_status(PREFILLED, Some(&err), &opened);
         assert!(text.contains("could not add label"), "status = {text:?}");
@@ -17993,10 +17290,6 @@ mod tests {
                 *kind,
                 PreviewSurface::default(),
             );
-            // Approved narrow at rest (nothing playing): gear, field, Search,
-            // pinned Apply — no scope row, no category words, no Change
-            // filters; the hero Fix exists only while a title is playing.
-            // Card/Back stay wired but hidden (empty rects, never Tab stops).
             let at_rest: Vec<i32> = l.btns.iter().map(|b| b.id).collect();
             assert_eq!(
                 at_rest,
@@ -18011,7 +17304,6 @@ mod tests {
                 ],
                 "approved narrow rest state (nothing playing: no hero Fix)"
             );
-            // With a title playing the hero ghost joins the rest state.
             let with_player = compute_card_layout_state(
                 MAIN_CLIENT_W,
                 MAIN_CLIENT_H,
@@ -18031,7 +17323,6 @@ mod tests {
                 with_player.card_btn(BTN_FIX_MATCH).is_some(),
                 "hero Fix present while playing"
             );
-            // No disclosure in the redesign: open == rest (payload lives in Settings).
             let open = compute_card_layout_with(
                 MAIN_CLIENT_W,
                 MAIN_CLIENT_H,
@@ -18060,9 +17351,6 @@ mod tests {
                     id
                 );
             }
-            // Payload knobs never appear on the Card (Settings CARD owns
-            // them); the artwork toggle (70) and the scope ids
-            // (85/81/82/87/88) are gone entirely.
             for id in [
                 BTN_FIELD_DETAILS,
                 BTN_FIELD_STATE,
@@ -18078,15 +17366,12 @@ mod tests {
                     "payload {id} leaked onto the Card"
                 );
             }
-            // The removed artwork toggle (70) and scope ids (85/81/82/87/88)
-            // are gone from every Card composition.
             for id in [70, 85, 81, 82, 87, 88] {
                 assert!(
                     open.card_btn(id).is_none() && l.card_btn(id).is_none(),
                     "removed control {id} leaked onto the Card"
                 );
             }
-            // Visible Card buttons never overlap (hidden wiring rects excluded).
             let visible: Vec<_> = l
                 .btns
                 .iter()
@@ -18097,7 +17382,6 @@ mod tests {
                     assert!(!rects_intersect(a.rc, b.rc), "{} and {} overlap", a.id, b.id);
                 }
             }
-            // Hero text rows live inside the hero card.
             assert_eq!(l.rows.len(), 2);
             for r in &l.rows {
                 assert!(
@@ -18112,7 +17396,6 @@ mod tests {
                 l.labels.is_empty(),
                 "narrow Card carries no section labels"
             );
-            // Vertical order: top bar, hero, search, panel, status.
             assert!(
                 l.header.bottom <= l.object.top
                     && l.object.bottom <= l.picker_bar.top
@@ -18120,7 +17403,6 @@ mod tests {
                     && l.stage.bottom <= l.status.top,
                 "topbar/hero/search/panel/status out of order"
             );
-            // Hero height cap and geometry tokens.
             assert!(
                 l.object.bottom - l.object.top <= scale_px(96, HERO_MAX_H_L),
                 "hero exceeds 124px"
@@ -18179,7 +17461,6 @@ mod tests {
                 let l = compute_card_layout(cw, ch, dpi, specs, *kind, PreviewSurface::default());
                 let rects = card_text_rects(cw, ch, dpi, &l);
                 for r in &rects {
-                    // Hidden wiring rects (Card/Back) are empty by design.
                     if r.rc.right <= r.rc.left || r.rc.bottom <= r.rc.top {
                         continue;
                     }
@@ -18239,8 +17520,6 @@ mod tests {
     #[test]
     fn card_preset_mapping() {
         let (dets, states) = presence::cardspec::card_presets();
-        // Line 1 is fixed by the shipped mapping: no Details button exists,
-        // so the whole Details id band maps to nothing.
         assert_eq!(dets.len(), 1, "one stored Details value, zero buttons");
         for id in [30, 31, 32, 33] {
             assert!(card_preset_for_button(id).is_none(), "id {id} mapped");
@@ -18251,8 +17530,6 @@ mod tests {
                 Some((1, p.id.clone()))
             );
         }
-        // The retired Details ids map to nothing (no Details row is offered),
-        // as do the retired kind-toggle ids (50/51).
         for id in [0, 1, 2, 7, 10, 29, 30, 31, 32, 33, 34, 39, 44, 50, 51, 99] {
             assert!(card_preset_for_button(id).is_none(), "id {id} mapped");
         }
@@ -18260,8 +17537,6 @@ mod tests {
             details: "default".into(),
             state: "none".into(),
         };
-        // No line-0 branch: the Details row is removed, so even the stored
-        // `Default` value never lights a (nonexistent) line-0 control.
         for p in &dets {
             assert_eq!(card_preset_style(0, &p.id, &spec), BTN_TAB);
         }
@@ -18295,9 +17570,6 @@ mod tests {
             ..Activity::default()
         };
         let got = preview_rows(&act, true);
-        // The recorded payload is decorated with a caller-compat `small_image`
-        // on purpose: the row must still report the cover alone, never a
-        // " + play" corner icon, and this equality fails if one is painted.
         assert_eq!(
             got,
             [
@@ -18356,16 +17628,12 @@ mod tests {
             },
         );
         assert_eq!(st.preview_synopsis(), long, "full stored synopsis");
-        // The stored note came from an episode pin: it must never ride the
-        // Discord tooltip, because it names what happens in the episode being
-        // watched (owner-safe rule, 2026-11-03).
         let (card, _) = st.preview_activity();
         assert!(
             card.large_text.is_empty(),
             "episode-sourced prose must never ride: {:?}",
             card.large_text
         );
-        // A work-level note is the only synopsis allowed on the card.
         st.record_preview(
             CardKind::Series,
             "Breaking.Bad.S04E07.Problem.Dog.1080p.mkv - PotPlayer".to_string(),
@@ -18413,8 +17681,6 @@ mod tests {
     #[test]
     fn preview_record_round_trip() {
         let mut st = UiState::default();
-        // Before the first live push there is no preview: the view falls
-        // back to Series with nothing composed.
         assert_eq!(st.displayed_card_kind(), CardKind::Series);
         assert!(!st.preview_activity().1);
         let raw = "Show.S01E02.Pilot.1080p.mkv - PotPlayer".to_string();
@@ -18432,8 +17698,6 @@ mod tests {
             action.clone(),
             resolved.clone(),
         );
-        // The live push derives the displayed kind: the recorded series item
-        // composes.
         assert_eq!(st.displayed_card_kind(), CardKind::Series);
         let (got, have) = st.preview_activity();
         assert!(have);
@@ -18445,8 +17709,6 @@ mod tests {
             &st.card_specs_state.for_kind(CardKind::Series),
         );
         assert_eq!(got, want);
-        // A live movie push re-derives the displayed kind: the movie slot
-        // composes now.
         st.record_preview(
             CardKind::Movie,
             raw.clone(),
@@ -18478,9 +17740,6 @@ mod tests {
             ..Action::default()
         };
         let resolved = Resolved::default();
-        // The movie leg carries year/genres/length (no synopsis), so the
-        // T5-A movie default state is the non-empty `Year - Genres - Runtime`
-        // line and the Minimal pick below visibly changes it.
         let movie_resolved = Resolved {
             year: 2024,
             genres: "Sci-Fi".to_string(),
@@ -18488,8 +17747,6 @@ mod tests {
             ..Resolved::default()
         };
         let mut st = UiState::default();
-        // Record movie first, then series: the displayed kind follows the
-        // latest live push — Series.
         st.record_preview(
             CardKind::Movie,
             raw.clone(),
@@ -18505,8 +17762,6 @@ mod tests {
 
         let (before_series, _) = st.preview_activity();
         assert_eq!(st.displayed_card_kind(), CardKind::Series);
-        // Pick a state line under SERIES only: the tag drops the episode
-        // title from the default `code / title` pair.
         assert!(
             st.card_specs_state
                 .set_line(CardKind::Series, CardLine::State, "tag")
@@ -18518,9 +17773,7 @@ mod tests {
             (after_series.details.clone(), after_series.state.clone()),
             "series preview must re-render after a series line pick"
         );
-        // The movie spec is untouched.
         assert!(st.card_specs_state.for_kind(CardKind::Movie).is_default());
-        // Re-push the live movie: the displayed kind re-derives to Movie.
         st.record_preview(
             CardKind::Movie,
             raw.clone(),
@@ -18529,7 +17782,6 @@ mod tests {
         );
         let (movie_before, have_movie) = st.preview_activity();
         assert!(have_movie);
-        // Pick a state line under MOVIE only: series keeps its pick.
         assert!(
             st.card_specs_state
                 .set_line(CardKind::Movie, CardLine::State, "none")
@@ -18580,8 +17832,6 @@ mod tests {
             Resolved::default(),
         );
 
-        // The displayed kind follows the latest live push: re-push the
-        // series item to preview it again.
         st.record_preview(
             CardKind::Series,
             series_raw.clone(),
@@ -18623,8 +17873,6 @@ mod tests {
             "the two kinds must preview different recorded items"
         );
 
-        // The lit preset segments follow the displayed kind's spec (State row
-        // only: line 1 is fixed by the shipped mapping).
         for kind in [CardKind::Series, CardKind::Movie] {
             let l = compute_card_layout(
                 MAIN_CLIENT_W,
@@ -18646,7 +17894,6 @@ mod tests {
                     }
                 );
             }
-            // The layout's own preset buttons carry the same lit rule.
             let ns = states.len() as i32;
             for b in l.btns.iter().filter(|b| {
                 (BTN_CARD_STATE_AT..BTN_CARD_STATE_AT + ns).contains(&b.id)
@@ -18669,10 +17916,6 @@ mod tests {
     /// performs no write at all.
     #[test]
     fn card_kind_probe_shim_is_view_only() {
-        // Runs under a scratch root -- never the owner's real config -- with
-        // the shared env/config/mirror serial held for both reads, so a
-        // mid-flight scratch repoint from another lane cannot land between
-        // them.
         crate::test_env::EnvGuard::with_scratch("card-kind-probe", |_dir| {
             let before = app_support::config::load_config().effective_card_specs();
             let mut st = UiState::default();
@@ -18714,9 +17957,6 @@ mod tests {
         let raw = "Show.S01E02.Pilot.1080p.mkv - PotPlayer".to_string();
         let resolved = Resolved::default();
         st.record_preview(CardKind::Series, raw.clone(), None, resolved.clone());
-        // The preview follows the live kind — Series — so it appears even
-        // though the movie slot was never recorded, composing the recorded
-        // series item (not placeholders).
         assert_eq!(st.displayed_card_kind(), CardKind::Series);
         let (act, have) = st.preview_activity();
         assert!(have);
@@ -18769,22 +18009,14 @@ mod tests {
         let before_specs = st.card_specs_state.clone();
         let before_status = st.status_text.clone();
         for id in [30, 31, 32, 33] {
-            // The mapping itself is pinned by `card_preset_mapping` above; here
-            // only the real action's inertness matters.
             let _ = st.do_card_action(NULL, id);
         }
         assert_eq!(st.card_specs_state, before_specs, "specs untouched");
         assert_eq!(st.status_text, before_status, "status untouched");
-        // State presets are no longer a Settings row: the line-2 presets live
-        // behind the wide Card disclosure, so the reachable control proves the
-        // retired Details ids are inert because the Details row is gone, not
-        // because the whole action is a no-op.
         assert!(
             card_preset_for_button(card_state_button(0)).is_some(),
             "the State row must still map: the retired ids are inert, the action is not"
         );
-        // Details never laid out on Card or Settings; the State preset lives
-        // in the wide Card disclosure, never in slimmed Settings.
         let l = compute_card_layout_with(
             MAIN_CLIENT_W,
             MAIN_CLIENT_H,
@@ -18865,14 +18097,11 @@ mod tests {
             length: "22 min".to_string(),
             episode_count: 9,
         };
-        // Pre-fix predicate: the lit segment was the user's own stale bool.
         let pre_fix_movie_lit = true;
         assert!(
             pre_fix_movie_lit,
             "pre-fix arm: user state lit Movie; the assertion below is the red one"
         );
-        // Shipped rule: selecting the series makes the object and the preview a
-        // series, whatever the search scope was.
         let mut st = UiState::default();
         st.cur_view = View::Card;
         st.picker.filter = crate::search::KindFilter::Movies; // the user's filter
@@ -18882,9 +18111,6 @@ mod tests {
         assert!(!st.preview_object().expect("preview object").2, "series");
         assert_eq!(st.displayed_card_kind(), CardKind::Series);
         assert!(!st.preview_activity().0.name.to_lowercase().contains("film"));
-        // And no scope control exists to follow anything: the removed scope
-        // ids (85/81/82/87/88) are absent from every composition, whatever
-        // the engine's internal filter is.
         for filter in [
             crate::search::KindFilter::All,
             crate::search::KindFilter::Movies,
@@ -18942,9 +18168,6 @@ mod tests {
             assert!(knobs <= 3, "{cw}x{ch}: {knobs} payload controls at rest");
             let searches = l.btns.iter().filter(|b| b.id == BTN_PICKER_SEARCH).count();
             assert_eq!(searches, 1, "{cw}x{ch}: exactly one search verb");
-            // Approved narrow: hero Fix is the repair affordance and exists
-            // only while a title is playing; wide keeps its footer Fix. No
-            // list repair outside the hero/panel is the invariant.
             if cw < 1000 {
                 assert!(
                     l.btns.iter().all(|b| b.id != BTN_FIX_MATCH),
@@ -18970,9 +18193,6 @@ mod tests {
                     "{cw}x{ch}: hero Fix missing while playing"
                 );
             }
-            // Approved narrow: no scope row — the removed scope ids
-            // (85/81/82/87/88) are absent; payload lives in Settings CARD.
-            // Wide keeps the legacy disclosure (minus scope and artwork).
             let open = compute_card_layout_with(
                 cw,
                 ch,
@@ -19007,11 +18227,6 @@ mod tests {
                     );
                 }
             }
-            // Every interactive target is at least 32 px tall, and nothing
-            // overlaps with the disclosure open. The synopsis affordance is
-            // the full-row text band (hover + keyboard focus for its
-            // tooltip): full width, 18 px tall, still reachable — exempt from
-            // the touch floor, never from the client/overlap checks.
             for b in &open.btns {
                 if b.rc.right <= b.rc.left || b.rc.bottom <= b.rc.top {
                     continue;
@@ -19041,7 +18256,6 @@ mod tests {
                     );
                 }
             }
-            // The v1 composition, same size: the numbers this pass removed.
             let v1 = compute_card_layout_shipped_v1(
                 cw,
                 ch,
@@ -19050,9 +18264,6 @@ mod tests {
                 CardKind::Series,
                 PreviewSurface::default(),
             );
-            // The v1 composition still carries the removed ids as raw numbers
-            // (81/82 kind buttons, 70 artwork toggle): the shipped-v1 layout
-            // is frozen history, so the count below keeps discriminating.
             let v1_knobs = v1
                 .btns
                 .iter()
@@ -19585,7 +18796,6 @@ mod tests {
         );
         assert!(!seen_force.load(Ordering::SeqCst));
 
-        // The real progress callback published into the shared snapshot.
         assert_eq!(
             st.scan_shared
                 .lock()
@@ -19595,7 +18805,6 @@ mod tests {
             1
         );
 
-        // The UI-thread landing, exactly as the wndproc arms run it.
         st.publish_scan_progress();
         assert_eq!(st.scan_progress.keys_done, 1);
         assert_eq!(st.scan_progress.keys_total, 4);
@@ -19705,7 +18914,6 @@ mod tests {
             assert!(st.scan_stats.keys_done > 0, "counters must be honest");
             assert_eq!(st.status_text, scan_done_text("Scan", &terminal));
         }
-        // Leave the global pristine for the next serial holder.
         {
             let mut st = ui();
             st.arm_timer = Arc::new(default_arm_timer);
@@ -19738,9 +18946,6 @@ mod tests {
     #[test]
     fn card_preset_save_publishes_live_specs() {
         crate::test_env::EnvGuard::with_scratch("card-save-publish", |_dir| {
-            // Two valid presets in a row: whatever the scratch store held,
-            // the second save always changes it, so the publish path is
-            // always exercised.
             let mut st = UiState::default();
             let _ = st.do_card_action(NULL, card_state_button(1));
             let _ = st.do_card_action(NULL, card_state_button(2));
@@ -19760,21 +18965,10 @@ mod tests {
     /// seam instead, asserted separately below.
     #[test]
     fn card_preset_failed_save_publishes_nothing() {
-        // The guard holds the shared env/mirror/config serial for the whole
-        // test: the mirror snapshot, the sentinel publish, the scratch
-        // repoint, the driven save, and the mirror read all happen under it,
-        // and the guard restores both root and mirror on drop, panic-safe.
-        // (Declared before the sentinel guard shape matters: a Drop guard
-        // declared after the EnvGuard would drop first, still under the
-        // serial. Here the shared guard itself carries the mirror, so one
-        // guard covers both.)
         let mut env = crate::test_env::EnvGuard::scratch("card-save-fail");
         let mut sentinel = CardSpecs::default();
         assert!(sentinel.set_line(CardKind::Series, CardLine::State, "tag"));
         app_support::config::set_live_card_specs(sentinel.clone());
-        // Break the store without touching the real file: point the cache root
-        // at a regular file, so the load yields the zero config and the atomic
-        // save's `create_dir_all` fails.
         let blocker = env.dir().join("blocker");
         std::fs::write(&blocker, "x").unwrap();
         env.repoint(&blocker);
@@ -19784,8 +18978,6 @@ mod tests {
         let status = st.status_text.clone();
         assert_eq!(live, sentinel, "a failed save must publish nothing");
         assert_eq!(status, "Save failed.");
-        // The retired `"title"` Details id never reaches the UI path: stored
-        // specs carrying it migrate to `default` on load and on save.
         assert_eq!(
             CardSpec {
                 details: "title".into(),
@@ -19869,7 +19061,6 @@ mod tests {
                 "no folder context, the parsed movie year rides the field (path {path:?})"
             );
         }
-        // The parse inverts the Card's own `Title (Year)` rendering.
         assert_eq!(
             parse_title_year(&fix_match_prefill_name(raw, "")),
             ("Dune Part Two".to_string(), 2024),
@@ -19931,12 +19122,10 @@ mod tests {
             31,
             "the extension is not a search token: {prefill:?}"
         );
-        // The same file without the player's window suffix seeds one query.
         assert_eq!(
             fix_match_prefill_name("Night of the Living Dead (1968).wav", ""),
             prefill
         );
-        // Every extension the player opens, in any case.
         for ext in [
             "wav", "mp3", "mp4", "mkv", "avi", "flac", "m4a", "webm", "mov", "wmv", "WAV", "Mkv",
         ] {
@@ -19947,8 +19136,6 @@ mod tests {
                 "extension {ext:?} leaked into the query"
             );
         }
-        // A parenthesised tail is the title's own, never an extension: the
-        // strip must leave it alone and the query must not change.
         assert_eq!(
             fix_match_prefill_name("Live at the Roxy (Live) - PotPlayer", ""),
             "Live at the Roxy",
@@ -20083,9 +19270,6 @@ mod tests {
     }
 
 
-    // Every test below that touches the store or `LOCALAPPDATA` runs under
-    // the crate-shared [`crate::test_env::EnvGuard`] serial: one lock for the
-    // `window` and `search` lanes, panic-safe restore via `Drop`.
 
     fn fix_series_candidate() -> Candidate {
         Candidate {
@@ -20187,8 +19371,6 @@ mod tests {
             let path = fix_series_path();
             let key = metadata::overrides::series_key_for(&path).unwrap();
             let cand = fix_series_candidate();
-            // No network has run: the helper only builds D's identity record
-            // and writes it with C's correction save.
             let over = fix_match_save_provisional(&cand, Scope::Series, &key, &path)
                 .expect("provisional save");
             assert_eq!(over.title, "Show");
@@ -20200,8 +19382,6 @@ mod tests {
                 "provisional: the merged synopsis rides the media snapshot"
             );
             assert!(over.episodes.is_empty(), "provisional: no episode table");
-            // The card resolves the corrected series (show + provider code)
-            // without any episode table.
             let store = metadata::overrides::load().expect("reload");
             let got = store.resolve_for(&path).expect("corrected latch");
             assert_eq!(got.scope, Scope::Series);
@@ -20219,8 +19399,6 @@ mod tests {
             let key = metadata::overrides::series_key_for(&path).unwrap();
             fix_match_save_provisional(&fix_series_candidate(), Scope::Series, &key, &path)
                 .expect("provisional");
-            // The later full pin carries the episode table plus the refreshed
-            // poster; it must REPLACE the provisional, not sit beside it.
             fix_match_put(&path, &fix_full_series_override(&key)).expect("full save");
             let store = metadata::overrides::load().expect("reload");
             let got = store.resolve_for(&path).expect("full latch");
@@ -20238,10 +19416,6 @@ mod tests {
     #[test]
     fn fix_match_movie_to_series_clears_the_movie_latch() {
         crate::test_env::EnvGuard::with_scratch("fix-movie-to-series", |_dir| {
-            // A legacy movie latch for a file the filename query called a
-            // movie but that is really a series episode: the correction scope
-            // comes from the user's explicit TV choice through the real
-            // `FixMatchState`, never from the filename flag.
             let path = fix_movie_path();
             let movie_key = metadata::overrides::movie_key(&path);
             assert!(!movie_key.is_empty());
@@ -20262,9 +19436,6 @@ mod tests {
                 })
                 .expect("seed movie latch");
             assert!(store.resolve_for(&path).is_some());
-            // Movie-classified file plus the explicit TV choice: the choice
-            // offers the series table and a series-kind target (the filename
-            // scope would be Movie).
             let mut st = fix_headless_state(path.clone(), true);
             assert!(st.apply_pick_kind(false));
             let choices = st.effective_choices();
@@ -20298,11 +19469,6 @@ mod tests {
     #[test]
     fn fix_match_series_to_movie_keeps_the_show_latch() {
         crate::test_env::EnvGuard::with_scratch("fix-series-to-movie", |_dir| {
-            // A file mis-latched as a series episode that is really a movie:
-            // the same path carries the old season latch and the new movie
-            // correction, so C's correction save clears the season key derived
-            // from it while the show-wide series latch stands. The scope comes
-            // from the SELECTED movie candidate through the real `FixMatchState`.
             let path = fix_series_path();
             let show_key = metadata::overrides::series_key_for(&path).unwrap();
             let season_key = metadata::overrides::season_key_for(&path).unwrap();
@@ -20324,9 +19490,6 @@ mod tests {
                     })
                     .expect("seed latch");
             }
-            // Series-classified file plus the explicit Movie choice: the
-            // choice offers the single movie target (the filename scope would
-            // stay Series/Season).
             let mut st = fix_headless_state(path.clone(), false);
             st.choices = fix_match_scope_choices(&path, false);
             assert!(st.apply_pick_kind(true));
@@ -20337,10 +19500,6 @@ mod tests {
             );
             let (scope, key) = st.selected_target().expect("movie target");
             assert_eq!(scope, Scope::Movie, "series file + Movie choice saves Movie");
-            // The movie correction removes the old season latch for the file's
-            // own season folder -- and never the show-wide series latch, which
-            // keeps serving every other episode -- and the card becomes the
-            // movie (no poster: a movie renders from its media snapshot).
             fix_match_save_provisional(&fix_movie_candidate(), scope, &key, &path)
                 .expect("movie correction");
             let store = metadata::overrides::load().expect("reload");
@@ -20359,9 +19518,6 @@ mod tests {
                 got.poster.is_empty(),
                 "a movie provisional carries no poster"
             );
-            // A sibling episode still resolves through the surviving show
-            // latch. It derives from the same fixture path helper, never a
-            // hand-built literal.
             let sibling = std::path::Path::new(&path)
                 .parent()
                 .expect("the fixture lives in a season folder")
@@ -20381,11 +19537,8 @@ mod tests {
 
     #[test]
     fn fix_candidate_is_movie_prefers_kind_then_table_then_provider() {
-        // The leg-reported kind wins.
         assert!(fix_candidate_is_movie(&fix_movie_candidate()));
         assert!(!fix_candidate_is_movie(&fix_series_candidate()));
-        // A series entry without a table is still a series (no fabricated
-        // episodes).
         let mut bare_series = fix_series_candidate();
         bare_series.episode_count = 0;
         assert!(
@@ -20394,8 +19547,6 @@ mod tests {
         );
         let anilist = fix_candidate("Show", 2020, Kind::SERIES, "anilist", 0);
         assert!(!fix_candidate_is_movie(&anilist));
-        // An unknown kind with a table is a series; without one the provider
-        // decides (series-only legs stay series, otherwise movie).
         let mut unknown_table =
             fix_candidate("Show", 2020, Kind::UNKNOWN, "cinemeta", 3);
         assert!(!fix_candidate_is_movie(&unknown_table));
@@ -20410,7 +19561,6 @@ mod tests {
 
     #[test]
     fn fix_match_no_candidate_falls_back_to_filename() {
-        // Before a candidate is selected the filename query owns the scope.
         let path = fix_series_path();
         let movie_state = fix_headless_state(path.clone(), true);
         assert!(movie_state.effective_is_movie());
@@ -20422,9 +19572,6 @@ mod tests {
 
     #[test]
     fn fix_match_empty_search_keeps_the_movie_choice() {
-        // The explicit TV choice owns the kind; an empty re-search must not
-        // silently flip back to the filename classification (the retired
-        // candidate-derived behaviour).
         let path = fix_movie_path();
         let mut st = fix_headless_state(path.clone(), true);
         st.choices = fix_match_scope_choices(&path, true);
@@ -20440,8 +19587,6 @@ mod tests {
 
     #[test]
     fn fix_match_empty_search_keeps_the_tv_choice() {
-        // The explicit Movie choice owns the kind; an empty re-search keeps it
-        // and offers the single movie target again.
         let path = fix_series_path();
         let mut st = fix_headless_state(path.clone(), false);
         st.choices = fix_match_scope_choices(&path, false);
@@ -20458,9 +19603,6 @@ mod tests {
 
     #[test]
     fn fix_match_series_pick_on_series_path_keeps_both_radios() {
-        // A series pick for a series file keeps the Series-vs-Season radios
-        // usable: the table is unchanged, so sync is a no-op and a same-kind
-        // re-pick never resets the user choice.
         let path = fix_series_path();
         let mut st = fix_headless_state(path.clone(), false);
         st.choices = fix_match_scope_choices(&path, false);
@@ -20476,7 +19618,6 @@ mod tests {
         );
         let (scope, _) = st.selected_target().expect("series-kind target");
         assert!(scope != Scope::Movie);
-        // A second series pick is still a no-op.
         st.candidates = vec![fix_candidate("Other Show", 2021, Kind::SERIES, "anilist", 5)];
         assert!(!st.effective_is_movie());
         assert!(!st.sync_scope_to_selection());
@@ -20484,8 +19625,6 @@ mod tests {
 
     #[test]
     fn fix_match_kind_choice_rebuilds_the_scope_table() {
-        // The explicit Movie/TV choice rebuilds the scope table both ways; the
-        // selected candidate's kind no longer drives it.
         let series_path = fix_series_path();
         let mut st = fix_headless_state(series_path.clone(), true);
         st.choices = fix_match_scope_choices(&series_path, true);
@@ -20495,7 +19634,6 @@ mod tests {
         assert_eq!(st.choices.len(), 2);
         let (scope, _) = st.selected_target().expect("series-kind target");
         assert!(scope != Scope::Movie);
-        // Back the other way: TV -> Movie resets to the single movie target.
         assert!(st.apply_pick_kind(true));
         assert!(st.is_movie);
         assert!(st.choices.is_empty());
@@ -20506,8 +19644,6 @@ mod tests {
     #[test]
     fn fix_match_provisional_failure_saves_nothing() {
         crate::test_env::EnvGuard::with_scratch("fix-provisional-fail", |_dir| {
-            // An empty key cannot save: the worker must never spawn on this,
-            // and no half-applied correction may reach the store.
             let path = fix_series_path();
             let err = fix_match_save_provisional(&fix_series_candidate(), Scope::Series, "", &path)
                 .expect_err("empty key must fail");
@@ -20530,9 +19666,6 @@ mod tests {
             let key = metadata::overrides::series_key_for(&path).unwrap();
             fix_match_save_provisional(&fix_series_candidate(), Scope::Series, &key, &path)
                 .expect("provisional");
-            // The full pin failed: the outcome keeps the provisional (never
-            // rolls it back) and reports the pending copy -- never the
-            // `Nothing was saved` error, which would lie.
             match fix_match_latch_failure(true, "Show") {
                 FixOutcome::ProvisionalKept(status) => {
                     assert!(status.contains("Matched"), "clear status: {status}");
@@ -20544,12 +19677,10 @@ mod tests {
                 }
                 other => panic!("a post-provisional failure must keep it: {other:?}"),
             }
-            // Without a provisional there is nothing to keep: the old error.
             assert!(matches!(
                 fix_match_latch_failure(false, "Show"),
                 FixOutcome::Failed
             ));
-            // And the store still resolves the usable provisional.
             let store = metadata::overrides::load().expect("reload");
             let got = store.resolve_for(&path).expect("provisional kept");
             assert_eq!(got.title, "Show");
@@ -20560,8 +19691,6 @@ mod tests {
     #[test]
     fn fix_match_put_replaces_through_the_correction_path() {
         crate::test_env::EnvGuard::with_scratch("fix-put-correction", |_dir| {
-            // A conflicting movie latch: a plain `put` of the series record
-            // would leave it in place (movie-first precedence keeps winning).
             let path = fix_series_path();
             let movie_key = metadata::overrides::movie_key(&path);
             let mut store = metadata::overrides::load()
@@ -20580,8 +19709,6 @@ mod tests {
                     created_at_ms: 0,
                 })
                 .expect("seed movie latch");
-            // The full-record save must go through `put_correction`, so the
-            // conflicting latch is gone and the series resolves.
             let key = metadata::overrides::series_key_for(&path).unwrap();
             fix_match_put(&path, &fix_full_series_override(&key)).expect("full save");
             let store = metadata::overrides::load().expect("reload");
@@ -20593,8 +19720,6 @@ mod tests {
 
     #[test]
     fn fix_match_provisional_kept_outcome_stays_open_with_clear_status() {
-        // No store touch, but the shared serial keeps a mid-flight scratch
-        // repoint from landing under this lane.
         let _env = crate::test_env::EnvGuard::hold();
         let mut st = fix_headless_state(fix_series_path(), false);
         st.busy = true;
@@ -20615,10 +19740,6 @@ mod tests {
 
     #[test]
     fn fix_match_provisional_save_failure_blocks_the_worker() {
-        // Break the store without touching the real file: point the cache
-        // root at a regular file, so the atomic save's `create_dir_all`
-        // fails and the provisional cannot save. The guard restores the root
-        // on drop.
         let mut env = crate::test_env::EnvGuard::scratch("fix-latch-blocked");
         let blocker = env.dir().join("blocker");
         std::fs::write(&blocker, "x").unwrap();
@@ -20898,7 +20019,6 @@ mod tests {
                         l.client_h
                     );
                 }
-                // The buttons sit inside the client area, below the status.
                 for (id, rc) in &l.buttons {
                     assert!(
                         rc.bottom <= l.client_h && rc.top >= l.status.bottom,
@@ -20906,20 +20026,16 @@ mod tests {
                     );
                 }
             }
-            // Series (radios): the full 588 stack.
             let series = fix_match_layout(dpi, FixScreen::Search, 2);
             assert_eq!(series.client_h, scale_px(dpi, 588));
             assert_eq!(series.status.top, scale_px(dpi, 502));
             assert_eq!(series.buttons[1].1.top, scale_px(dpi, 532));
             assert_eq!(series.radios.len(), 2);
-            // Movie (no radios): the collapsed 496 stack, no dead strip.
             let movie = fix_match_layout(dpi, FixScreen::Search, 0);
             assert_eq!(movie.client_h, scale_px(dpi, 496));
             assert_eq!(movie.status.top, scale_px(dpi, 410));
             assert_eq!(movie.buttons[1].1.top, scale_px(dpi, 440));
             assert!(movie.radios.is_empty());
-            // The field frame wraps the one query edit with a 2px border; the
-            // kind row occupies the retired Year band.
             let (frame, edit) = (movie.name_frame, movie.name_edit);
             {
                 let pad = scale_px(dpi, 2);
@@ -20940,8 +20056,6 @@ mod tests {
                 "dpi {dpi}: movie status above buttons"
             );
             let l = series;
-            // The rule sits under the header; the strip sits above the list;
-            // the empty panel covers the list area so it is never blank.
             assert!(
                 l.rule.bottom <= l.name_label.top,
                 "dpi {dpi}: rule under header"
@@ -20960,7 +20074,6 @@ mod tests {
                 (l.list.left, l.list.top, l.list.right, l.list.bottom),
                 "dpi {dpi}: empty covers list"
             );
-            // The 56px rows fit the list: at least three full rows visible.
             assert!(
                 (l.list.bottom - l.list.top) >= 3 * scale_px(dpi, FIX_MATCH_ROW_H_L),
                 "dpi {dpi}: list fits 56px rows"
@@ -20972,9 +20085,6 @@ mod tests {
 
     #[test]
     fn card_preview_fits_all_six_rows() {
-        // Approved narrow: no Discord preview surfaces (results panel owns the
-        // list); the hero card + search/scope/panel fit every DPI, rows live in
-        // the hero. Wide keeps the legacy six-row preview.
         for dpi in [96, 120, 144, 192] {
             let l = compute_card_layout(
                 scale_px(dpi, MAIN_CLIENT_W),
@@ -20991,7 +20101,6 @@ mod tests {
                 );
                 assert_eq!(l.rows.len(), 3, "dpi {dpi}: media rows");
             } else {
-                // Narrow: hero owns the rows, preview empty by design.
                 assert_eq!(l.rows.len(), 2, "dpi {dpi}: hero rows");
                 for r in &l.rows {
                     assert!(
@@ -21013,7 +20122,6 @@ mod tests {
                         && l.art.bottom <= l.object.bottom,
                     "dpi {dpi}: poster outside the hero"
                 );
-                // Top bar, hero, search, scope, panel, status in order.
                 assert!(
                     l.object.bottom <= l.picker_bar.top
                         && l.picker_bar.bottom <= l.stage.top
@@ -21042,7 +20150,6 @@ mod tests {
                     "dpi {dpi}: the preview overlaps the open disclosure"
                 );
             } else {
-                // Narrow has no disclosure: open == rest, no state row on Card.
                 assert!(open.card_btn(card_state_button(0)).is_none());
             }
         }
@@ -21062,7 +20169,6 @@ mod tests {
                 PreviewSurface::default(),
             );
             assert_eq!(l.compact, ch < 480, "{cw}x{ch}: compact flag");
-            // Approved wide threshold: 1180x700 (the split workspace).
             assert_eq!(l.wide, cw >= 1180 && ch >= 700, "{cw}x{ch}: wide flag");
             for b in &l.btns {
                 if b.rc.right <= b.rc.left || b.rc.bottom <= b.rc.top {
@@ -21074,8 +20180,6 @@ mod tests {
                     b.id,
                     b.rc
                 );
-                // Pinned narrow bands must fit at the approved 680px height;
-                // tiny 270px viewports scroll the results panel instead.
                 if ch >= 680 || l.wide {
                     assert!(
                         b.rc.top >= 0 && b.rc.bottom <= ch,
@@ -21109,7 +20213,6 @@ mod tests {
                 }
             }
             for r in &l.rows {
-                // Narrow hero rows live inside the hero card, not the preview.
                 let inside_hero = r.left >= l.object.left
                     && r.right <= l.object.right
                     && r.top >= l.object.top
@@ -21147,8 +20250,6 @@ mod tests {
                 }
             }
             if ch < 480 {
-                // Approved narrow keeps the pinned chrome even in compact:
-                // 48px top bar + 24px status bar.
                 assert_eq!(l.header.bottom - l.header.top, scale_px(96, TOPBAR_H_L), "{cw}x{ch}: pinned top bar");
                 assert_eq!(l.status.bottom - l.status.top, scale_px(96, STATUS_BAR_H_L), "{cw}x{ch}: pinned status");
             }
@@ -21157,8 +20258,6 @@ mod tests {
 
     #[test]
     fn card_tabs_and_bottom_buttons_share_one_anatomy() {
-        // Approved narrow: gear opens Settings (text), hero Fix is an outline
-        // ghost (only while playing); hidden Card/Back keep their styles.
         let card = compute_card_layout_state(
             MAIN_CLIENT_W,
             MAIN_CLIENT_H,
@@ -21359,8 +20458,6 @@ mod tests {
                 "{kind:?}: absent artwork must collapse, not claim a poster"
             );
             let px = paint_offscreen(cw, ch, dpi, &st);
-            // Approved narrow hero always reserves the 64x96 poster slot (clean,
-            // no badge); the model still collapses (no poster URL claimed).
             if l.wide {
                 let (mx, my) = (
                     (l.art.left + l.art.right) / 2,
@@ -21372,8 +20469,6 @@ mod tests {
                     "{kind:?}: a blank placeholder tile was painted for absent artwork"
                 );
             } else {
-                // Narrow: poster slot present by design, no badge ink (checked
-                // by the badge-free paint path, not by collapse).
                 assert!(
                     l.art.right - l.art.left == scale_px(96, HERO_POSTER_W_L),
                     "hero poster slot"
@@ -21450,8 +20545,6 @@ mod tests {
                     "{cw}x{ch}: picker control {id} escapes the client: {rc:?}"
                 );
             }
-            // Change filters survives only in the wide disclosure; the narrow
-            // layout carries no such control.
             if cw >= 1180 && ch >= 700 {
                 assert!(
                     l.card_btn(BTN_ADVANCED).is_some(),
@@ -21476,7 +20569,6 @@ mod tests {
                 "{cw}x{ch}: the picker band escapes the client: {:?}",
                 l.picker_bar
             );
-            // The field is one control, never a separate year input.
             assert_eq!(
                 l.btns
                     .iter()
@@ -21522,8 +20614,6 @@ mod tests {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push((title.to_string(), year, filter));
                 let rows = rows.clone()?;
-                // One batch, filtered by the scope's own class rule exactly as
-                // the real streaming pass filters it.
                 let rows: Vec<metadata::Candidate> = rows
                     .into_iter()
                     .filter(|cand| filter.includes_candidate(cand))
@@ -21629,7 +20719,6 @@ mod tests {
             band.right - band.left > 60 && band.bottom - band.top > 10,
             "the Activity surface draws a title band: {band:?}"
         );
-        // Ink is a pixel far brighter than the card fill the band sits on.
         let ink = |x: i32, y: i32| -> bool {
             let i = ((y as usize) * 1180 + x as usize) * 4;
             u32::from(px[i]) + u32::from(px[i + 1]) + u32::from(px[i + 2]) > 3 * 0x90
@@ -21702,9 +20791,6 @@ mod tests {
                 "{cw}x{ch}: exactly one search verb"
             );
             if cw < 1000 {
-                // Approved narrow: pinned Apply at rest, no hero Fix with
-                // nothing playing, and no scope row — the removed scope ids
-                // (85/81/82/87/88) are absent.
                 assert!(
                     l.card_btn(BTN_PICKER_APPLY).is_some()
                         && l.card_btn(BTN_FIX_MATCH).is_none(),
@@ -21723,8 +20809,6 @@ mod tests {
                         .all(|b| b.id != BTN_PICKER_APPLY && b.id != BTN_FIX_MATCH),
                     "{cw}x{ch}: an apply/repair control is visible at rest"
                 );
-                // Universal search: no kind control anywhere at rest — the
-                // removed ids are gone from the composition entirely.
                 for id in [85, 81, 82, 87, 88] {
                     assert!(
                         l.btns.iter().all(|b| b.id != id),
@@ -21733,8 +20817,6 @@ mod tests {
                 }
             }
         }
-        // And the same rule drives the real launch: with a player the window
-        // opens on Main.
         let mut st = UiState::default();
         st.open_cold_view_with(true);
         assert_eq!(st.cur_view, View::Main);
@@ -21766,8 +20848,6 @@ mod tests {
             );
         }
 
-        // The neighbouring state, same window: a picked record is not empty and
-        // carries its own header and synopsis.
         let cand = Candidate {
             kind: Kind::SERIES,
             title: "The Office".to_string(),
@@ -21816,7 +20896,6 @@ mod tests {
         assert!(st.select_candidate(0), "the row selects");
         assert!(st.has_picked_candidate(), "an explicit pick arms Apply");
 
-        // New query, same record back at index 0: still not a choice.
         st.picker.set_query("Dune 2021".to_string());
         assert!(!st.has_picked_candidate(), "the query edit dropped the pick");
         st.picker.candidates = vec![cand.clone()];
@@ -21826,7 +20905,6 @@ mod tests {
             !st.has_picked_candidate(),
             "an identical row in a fresh list is a highlight, not a pick"
         );
-        // Same for a scope change and for a brand-new search.
         assert!(st.select_candidate(0));
         st.picker.set_filter(crate::search::KindFilter::Movies);
         st.picker.candidates = vec![cand.clone()];
@@ -21839,7 +20917,6 @@ mod tests {
         st.picker.selected = 0;
         st.picker.open = true;
         assert!(!st.has_picked_candidate(), "the new search dropped the pick");
-        // A closed list can never be armed, however it got there.
         assert!(st.select_candidate(0));
         st.picker.close_results();
         assert!(!st.has_picked_candidate(), "a closed list holds no pick on screen");
@@ -21857,16 +20934,12 @@ mod tests {
         assert_eq!(st.cur_view, View::Card);
         st.picker_search = stub_search(calls.clone(), Ok(vec![dune_movie(), office_series()]));
 
-        // Type into the one field. (The process-wide now-playing mirror is
-        // shared with parallel tests, so the field's starting content is set
-        // here explicitly; the cold-open rule itself is asserted above.)
         st.picker.set_query(String::new());
         st.focus_id = BTN_PICKER_FIELD;
         for ch in "The Office".chars() {
             assert!(st.on_card_char(ch as u32));
         }
         assert_eq!(st.picker.query, "The Office");
-        // One Search, through the real card dispatch.
         assert_eq!(st.do_card_action(NULL, BTN_PICKER_SEARCH), None);
         drive_picker_job(&mut st);
         assert_eq!(
@@ -21879,7 +20952,6 @@ mod tests {
         assert_eq!(st.picker.status, "2 matches for \"The Office\"");
         assert!(!st.preview_is_live());
 
-        // Select the series row: the preview is that record, and it is a series.
         let series_idx = st
             .picker
             .candidates
@@ -21905,8 +20977,6 @@ mod tests {
         );
         assert!(status.contains("not sent to Discord"), "{status:?}");
 
-        // A movie row composes a movie: the record's kind owns the preview, so
-        // a series can never inherit a stale Movie and vice versa.
         let movie_idx = st
             .picker
             .candidates
@@ -21916,7 +20986,6 @@ mod tests {
         assert!(st.select_candidate(movie_idx));
         assert!(st.preview_object().expect("object").2);
         assert_eq!(st.displayed_card_kind(), CardKind::Movie);
-        // Selecting is local: the query is untouched and no latch is running.
         assert_eq!(st.picker.query, "The Office");
         assert!(!st.picker.busy);
     }
@@ -21944,7 +21013,6 @@ mod tests {
                 &base,
             );
             if cw < 1000 {
-                // Narrow pinning: always laid out, disabled look.
                 let _apply = disabled
                     .card_btn(BTN_PICKER_APPLY)
                     .unwrap_or_else(|| panic!("{cw}x{ch}: pinned Apply missing"));
@@ -21956,7 +21024,6 @@ mod tests {
                     .style;
                 assert_eq!(style, BTN_OUTLINE, "{cw}x{ch}: Apply must look disabled");
             } else {
-                // Wide keeps the legacy guard: no Apply without a player.
                 assert!(
                     disabled.card_btn(BTN_PICKER_APPLY).is_none(),
                     "{cw}x{ch}: wide Apply without a player would be a lie"
@@ -21986,13 +21053,11 @@ mod tests {
                     .unwrap()
                     .style;
                 assert_eq!(style, BTN_ACCENT, "{cw}x{ch}: Apply lights when it can apply");
-                // Hero Fix never overlaps pinned Apply.
                 let repair = playing
                     .card_btn(BTN_FIX_MATCH)
                     .unwrap_or_else(|| panic!("{cw}x{ch}: hero Fix missing"));
                 assert!(!rects_intersect(apply, repair));
             } else {
-                // Wide keeps the legacy list actions.
                 let results = playing.picker_results;
                 assert!(
                     apply.top >= results.top && apply.bottom <= results.bottom,
@@ -22000,7 +21065,6 @@ mod tests {
                 );
             }
         }
-        // At rest Apply stays pinned (disabled look); hero Fix needs a player.
         let rest = compute_card_layout_state(
             463,
             703,
@@ -22018,7 +21082,6 @@ mod tests {
         assert!(
             rest.card_btn(BTN_PICKER_APPLY).is_some() && rest.card_btn(BTN_FIX_MATCH).is_some()
         );
-        // With nothing playing the hero ghost is absent, not disabled.
         let idle = compute_card_layout_state(
             463,
             703,
@@ -22051,22 +21114,18 @@ mod tests {
             crate::search::QueryIssue::TooLong.message(),
             "a refused character explains itself"
         );
-        // A multi-byte scalar counts once, not per byte.
         let mut st = UiState::default();
         st.cur_view = View::Card;
         st.focus_id = BTN_PICKER_FIELD;
         st.picker.set_query("\u{1f600}".repeat(10));
         assert_eq!(st.picker.query_len(), 10);
         assert!(!st.picker.query.is_empty());
-        // Paste clips at the cap and says so.
         let mut st = UiState::default();
         st.cur_view = View::Card;
         st.focus_id = BTN_PICKER_FIELD;
         assert!(st.paste_into_picker(&"x".repeat(300)));
         assert_eq!(st.picker.query_len(), crate::search::MAX_QUERY_CHARS);
         assert_eq!(st.picker.status, crate::search::QueryIssue::TooLong.message());
-        // Paste also refuses control characters, and is inert when the field
-        // does not hold focus.
         let mut st = UiState::default();
         st.cur_view = View::Card;
         st.focus_id = BTN_CARD_BACK;
@@ -22103,8 +21162,6 @@ mod tests {
         assert_eq!(st.picker.status, crate::search::QueryIssue::YearOnly.message());
         assert!(!st.picker.busy && !st.picker.open);
 
-        // Provider failure: its own status, an empty (not open) list, and the
-        // query preserved.
         let mut st = UiState::default();
         st.cur_view = View::Card;
         st.picker_search = stub_search(calls.clone(), Err("providers unreachable".to_string()));
@@ -22139,7 +21196,6 @@ mod tests {
                   _only: &[String],
                   sink: &(dyn Fn(Vec<metadata::Candidate>) + Send + Sync)| {
                 sink(vec![dune_movie()]);
-                // Hold the rest of the stream until the test has seen batch one.
                 for _ in 0..1000 {
                     if gate.load(std::sync::atomic::Ordering::Relaxed) {
                         break;
@@ -22193,14 +21249,11 @@ mod tests {
         assert!(st.picker.busy && st.picker.open, "a batch landed mid-stream");
         assert!(st.select_candidate(0));
         assert!(st.has_picked_candidate());
-        // The busy flag alone must not refuse the pick.
         assert!(!st.card_picker_match());
         assert_eq!(
             st.picker.status, FIX_MATCH_IDLE_REASON,
             "the pick passed the busy guard and stopped at the player check"
         );
-        // What a real latch does before saving: advance the generation and drop
-        // the queue, so batch two and the stream end are both stale.
         st.picker.generation += 1;
         st.picker.busy = true;
         st.picker.open = false;
@@ -22327,7 +21380,6 @@ mod tests {
         assert_eq!(title, "Dune (2021)");
         assert!(sub.contains("Regular movie"), "{sub:?}");
         assert!(!sub.contains("episodes"), "a movie has no episode table");
-        // A year-only record renders without a fake year.
         let mut c = dune_movie();
         c.year = 0;
         assert_eq!(fix_match_row_lines(&c).0, "Dune");
@@ -22483,8 +21535,6 @@ mod tests {
         st.picker.searched = true;
         st.picker.selected = 0;
         assert_eq!(st.picker.candidates.len(), 3);
-        // Every candidate resolves through the production hit test after it is
-        // selected (selection scrolls it into the one-row viewport).
         for idx in 0..st.picker.candidates.len() {
             assert!(st.select_candidate(idx), "row {idx} selects");
             let x = (l.picker_results.left + l.picker_results.right) / 2;
@@ -22523,14 +21573,7 @@ mod tests {
             }
         }
         let tenrai = frieren("tenrai", "t-1", "Frieren");
-        // Same work, different punctuation: normalized tokens agree
-        // (`frieren` == `frieren`), but only the exact title ranks first, so
-        // the merge keeps the tenrai identity. A genuinely longer title
-        // (e.g. "Frieren Beyond Journey's End") is a different work under the
-        // no-subset-merge rule and must NOT collapse here.
         let anilist = frieren("anilist", "a-1", "Frieren!");
-        // Arrival order never changes the painted rows: the exact title stays
-        // first and the same work collapses onto its identity.
         let mut painted: Vec<Vec<metadata::Candidate>> = Vec::new();
         for order in [vec![tenrai.clone(), anilist.clone()], vec![anilist.clone(), tenrai.clone()]] {
             let mut p = crate::search::MediaPicker::default();
@@ -22545,12 +21588,7 @@ mod tests {
             painted.push(p.candidates.clone());
         }
         assert_eq!(painted[0], painted[1], "live batches agree whatever leg answered first");
-        // Both spellings normalize to the same exact title, so the closeness
-        // rank is tied and the provider leg order decides: AniList is the
-        // higher-precedence anime leg, so its identity is kept.
         assert_eq!(painted[0][0].provider, "anilist", "the tied rank keeps the better leg");
-        // The cache round-trips the painted answer, and replaying it paints the
-        // same provider in the same order.
         let _guard = arm_cache();
         let key = crate::search::search_cache_key(
             "frieren",
@@ -22569,8 +21607,6 @@ mod tests {
         assert!(replay.finish_search_now(generation));
         assert_eq!(replay.candidates, painted[0], "replay paints the live rows");
         assert_eq!(replay.candidates[0].provider, "anilist");
-        // Finishing invalidates a late batch: it is refused and the final
-        // status stands instead of flipping back to a running count.
         let mut p = crate::search::MediaPicker::default();
         p.set_query("frieren 2023".to_string());
         let (generation, ..) = p.begin_search().expect("search starts");
@@ -22748,7 +21784,6 @@ mod tests {
         st.picker.open = true;
         st.picker.searched = true;
         st.picker.selected = 0;
-        // Wide client: every candidate is visible at once.
         let l = st.layout_card_for(1180, 700, 96);
         let row_btn = |l: &CardLayout, idx: usize| {
             l.btns
@@ -22760,17 +21795,13 @@ mod tests {
         let (r0, r1) = (row_btn(&l, 0), row_btn(&l, 1));
         let (x0, y0) = ((r0.left + r0.right) / 2, (r0.top + r0.bottom) / 2);
         let (x1, y1) = ((r1.left + r1.right) / 2, (r1.top + r1.bottom) / 2);
-        // A release with no press selects nothing.
         st.release_card_layout_at(&l, x1, y1, 96);
         assert_eq!(st.picker.selected, 0, "press-less release must not select");
-        // A press on one row and a release on another selects nothing.
         st.press_card_layout_at(&l, x0, y0, 96);
         st.release_card_layout_at(&l, x1, y1, 96);
         assert_eq!(st.picker.selected, 0, "a mismatched press must not select");
-        // The paired press selects.
         st.click_card_layout_at(&l, x1, y1, 96);
         assert_eq!(st.picker.selected, 1, "the paired click selects");
-        // Same rule off the list: a stray press never fires Apply.
         let adv = l.card_btn(BTN_ADVANCED).expect("Change filters laid out");
         let (ax, ay) = ((adv.left + adv.right) / 2, (adv.top + adv.bottom) / 2);
         let was = st.advanced_open;
@@ -22807,14 +21838,12 @@ mod tests {
             cand("tenrai", "c", "Gamma"),
         );
         st.candidates = vec![a.clone(), b.clone(), c.clone()];
-        // The user clicked the middle row.
         st.picked = Some(fix_pick_key(&b));
         assert_eq!(
             st.selected_candidate().map(|c| c.provider_id),
             Some("b".to_string()),
             "the headless selection follows the pick"
         );
-        // A new batch reorders and grows but still carries the row.
         let d = cand("kitsu", "d", "Delta");
         *st.slot
             .lock()
@@ -22826,7 +21855,6 @@ mod tests {
             Some("b".to_string()),
             "the batch must keep the clicked row, not index 0"
         );
-        // A batch that drops the row drops the pick and falls back to first.
         *st.slot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -22881,8 +21909,6 @@ mod tests {
         let mut st = UiState::default();
         st.hover_btn = BTN_SYNOPSIS;
         assert!(st.synopsis_visible(), "hover reveals the synopsis");
-        // A Settings body row hits through the shared scrolled table and stays
-        // visible above the status bar.
         let mut settings = UiState::default();
         settings.cur_view = View::Settings;
         let sl = settings.layout_settings_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
@@ -23038,7 +22064,6 @@ mod tests {
                 CardKind::Series,
                 PreviewSurface::default(),
             );
-            // Approved wide threshold: 1180x700.
             assert_eq!(l.wide, cw >= 1180 && ch >= 700, "{cw}x{ch}: wide flag");
             let _ = want_wide;
             for b in &l.btns {
@@ -23089,8 +22114,6 @@ mod tests {
                 ("stage", l.stage),
             ] {
                 if r.right <= r.left || r.bottom <= r.top {
-                    // Narrow redesign: preview/synopsis empty (results panel owns
-                    // the list); tiny heights scroll.
                     continue;
                 }
                 assert!(
@@ -23109,7 +22132,6 @@ mod tests {
                 assert!(l.status.bottom > l.status.top, "{cw}x{ch}: empty status");
             }
             for r in &l.rows {
-                // Narrow hero rows live in the hero; wide rows in the preview.
                 let inside_hero = r.left >= l.object.left
                     && r.right <= l.object.right
                     && r.top >= l.object.top
@@ -23167,10 +22189,6 @@ mod tests {
                     "{cw}x{ch}: an empty wide surface"
                 );
             } else {
-                // Approved narrow: results panel owns the list; hero owns
-                // rows. The one field and one Search are at rest; the removed
-                // scope ids (85/88 here, all five in the layout test) and
-                // Change filters are absent.
                 if !l.compact {
                     for id in [BTN_PICKER_FIELD, BTN_PICKER_SEARCH] {
                         assert!(
@@ -23223,7 +22241,6 @@ mod tests {
         assert!(l.wide, "1180x760 is the wide workspace");
         assert!(floor.wide, "fixture: 1180x700 is the approved wide floor");
 
-        // Every laid-out control stays inside the client, and no two intersect.
         for b in &l.btns {
             if b.rc.right <= b.rc.left || b.rc.bottom <= b.rc.top {
                 continue;
@@ -23255,7 +22272,6 @@ mod tests {
             }
         }
 
-        // Three disjoint, non-empty surfaces.
         for (i, a) in l.surfaces.iter().enumerate() {
             assert!(
                 a.right > a.left && a.bottom > a.top,
@@ -23270,9 +22286,6 @@ mod tests {
             }
         }
 
-        // The 60 px the client gained is absorbed by the stage and the lower
-        // band, and by nothing else: the rail, the object card and the tab strip
-        // are identical at both heights.
         assert_eq!(l.stage.top, floor.stage.top, "the stage moved");
         assert_eq!(
             l.stage.bottom - floor.stage.bottom,
@@ -23303,8 +22316,6 @@ mod tests {
             floor.object
         );
 
-        // The surfaces actually paint a panel at this size: a sample inside each
-        // one is not the bare card fill.
         let px = paint_offscreen(cw, ch, 96, &st);
         for (i, s) in l.surfaces.iter().enumerate() {
             let (x, y) = ((s.left + s.right) / 2, (s.top + s.bottom) / 2);
@@ -23354,7 +22365,6 @@ mod tests {
             );
             (paint_offscreen(cw, ch, 96, &st), l.obj_meta)
         };
-        // Muted meta text on the card fill: ink is far brighter than either.
         let rightmost_ink = |px: &[u8], rc: Rect| -> i32 {
             let mut right = rc.left - 1;
             for y in rc.top..rc.bottom {
@@ -23449,8 +22459,6 @@ mod tests {
             }
         }
 
-        // Episode identity: the header is the series title and the state keeps
-        // the episode facts.
         let ep = Resolved {
             series: "Breaking Bad".to_string(),
             episode_name: "Problem Dog".to_string(),
@@ -23474,7 +22482,6 @@ mod tests {
             p.state
         );
 
-        // The designer's off-fields vanish from the payload AND the model.
         let bare = presence::designer::DesignerSpec {
             artwork: false,
             details: false,
@@ -23512,7 +22519,6 @@ mod tests {
             "from {}",
             crate::settings::APP_VERSION
         );
-        // Movies show the runtime, never an episode marker.
         assert_eq!(
             hero_meta_for(2024, true, false, "2h 46m", 0, 0, 0),
             "2024 · Film · 2h 46m"
@@ -23523,7 +22529,6 @@ mod tests {
             "2024 · Film · 2h 46m",
             "a Film never carries S02E01 even with episode numbers present"
         );
-        // Series show the episode code, never a bare runtime.
         assert_eq!(
             hero_meta_for(2024, false, true, "60 min", 2, 1, 0),
             "2024 · Anime series · S02E01"
@@ -23534,7 +22539,6 @@ mod tests {
         );
         assert_eq!(hero_episode_code(2, 1, 0), "S02E01");
         assert_eq!(hero_episode_code(0, 0, 0), "");
-        // The match-count header exists only after a search ran.
         let mut st = UiState::default();
         assert!(!st.picker.searched, "a fresh picker never searched");
         st.picker.searched = true;
@@ -23618,9 +22622,6 @@ mod tests {
             }
             let px = paint_offscreen(cw, ch, 96, &st);
             let rc = status_version_rect(l.status, 96);
-            // The version is right-aligned in the inset rect, so its ink lives
-            // in the last `need` px of it: the left half belongs to the status
-            // text and must not be counted.
             let left = (rc.right - need - 2).max(rc.left);
             let mut ink = 0;
             for y in rc.top..rc.bottom {
@@ -23729,10 +22730,6 @@ mod tests {
             st
         };
         let (cw, ch, dpi) = (390, 844, 96);
-        // The label band under the 4px track: `state.bottom + SP_2` for the
-        // track, `+4` for its height, `+SP_2` for the labels. The measured
-        // band starts one row under the track and stops one row short of the
-        // panel foot, so neither the track nor the border can count as ink.
         let band = |st: &UiState| {
             let l = compute_card_layout(
                 cw,
@@ -23798,8 +22795,6 @@ mod tests {
 
         let (left0, right1, top, bottom) = band(&with);
         assert_eq!(band(&without), (left0, right1, top, bottom), "payload-independent strip");
-        // Narrow redesign: hero carries no timer strip, so the narrow band is
-        // empty by design. Prove the countdown through the wide paint path.
         if bottom <= top {
             let wl = compute_card_layout(1180, 700, 96, &with.card_specs_state, with.displayed_card_kind(), with.preview_surface);
             assert!(wl.preview.bottom > wl.preview.top, "wide preview paints the timer");
@@ -23871,9 +22866,6 @@ mod tests {
         st.toggle_designer_field(DesignerField::Details);
         assert!(!presence::live_designer().details);
         assert!(st.preview_activity().0.details.is_empty());
-        // Covers are always on: no artwork toggle exists, so the art survives
-        // every remaining toggle. The tooltip stays empty here because this
-        // note is episode-sourced, not work-sourced.
         let (off, _) = st.preview_activity();
         assert!(!off.large_image.is_empty(), "covers are always on");
         assert!(
@@ -23958,8 +22950,6 @@ mod tests {
         );
         assert_eq!(st.picker.candidates.len(), 1);
         assert!(!st.picker.busy);
-        // Approved copy deletes "(cached)" from the Card: the status is the
-        // bare match count.
         assert_eq!(st.picker.status, "1 match for \"The Office\"");
         cache_off();
     }
@@ -24052,7 +23042,6 @@ mod tests {
                 crate::search::KindFilter::All,
                 "universal search: the card always runs both chains"
             );
-            // Approved copy deletes "(cached)" from the Card.
             assert_eq!(st.picker.status, "1 match for \"The Office\"");
             assert_eq!(
                 calls.lock().unwrap().len(),
@@ -24089,7 +23078,6 @@ mod tests {
             drive_preload(&mut st);
             assert!(st.preload.ready);
             assert_eq!(calls.lock().unwrap().len(), 1);
-            // The next episode: a different path, the same work.
             let next = season.join("The Office S01E02.mkv");
             app_support::config::set_live_now_playing(Some(app_support::config::NowPlaying {
                 raw_title: "The Office S01E02.mkv - PotPlayer".to_string(),
@@ -24123,7 +23111,6 @@ mod tests {
         st.prefetch_now_playing();
         assert!(st.preload.key.is_empty(), "no key is claimed while disabled");
         assert!(calls.lock().unwrap().is_empty());
-        // Enabled, the same call now prefetches.
         st.cache_enabled = true;
         st.prefetch_now_playing();
         drive_preload(&mut st);
@@ -24160,7 +23147,6 @@ mod tests {
                 !st.picker.open,
                 "an empty prefetch never opens the list for a manual-only search"
             );
-            // The next poll retries the same key instead of early-returning.
             st.prefetch_now_playing();
             drive_preload(&mut st);
             assert_eq!(calls.lock().unwrap().len(), 2, "a dead key retries");
@@ -24195,7 +23181,6 @@ mod tests {
             drive_preload(&mut st);
             assert!(st.preload.ready);
             st.picker.set_query("The Office".to_string());
-            // A different work now plays: a movie in a Films folder.
             let films = dir.join("Films");
             std::fs::create_dir_all(&films).unwrap();
             let dune = films.join("Dune Part Two 2024.mkv");
@@ -24258,10 +23243,7 @@ mod tests {
             assert_eq!(st.picker.query, "The Office");
             assert_eq!(st.picker_path, e1);
 
-            // A query typed for episode one belongs to episode one: the switch
-            // re-seeds from the new file even though the user touched the field.
             st.picker.set_query("The Office typed".to_string());
-            // The next episode: the same show, a different file.
             playing(&e2, "The Office S01E02.mkv");
             st.prefetch_now_playing();
             assert_eq!(st.preload.key, key, "the show identity is kept");
@@ -24557,7 +23539,6 @@ mod tests {
         assert_eq!(std::fs::read(&backup).unwrap(), junk.as_bytes());
         assert!(!path.exists(), "the bad file is moved aside");
 
-        // Repeat loads never stack a second backup ("once").
         std::fs::write(&path, junk).unwrap();
         assert!(metadata::overrides::load_from(&path).is_err());
         let backups: Vec<String> = std::fs::read_dir(scratch.path())
@@ -24571,8 +23552,6 @@ mod tests {
             .collect();
         assert_eq!(backups.len(), 1, "one quarantine: {backups:?}");
 
-        // The latch policy: a load error is refused, never an empty store
-        // whose next write would be a one-entry file over every manual match.
         let over = metadata::overrides::Override {
             scope: metadata::overrides::Scope::Movie,
             key: "d:\\films\\dune part two.mkv".to_string(),
@@ -24618,8 +23597,6 @@ mod tests {
             length: String::new(),
             episode_count: 0,
         };
-        // Eight concurrent puts from eight separately loaded instances: every
-        // key survives, none is lost to a racing load->insert->save.
         std::thread::scope(|scope| {
             for i in 0..8 {
                 let path = &path;
@@ -24639,7 +23616,6 @@ mod tests {
                 "concurrent put of {key} survived"
             );
         }
-        // Sequential saves over an existing file keep working (rename path).
         let mut cache = SearchCache::load_from(&path);
         cache
             .put("show-9|2008|series", &[mk("show-9")], &["kitsu".to_string()])
@@ -24689,8 +23665,6 @@ mod tests {
                 "field toggle {id} is still a Tab stop"
             );
         }
-        // The designer's shipped default stays identity: with no toggle able
-        // to flip a field, the composed card is the card.
         presence::set_live_designer(presence::DesignerSpec::default());
     }
 
@@ -24747,8 +23721,6 @@ mod tests {
         let mut st = UiState::default();
         st.cur_view = View::Card;
         st.picker.set_filter(crate::search::KindFilter::Movies);
-        // The engine still accepts the scope internally, but no control can
-        // select it: the layout carries no such button.
         assert_eq!(st.picker.filter, crate::search::KindFilter::Movies);
         st.picker.set_filter(crate::search::KindFilter::All);
         let l = st.layout_card_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
@@ -24758,8 +23730,6 @@ mod tests {
                 "removed scope id {id} is laid out"
             );
         }
-        // Clicking where a scope segment used to be is a no-op: the filter
-        // stays universal.
         assert_eq!(st.picker.filter, crate::search::KindFilter::All);
     }
 
@@ -24788,13 +23758,11 @@ mod tests {
         app_support::config::set_live_now_playing(None);
         let mut st = UiState::default();
         st.cur_view = View::Card;
-        // Open with a highlighted but never-picked row: Apply must refuse.
         st.picker.candidates = vec![office_series()];
         st.picker.open = true;
         st.picker.searched = true;
         st.picker.selected = 0;
         assert!(!st.has_picked_candidate());
-        // Apply is pinned even without a pick (disabled look, live control).
         st.picker_path = String::new();
         let l = st.layout_card_for(MAIN_CLIENT_W, MAIN_CLIENT_H, 96);
         assert_eq!(card_click_id(&mut st, &l, BTN_PICKER_APPLY), None);

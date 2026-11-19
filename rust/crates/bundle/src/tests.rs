@@ -1,10 +1,3 @@
-//! `bundle_test.go` (18 tests) ported 1:1.
-//!
-//! Test-only helpers: `cache_name_for` restates the 16-hex filename rule
-//! independently of the metadatada package, `seed_live_entry` / `seed_cache_file`
-//! write the store and the legacy loose file the way the resolver's migration
-//! did, and `TempDir` is `t.TempDir()` (std has no temp-dir type; the workspace
-//! pins no tempfile crate).
 
 #![allow(non_snake_case)]
 

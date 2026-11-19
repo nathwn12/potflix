@@ -1,9 +1,3 @@
-//! Ports `go\internal\metadata\connreuse_test.go`.
-//!
-//! The test lives in this crate rather than `metadata-http` because the brief's
-//! seam is the provider chain's own wire path, but the behaviour it pins is
-//! `fetchGet` + `decodeCapped` reusing one TCP connection, which this crate
-//! reaches through `metadata_http::HttpClient`.
 
 use std::time::Duration;
 

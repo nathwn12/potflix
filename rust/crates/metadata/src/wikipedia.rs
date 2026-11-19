@@ -1,38 +1,3 @@
-//! `metadata::wikipedia` -- mirrors `go\internal\metadata\wikipedia.go`.
-//!
-//! Wikipedia provider: the movie fallback immediately after iTunes, and the
-//! artwork source. Movie-only, so a series key never reaches the wire.
-//!
-//! Two calls on the base path: `list=search` picks the top film hit, then
-//! `prop=extracts|pageimages` yields the synopsis and, when one exists, the page
-//! image (`thumbnail`, else `original`). MEASURED 2026-10-10 against the live
-//! API: PageImages never returns film posters (they are fair-use), so a resolved
-//! page with NO page image gets at most two best-effort same-host calls through
-//! the SAME Action API -- `prop=images&imlimit=max` lists the article's files,
-//! and the poster-like file is resolved to a direct URL via
-//! `prop=imageinfo&iiprop=url`. `imlimit=max` is mandatory: the poster
-//! "File:Spider-Man Brand New Day poster.jpg" is the 18th of 24 files, so the
-//! default 10-file page hid it.
-//!
-//! # Error vs miss
-//!
-//! The Action API serves its error envelope with HTTP 200
-//! (`{"error":{"code":"maxlag","info":"Waiting..."}}`). Without the explicit
-//! check the empty `query` reads as a definitive miss and the resolver persists
-//! a 30-day negative for a lookup that never happened. Transport failures and
-//! decode failures are transient too. Every transient cause is sanitized: the
-//! request URL carries the escaped owner title, so the message must never
-//! contain it.
-//!
-//! # The one wire divergence
-//!
-//! Wikimedia's User-Agent policy wants a descriptive app identifier, and
-//! `wikipedia_test.go` asserts `Potflix` case-sensitively, while
-//! `metadata-http::HttpClient` sends the shared `potflix-metadata/1.0`. This
-//! module therefore owns [`WikiClient`], which mirrors `http.go`'s
-//! `fetchWithRetry` exactly -- same limiter, same bounded 429 retries with
-//! backoff and jitter, same `Retry-After` bound, same `decode_capped` -- and
-//! differs only in the header.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -88,8 +53,6 @@ impl WikiClient {
                     .provider(TlsProvider::NativeTls)
                     .build(),
             )
-            // Go's `client.Do` hands back every status; non-2xx is
-            // `decode_capped`'s error and a 429 is the retry's trigger.
             .http_status_as_error(false)
             .build();
         WikiClient {
@@ -414,8 +377,6 @@ pub(crate) fn strip_disambiguation(title: &str) -> String {
     };
     let inner = trimmed[open + 1..trimmed.len() - 1].trim();
     let mut rest = inner;
-    // An optional 4-digit year prefix (`2021 film`); a bare year with no kind
-    // word (`Heat (1995)`) is NOT disambiguation by this convention.
     if rest.len() > 4
         && rest.as_bytes()[..4].iter().all(|b| b.is_ascii_digit())
         && rest.as_bytes()[4].is_ascii_whitespace()
@@ -470,8 +431,6 @@ fn wiki_poster_plausible(lower: &str) -> bool {
         let start = i + offset;
         let before_ok = start == 0 || !is_ascii_letter(bytes[start - 1]);
         let after = start + 6;
-        // Go's switch: at or past the end, or a non-letter, both bound the word;
-        // a plural "posters" counts only when its own trailing `s` is bounded.
         let after_ok = after >= bytes.len()
             || !is_ascii_letter(bytes[after])
             || ((bytes[after] == b's' || bytes[after] == b'S')
@@ -536,7 +495,6 @@ pub(crate) fn wiki_pick_poster(titles: &[String], page: &str) -> String {
     if found {
         return best;
     }
-    // No "poster"-word file: the infobox lead image named exactly like the page.
     let want = page.trim().replace('_', " ").to_lowercase();
     if want.is_empty() {
         return String::new();
@@ -546,14 +504,11 @@ pub(crate) fn wiki_pick_poster(titles: &[String], page: &str) -> String {
         if name.is_empty() {
             continue;
         }
-        // The `File:` namespace prefix is not part of the comparison.
         let stem = match name.split_once(':') {
             Some((_, rest)) => rest,
             None => name,
         };
         let stem = stem.trim();
-        // A photo extension is still required: the stem match replaces only
-        // the "poster"-word signal, never the format or blocked-word guards.
         let dot = stem.rfind('.');
         let core = match dot {
             Some(i) => stem[..i].trim(),
@@ -810,8 +765,6 @@ impl crate::resolver::Source for WikipediaSource {
             }
             title = entry.title.clone();
             extract = entry.extract.clone();
-            // The page image: the pithumbsize rendering when one exists, else
-            // the original file URL (piprop=thumbnail|original).
             thumb = first_non_empty(&[&entry.thumbnail.source, &entry.original.source]);
             matched = true;
             break;
@@ -820,18 +773,12 @@ impl crate::resolver::Source for WikipediaSource {
             return Ok(None);
         }
         let title = title.trim();
-        // The year is derived from the RAW page title first: `wiki_year` reads
-        // the parenthesized year (`Dune (2021 film)` -> 2021), which the
-        // disambiguation strip below removes.
         let year = wiki_year(title, &extract);
         let title = if title.is_empty() {
             q.title.trim().to_string()
         } else {
             strip_disambiguation(title)
         };
-        // Poster fallback, same host, at most two extra calls, ONLY for an
-        // already-resolved page with no page image at all: a present page image
-        // returns untouched above.
         let mut artwork = thumb.trim().to_string();
         if artwork.is_empty() {
             artwork = self.wiki_poster_url(cancel, &page);

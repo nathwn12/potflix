@@ -1,4 +1,3 @@
-//! `catchup_test` -- mirrors `go\internal\library\catchup_test.go`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -237,9 +236,6 @@ fn catch_up_skips_extras_and_partitions_the_report() {
     )
     .unwrap();
 
-    // A stale row: a parser from before the extras rule parked an extras leaf as
-    // needs-repair, with its cooldown already expired. Only `is_extra` can keep
-    // it out of this pass.
     let ix = Arc::clone(&crate::scanindex::load_scan_index(&index).ix);
     ix.put_file(FileRecord {
         path: extras.clone(),
@@ -268,7 +264,6 @@ fn catch_up_skips_extras_and_partitions_the_report() {
     .unwrap();
     c.wait();
 
-    // Exactly one lookup: the normal record's. The extras row was never fetched.
     assert_eq!(miss.calls.load(Ordering::SeqCst), 1, "lookups");
     assert_eq!(c.stats().lookups, 1);
 
@@ -356,7 +351,6 @@ fn catch_up_resolves_a_latched_record_without_any_lookup() {
         ..Default::default()
     };
 
-    // Park the one record as needs_repair with its cooldown already expired.
     let ix = Arc::clone(&crate::scanindex::load_scan_index(&index).ix);
     let mut rec = ix.file(&path).unwrap();
     rec.state = STATE_NEEDS_REPAIR.into();
@@ -366,8 +360,6 @@ fn catch_up_resolves_a_latched_record_without_any_lookup() {
     ix.put_file(rec);
     ix.commit().unwrap();
 
-    // Positive control: with no latch, that parked, expired row IS looked up
-    // exactly once.
     start_catch_up(cfg.clone(), None).unwrap().wait();
     assert_eq!(
         miss.calls.load(Ordering::SeqCst),
@@ -375,8 +367,6 @@ fn catch_up_resolves_a_latched_record_without_any_lookup() {
         "positive control: the parked, expired row must be looked up"
     );
 
-    // Latch the show folder in a fixture store (the test default is a
-    // non-existent path, so the owner's real store is never read).
     let store_dir = temp_dir("latchcs");
     let store_path = PathBuf::from(&store_dir.path).join("overrides.json");
     let mut store = metadata::overrides::Store::empty_at(store_path.clone());
@@ -396,14 +386,11 @@ fn catch_up_resolves_a_latched_record_without_any_lookup() {
         .expect("latch the show folder");
     let _fixture = OverridesFixture::install(store_path);
 
-    // A source that would answer every query: if the pass looked anything up,
-    // its call count would move.
     let fake = Arc::new(FakeSource::new("V1"));
     let f = Arc::clone(&fake);
     rx.set(move |dir| resolver_with(f.clone(), dir));
     start_catch_up(cfg.clone(), None).unwrap().wait();
 
-    // Zero lookups: the latch resolved the record from the store alone.
     assert_eq!(fake.calls.load(Ordering::SeqCst), 0, "latched lookup");
     let after = crate::scanindex::load_scan_index(&index)
         .ix
@@ -418,8 +405,6 @@ fn catch_up_resolves_a_latched_record_without_any_lookup() {
     );
     assert_eq!(after.next_try, 0);
 
-    // The report the pass regenerated counts the record once, as pinned, and
-    // the file partition still adds up.
     let report_path = path_join(&[
         &crate::pathutil::dir(&index),
         "inventory",

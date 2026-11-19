@@ -1,24 +1,3 @@
-//! `debuglog` -- mirrors the Go root file `go\debuglog.go`.
-//!
-//! Contract: appends `HH:mm:ss` + `" "` + msg, one line per event, beside the
-//! executable (Java used `dist\potflix-debug.log` = the jar's parent). The
-//! default path is [`default_log_path`] (`<exe dir>\potflix-debug.log`).
-//!
-//! Deliberate deviation, kept from the Go port (fleet decision 8): size-based
-//! rotation instead of the Java app's unbounded growth (observed 1,272,183 B /
-//! 13,536 lines). The cap and the file count are parameters, so a test can force
-//! a tiny cap and prove the real rotation path. Defaults: 5 MB x 3 files
-//! (`potflix-debug.log` + `.1` + `.2`).
-//!
-//! A failure to open the log is silent: every call becomes a no-op, exactly as
-//! Go's `l.f == nil` path, so logging can never break the app.
-//!
-//! Timestamp: Go's `time.Now().Format("15:04:05")` is LOCAL time, and Rust's std
-//! has no local-time API. The clock is therefore read from the C runtime's
-//! thread-safe `_localtime64_s` (the same call Go's `time.Now` ultimately makes
-//! through the OS), not from a new crate: the workspace pins every dependency,
-//! and no time crate is in the graph. The format itself lives in the pure
-//! [`format_hms`], which is what the tests pin.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -298,8 +277,6 @@ mod tests {
         assert!(text.ends_with('\n'));
     }
 
-    // The Go selftest's rotation case (`go\selftest.go:143-161`): cap 256, 3
-    // slots, 60 lines -> `.1` exists and the current file never exceeds the cap.
     #[test]
     fn rotation_at_forced_tiny_cap_keeps_current_within_cap() {
         let scratch = Scratch::new("rotate");
@@ -324,7 +301,6 @@ mod tests {
         );
     }
 
-    // Oldest is dropped: with 3 slots there is never a `.3`.
     #[test]
     fn rotation_never_exceeds_the_slot_count() {
         let scratch = Scratch::new("rotate-slots");
@@ -347,7 +323,6 @@ mod tests {
         );
     }
 
-    // A single slot has nowhere to rotate to: the file just keeps growing.
     #[test]
     fn single_slot_does_not_rotate() {
         let scratch = Scratch::new("rotate-one");
@@ -365,7 +340,6 @@ mod tests {
         assert!(std::fs::metadata(&path).expect("current log").len() > 64);
     }
 
-    // A zero cap is unbounded: the Go tests' `cap 0` case.
     #[test]
     fn zero_cap_never_rotates() {
         let scratch = Scratch::new("rotate-off");
@@ -380,7 +354,6 @@ mod tests {
         assert!(std::fs::metadata(&path).expect("current log").len() > 256);
     }
 
-    // An unopenable path is inert, never a panic or an error to the caller.
     #[test]
     fn unopenable_path_is_a_silent_no_op() {
         let scratch = Scratch::new("log-inert");
@@ -391,7 +364,6 @@ mod tests {
         assert!(!scratch.join("no-such-dir").exists());
     }
 
-    // A closed logger ignores further events.
     #[test]
     fn closed_logger_is_a_no_op() {
         let scratch = Scratch::new("log-closed");
@@ -405,7 +377,6 @@ mod tests {
         assert!(!text.contains("dropped"), "text = {text:?}");
     }
 
-    // Appending reopens the existing file and continues its size accounting.
     #[test]
     fn append_continues_an_existing_file() {
         let scratch = Scratch::new("log-append");
@@ -420,7 +391,6 @@ mod tests {
         assert!(text.ends_with('\n'));
     }
 
-    // The production path is beside the executable, named exactly as the Go port.
     #[test]
     fn default_log_path_is_beside_the_exe() {
         let path = default_log_path();

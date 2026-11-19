@@ -1,21 +1,3 @@
-//! Win32 store-file open -- the port of `go\internal\store\store_windows.go`.
-//!
-//! `os.OpenFile` (Go) and `OpenOptions` (Rust std) both ask Windows for
-//! `FILE_SHARE_READ | FILE_SHARE_WRITE` only, so the file cannot be deleted for
-//! as long as the store holds it: a test's temp-dir cleanup, the app's own
-//! "Clear index" / "Clear metadata" actions, or any other party's delete fails
-//! with "being used by another process". `FILE_SHARE_DELETE` is the missing
-//! half -- the other party's delete succeeds at once, Windows marks the file for
-//! deletion and unlinks it, and the handle left here points at the orphaned
-//! data. Holding the store open therefore never blocks removal.
-//!
-//! The cost is that a write into that orphaned file still reports success, so
-//! the durability claims check the path and report `Error::Removed`; see the
-//! crate doc's "Removal while open".
-//!
-//! Everything else matches `os.OpenFile` with `O_RDWR|O_CREATE`: the file is
-//! created when absent, never truncated, with no file attributes set and no
-//! security descriptor.
 
 use std::ffi::OsString;
 use std::fs::File;

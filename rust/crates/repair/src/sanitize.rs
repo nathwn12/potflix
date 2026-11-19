@@ -1,31 +1,3 @@
-//! `repair::sanitize` -- mirrors `go\internal\repair\sanitize.go`.
-//!
-//! The published-text filter: flatten whitespace, collapse every absolute local
-//! path to its basename, redact the machine's identity terms (account name, home
-//! directory) and any id-shaped digit run, and keep everything else unchanged.
-//!
-//! [`sanitize_error`] is the single entry point for any string that may reach a
-//! GitHub issue, so a provider error such as
-//!
-//! ```text
-//! open D:\1movies\Some Folder\Some File.mkv: Access is denied
-//! ```
-//!
-//! publishes as
-//!
-//! ```text
-//! open Some File.mkv: Access is denied
-//! ```
-//!
-//! THE PIPELINE ORDER IS THE CONTRACT (`one_line` -> `collapse_paths` ->
-//! `redact_terms` -> `redact_id_shaped_digits`). Each stage depends on the one
-//! before it: a path split across a newline is only one path after the flatten;
-//! the home directory has to be collapsed as a whole before the bare account name
-//! is replaced; a redaction marker must not be re-scanned for digits.
-//!
-//! The path scanner is byte-level on purpose (`path_start`/`consume_path`): a
-//! path is a byte grammar, not a word list, and non-Latin file names must survive
-//! ([`is_path_rune`]).
 
 use std::fmt::Write as _;
 
@@ -182,8 +154,6 @@ pub(crate) fn redact_id_shaped_digits(s: &str) -> String {
         while i < b.len() && b[i].is_ascii_digit() {
             i += 1;
         }
-        // `\b\d{17,20}\b`: a digit run of that length with a non-word char (or
-        // an end) on both sides. A longer run fails `\b` at every offset.
         let left_ok = start == 0 || !is_word_byte(b[start - 1]);
         let right_ok = i == b.len() || !is_word_byte(b[i]);
         if (17..=20).contains(&(i - start)) && left_ok && right_ok {
@@ -290,7 +260,6 @@ fn consume_path(s: &str, i: usize) -> usize {
         let word_start = j;
         j = consume_word(s, j);
         if j == word_start {
-            // "C:\" with nothing behind it, or a stray separator.
             if first && j > i {
                 return j;
             }
@@ -654,7 +623,6 @@ mod tests {
         assert_eq!(got.len(), 200);
         assert!(got.ends_with("..."), "got {got}");
         assert_eq!(truncate_bytes("short", 200), "short");
-        // A multi-byte rune at the cut must not be split.
         let uni = "é".repeat(200);
         let got = truncate_bytes(&uni, 200);
         assert!(got.len() <= 200, "got len {}", got.len());

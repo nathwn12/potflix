@@ -1,20 +1,3 @@
-//! `repair::issue` -- mirrors `go\internal\repair\issue.go`.
-//!
-//! The GitHub issue path: `gh issue create` when there is a usable `gh`, else a
-//! prefilled `https://github.com/<repo>/issues/new?title=...&body=...` URL the
-//! owner can open in one click.
-//!
-//! Two rules the shape of this module exists to keep:
-//!
-//!   * A fallback is NOT a failure. With no `gh` (or no runner) the call returns
-//!     the prefilled URL and no error -- nothing failed, there is simply no `gh`
-//!     to run.
-//!   * A runner FAILURE returns BOTH the prefilled URL and the error, so a caller
-//!     can offer the manual path without hiding the failure.
-//!
-//! The `gh` executable name and the "is gh installed" answer are injectable
-//! ([`Gh`]) so the tests exercise every branch -- including the real-`gh` branch
-//! -- on a machine with no `gh` installed, and never execute one.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -157,7 +140,6 @@ pub fn create_issue(r: &Report, opts: &Options) -> (String, Option<Error>) {
     };
 
     if opts.runner.is_none() && !opts.gh.is_installed() {
-        // No gh, nothing failed: the prefilled URL and no error.
         return match fallback() {
             Ok(url) => (url, None),
             Err(e) => (String::new(), Some(e)),
@@ -171,9 +153,6 @@ pub fn create_issue(r: &Report, opts: &Options) -> (String, Option<Error>) {
                 Ok(stdout) => {
                     let url = first_url(&stdout);
                     if url.is_empty() {
-                        // The retry ran but printed no URL: nothing is known to
-                        // have been filed, so keep the manual path and the FIRST
-                        // cause.
                         return failure(Error::caused_by(
                             "repair: CreateIssue: retried without labels, gh printed no issue url",
                             first_err,
@@ -187,7 +166,6 @@ pub fn create_issue(r: &Report, opts: &Options) -> (String, Option<Error>) {
                         )),
                     )
                 }
-                // No silent loss: the cause text carries BOTH attempts' text.
                 Err(retry_err) => failure(Error::caused_by(
                     "repair: CreateIssue: retried without labels",
                     format!("{first_err}; retry: {retry_err}"),
@@ -266,7 +244,6 @@ fn issue_url(repo: &str, title: &str, body: &str, labels: &[String]) -> Result<S
         joined = labels.join(",");
         pairs.push(("labels", &joined));
     }
-    // `url.Values.Encode`: keys sorted, each value escaped as a query component.
     pairs.sort_by(|a, b| a.0.cmp(b.0));
     let query: Vec<String> = pairs
         .iter()

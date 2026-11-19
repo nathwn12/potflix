@@ -1,13 +1,3 @@
-//! Shared test scaffolding: a loopback HTTP/1.1 server, hand-rolled on
-//! `std::net` so no test dependency is added to the crate.
-//!
-//! It is the Rust stand-in for Go's `httptest.NewServer` plus the
-//! `ConnState` counter `connreuse_test.go` uses: it counts accepted sockets
-//! (not `RemoteAddr` strings, which undercount when the client reuses an
-//! ephemeral port), records every raw request head it served, and keeps a
-//! connection open for the next request (HTTP/1.1 keep-alive).
-//!
-//! No test here reaches the network: every server binds `127.0.0.1:0`.
 
 #![allow(dead_code)]
 
@@ -91,10 +81,6 @@ impl TestServer {
                 }
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        // The listener is non-blocking and the accepted socket
-                        // inherits that: restore blocking mode, or the first
-                        // idle read aborts the connection and nothing is ever
-                        // reused.
                         let _ = stream.set_nonblocking(false);
                         connections.fetch_add(1, Ordering::SeqCst);
                         serve_connection(stream, &replies, &hits, &heads, &bodies, &stop);
@@ -143,8 +129,6 @@ impl Drop for TestServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.handle.take() {
-            // The accept loop polls `stop`; a connection thread ends when the
-            // client's pool is dropped (which the caller's scope does first).
             let _ = handle.join();
         }
     }
@@ -179,8 +163,6 @@ fn serve_connection(
         let head = String::from_utf8_lossy(&head).into_owned();
         heads.lock().expect("heads").push(head.clone());
 
-        // The request bodies here are small JSON documents; read them so the
-        // next request head on this connection starts at a boundary.
         let mut body = Vec::new();
         if let Some(length) = content_length(&head) {
             body.resize(length, 0);

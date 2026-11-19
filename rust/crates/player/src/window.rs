@@ -1,10 +1,3 @@
-//! `window` -- mirrors `go\internal\player\window.go`: PotPlayer window
-//! discovery and title/liveness reads.
-//!
-//! Contract section 2/6: `EnumWindows` finds the first top-level window whose
-//! title ends with `" - PotPlayer"` or equals `"PotPlayer"`; only that one is
-//! tracked. Per poll the title is re-read with `GetWindowTextW` and liveness is
-//! checked with `IsWindow`.
 
 use core::ffi::c_void;
 use core::ptr::{NonNull, null_mut};
@@ -41,7 +34,6 @@ static mut ENUM_TARGET: HWND = null_mut();
 
 /// Stops the enumeration (returns FALSE) on the first match.
 unsafe extern "system" fn enum_windows_callback(hwnd: HWND, _lparam: LPARAM) -> BOOL {
-    // A window handed to us by EnumWindows is never null.
     let Some(handle) = NonNull::new(hwnd) else {
         return 1;
     };
@@ -89,7 +81,6 @@ mod tests {
             ("Some Movie - PotPlayer", true),
             ("PotPlayer", true),
             ("Show.S01E02.1080p - PotPlayer", true),
-            // lacks the leading space of " - PotPlayer"
             ("- PotPlayer", false),
             ("PotPlayer - PotPlayer", true),
             ("Some Movie", false),

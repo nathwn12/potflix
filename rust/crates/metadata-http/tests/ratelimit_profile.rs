@@ -1,4 +1,3 @@
-//! Port of `go\internal\metadata\ratelimit_profile_test.go`.
 
 use std::time::Duration;
 
@@ -60,7 +59,6 @@ fn rate_profile_mapping() {
         );
     }
 
-    // Unknown/empty profiles fall back to turbo.
     for profile in ["", "  ", "ludicrous", "TURBO-fast"] {
         set_rate_profile(profile);
         assert_eq!(current_rate_profile(), "turbo", "profile {profile:?}");
@@ -75,7 +73,6 @@ fn rate_profile_mapping() {
         );
     }
 
-    // Case-insensitivity: named profiles normalise.
     set_rate_profile("Turbo");
     assert_eq!(
         rate_interval_for_host("api.tvmaze.com"),
@@ -89,8 +86,6 @@ fn rate_profile_mapping() {
         "profile GENTLE"
     );
 
-    // A profile switch rewrites only the thirteen listed hosts, so an injected
-    // test host keeps working (ratelimit.go:69-71).
     set_host_interval("test-ratelimit-profile.example", Duration::from_millis(120));
     set_rate_profile("gentle");
     assert_eq!(

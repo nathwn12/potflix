@@ -1,6 +1,3 @@
-//! Ports `go\internal\metadata\match_test.go` (6 tests): the fold table, the
-//! similarity range, the Re:ZERO weight tie, the confident picks, the unrelated
-//! floor and the tie-breaks.
 
 use crate::match_::{ShowCand, normalize_title, pick_best_show, title_similarity};
 
@@ -71,7 +68,6 @@ fn pick_best_show_re_zero() {
     ];
     let best = pick_best_show("Re Zero", &cands).expect("want the main show");
     assert_eq!(best.name, "Re:ZERO -Starting Life in Another World-");
-    // Order-independent: spinoff listed second still loses.
     cands.swap(0, 1);
     let best = pick_best_show("Re Zero", &cands).expect("swapped, want the main show");
     assert_eq!(best.name, "Re:ZERO -Starting Life in Another World-");

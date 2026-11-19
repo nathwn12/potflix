@@ -1,7 +1,3 @@
-//! Ports `go\internal\metadata\parse_test.go` (9 tests). No assertion is
-//! weakened: every row, every expectation and the 18-of-34 Unknown count are
-//! carried over, including the movie-marker regressions and the
-//! Time Lapse collision guard.
 
 use crate::parse::{date_year, parse, parse_raw};
 use crate::types::{Kind, Query};
@@ -160,7 +156,6 @@ fn parse_movie_marker() {
             "Dragon Ball Super: Broly",
             0,
         ),
-        // REGRESSIONS.
         (
             "[SubsPlease] Frieren - 01 (1080p).mkv",
             Kind::SERIES,
@@ -371,8 +366,6 @@ fn parse_extras_no_real_title_collision() {
         ("Harbor.Run.2.Styx.2018.mkv", Kind::SERIES),
         ("The.Drifters.3.2014.mkv", Kind::MOVIE),
         ("Welcome.to.Harbor.S01E01.mkv", Kind::SERIES),
-        // Time Lapse (2014) is the collision that forced the time-lapse stem to
-        // require a trailing "video".
         ("Time.Lapse.2014.mkv", Kind::MOVIE),
         ("Time.Lapse.2014.1080p.mkv", Kind::MOVIE),
     ];

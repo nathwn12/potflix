@@ -1,19 +1,3 @@
-//! Embeds the Potflix icon, manifest, and version into every binary.
-//!
-//! Replaces Go's `go\rsrc_windows_amd64.syso` (see `go\README.md` § Windows exe
-//! icon). The icon source is the repo's shared `..\..\..\assets\icon.ico`; it is
-//! copied into
-//! `$OUT_DIR` and referenced by bare filename so `rc.exe` finds it either next
-//! to the `.rc` or through the `/I $OUT_DIR` that `embed-resource` passes.
-//!
-//! The `VERSIONINFO` resource is derived from `CARGO_PKG_VERSION` (the
-//! workspace version, `rust\Cargo.toml`): `ProductName` is `Potflix`,
-//! `CompanyName`/legal/trademark stay empty, and the numeric + string
-//! `FileVersion`/`ProductVersion` carry the crate version. Dependency-free
-//! (std only): the `.rc` text is written by hand, no new crate.
-//!
-//! Strict on purpose: if `rc.exe` is missing or fails, the build fails rather
-//! than silently shipping an icon-less or version-less exe.
 
 use std::env;
 use std::fs;

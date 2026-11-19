@@ -1,14 +1,3 @@
-//! `repair::report` -- mirrors `go\internal\repair\report.go`.
-//!
-//! The needs-repair report: the on-disk types, the staged writer (temp + rename,
-//! so a reader never sees a half-written report), the reader, and the two
-//! published forms (issue title, issue body).
-//!
-//! The privacy boundary lives here. [`Entry::path`] is written to the local
-//! JSON/TXT report and NEVER into [`issue_body`]; [`issue_body`] collapses
-//! anything path-shaped in [`Entry::name`] to its basename as a second line of
-//! defence, and every free-text field runs through
-//! [`sanitize_error`](crate::sanitize::sanitize_error).
 
 use std::fmt::Write as _;
 use std::fs;
@@ -270,8 +259,6 @@ fn render_text(r: &Report) -> String {
     }
     b.push('\n');
     for e in &r.entries {
-        // local= carries Entry.Path on purpose: this file never leaves the
-        // machine and an owner list without paths is not actionable.
         let _ = write!(
             b,
             "{}  {}  attempts={}  local={}",
@@ -621,7 +608,6 @@ mod tests {
     #[test]
     fn TestIssueBodyNeverCarriesALocalPath() {
         let mut r = sample_report();
-        // Worst case: a caller hands over the full path as Name too.
         r.entries[1].name = format!("{}:{}", 'C', r"\Users\tester\Desktop\x.mkv");
         r.entries[0].last_error =
             format!("open {}:{}{}", 'D', r"\1movies\Some Folder\Some File.mkv", ": Access is denied");
@@ -660,7 +646,6 @@ mod tests {
             ] {
                 assert!(body.contains(want), "body is missing {want:?}:\n{body}");
             }
-            // Nothing outside the report's own field set was added.
             for e in &r.entries {
                 assert!(!body.contains(&e.path), "body carries a full path:\n{body}");
             }

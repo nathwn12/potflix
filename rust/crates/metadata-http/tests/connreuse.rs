@@ -1,4 +1,3 @@
-//! Port of `go\internal\metadata\connreuse_test.go`.
 
 mod common;
 

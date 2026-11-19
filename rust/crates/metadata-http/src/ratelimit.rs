@@ -1,19 +1,3 @@
-//! `metadata::ratelimit` -- mirrors `go\internal\metadata\ratelimit.go`.
-//!
-//! The per-host fetch-spacing limiter: Turbo 1x / Balanced 2x / Gentle 4x the
-//! published provider intervals, switched live from Settings with no restart.
-//! Unknown hosts are ungated.
-//!
-//! Per-host fetch spacing, chosen from each provider's published limits:
-//! TVmaze ~2/s, AniList at the documented current degraded 30/min (the
-//! published normal is 90/min; the limiter holds the degraded figure),
-//! Jikan ~2.8/s, iTunes Search 20/min, Tenrai at its documented 120/min,
-//! Wikipedia anonymous Action API 1/s. Cinemeta, Kitsu, JustWatch, Episodate,
-//! Bangumi, LiveChart.me and ANN publish no limit, so theirs are conservative
-//! chosen readings in the order of the other hosts, not measured or published
-//! figures. Any host NOT listed gets NO gate, so
-//! tests, the loopback fake provider, and any future source are never silently
-//! throttled by a wrong guess (ratelimit.go:14-16).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -33,41 +17,14 @@ const DEFAULT_HOST_INTERVALS: &[(&str, Duration)] = &[
     ("graphql.anilist.co", Duration::from_millis(2000)),
     ("api.jikan.moe", Duration::from_millis(350)),
     ("itunes.apple.com", Duration::from_millis(3000)),
-    // MediaWiki API etiquette asks anonymous clients to make requests serially
-    // and keep the rate modest; 1 req/s is the courtesy ceiling. A Wikipedia
-    // movie fallback costs 2 sequential calls, so one fallback takes ~2s worst
-    // case - fine for a miss path behind the 3s iTunes gate. 429s are
-    // additionally honored via `Retry-After`.
     ("en.wikipedia.org", Duration::from_millis(1000)),
-    // Cinemeta publishes no rate limit: 1 req/s is a conservative chosen
-    // reading in the order of the other hosts, not a measured or published
-    // figure. A series lookup costs 2 sequential calls (catalog then meta).
     ("v3-cinemeta.strem.io", Duration::from_millis(1000)),
-    // Tenrai documents 120 requests/minute, so 500 ms holds that ceiling.
     ("api.tenrai.org", Duration::from_millis(500)),
-    // Kitsu publishes no rate limit: 1 req/s is a conservative chosen reading
-    // in the order of the other hosts, not a measured or published figure.
-    // A series lookup costs 2 sequential calls (anime then one episode page).
     ("kitsu.io", Duration::from_millis(1000)),
-    // JustWatch's unofficial GraphQL publishes no rate limit: 2 req/s is a
-    // conservative chosen reading, not a measured or published figure. One
-    // lookup is a single POST.
     ("apis.justwatch.com", Duration::from_millis(2000)),
-    // Episodate is a small community database publishing no rate limit: one
-    // request per 2 s is a conservative chosen reading, not a measured or
-    // published figure. A series lookup costs 2 sequential calls.
     ("www.episodate.com", Duration::from_millis(2000)),
-    // Bangumi publishes no rate limit for keyless search: one request per
-    // 2 s is a conservative chosen reading, not a measured or published
-    // figure. A series lookup costs up to 2 sequential calls.
     ("api.bgm.tv", Duration::from_millis(2000)),
-    // LiveChart.me publishes no rate limit: one request per 2 s is a
-    // conservative chosen reading, not a measured or published figure. One
-    // lookup is a single call.
     ("www.livechart.me", Duration::from_millis(2000)),
-    // ANN's encyclopedia API publishes no rate limit: one request per 2 s is
-    // a conservative chosen reading, not a measured or published figure. A
-    // lookup costs up to 2 sequential calls (the colon retry).
     ("cdn.animenewsnetwork.com", Duration::from_millis(2000)),
 ];
 
@@ -107,7 +64,6 @@ impl Limiter {
 static LIMITER: OnceLock<Mutex<Limiter>> = OnceLock::new();
 
 fn lock() -> MutexGuard<'static, Limiter> {
-    // Poison-tolerant: a panicking test must not wedge the limiter.
     LIMITER
         .get_or_init(|| Mutex::new(Limiter::new()))
         .lock()
@@ -205,9 +161,6 @@ pub fn normalize_rate_host(h: &str) -> String {
     if h.is_empty() {
         return String::new();
     }
-    // `net.SplitHostPort`: purely syntactic, and it fails (leaving the input
-    // alone) when there is no port or when a bare IPv6 literal has too many
-    // colons.
     let h = split_host_port(h).map_or(h, |(host, _port)| host);
     h.strip_suffix('.').unwrap_or(h).to_lowercase()
 }
@@ -278,7 +231,6 @@ mod tests {
         assert_eq!(normalize_rate_host("[::1]:8080"), "::1");
         assert_eq!(normalize_rate_host("Example.COM."), "example.com");
         assert_eq!(normalize_rate_host("  example.com:80  "), "example.com");
-        // `net.SplitHostPort` fails on these, so the literal is kept.
         assert_eq!(normalize_rate_host("[::1]"), "[::1]");
         assert_eq!(normalize_rate_host("::1"), "::1");
         assert_eq!(normalize_rate_host(":8080"), "");

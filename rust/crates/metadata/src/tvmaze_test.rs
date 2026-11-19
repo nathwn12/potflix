@@ -1,4 +1,3 @@
-//! Ports `go\internal\metadata\tvmaze_test.go`.
 
 use std::sync::Arc;
 

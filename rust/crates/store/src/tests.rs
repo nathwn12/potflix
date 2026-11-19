@@ -1,9 +1,3 @@
-//! The ported Go suite (`go\internal\store\store_test.go`, all ten tests) plus
-//! the cross-implementation gate: the crate must read files WRITTEN BY THE GO
-//! IMPLEMENTATION (`tests/fixtures/go-*.pflx`, synthetic keys only) and
-//! reproduce those same bytes from the same operations.
-//!
-//! Assertions are kept as the Go originals have them; none is relaxed.
 
 use super::*;
 use std::collections::HashMap as Map;
@@ -126,7 +120,6 @@ fn temp_leftovers(dir: &Path) -> Vec<String> {
         .collect()
 }
 
-// 1. round trip, including an empty value and binary keys/values.
 #[test]
 fn round_trip() {
     let (db, _dir, _path) = open_test("index.pflx", Options::default());
@@ -161,7 +154,6 @@ fn round_trip() {
     );
     assert_eq!(dump(&db), recs, "ForEach did not reproduce the written map");
 
-    // overwrite and delete
     db.put(b"plain-key", b"second").expect("overwrite");
     assert_eq!(
         db.get(b"plain-key").as_deref(),
@@ -173,7 +165,6 @@ fn round_trip() {
     db.delete(b"plain-key").expect("Delete of an absent key");
     assert_eq!(db.len(), recs.len() - 1, "Len after delete");
 
-    // ForEach stops on false
     let mut seen = 0;
     db.for_each(|_, _| {
         seen += 1;
@@ -209,7 +200,6 @@ fn round_trip() {
     assert_eq!(db.len(), recs.len() - 1, "Len after Close");
 }
 
-// 2. reopen after Close: the snapshot plus the delta replay to the same state.
 #[test]
 fn reopen_snapshot_and_delta() {
     let (db, _dir, path) = open_test("index.pflx", Options::default());
@@ -249,7 +239,6 @@ fn reopen_snapshot_and_delta() {
     );
     assert_eq!(st.compactions, 0, "Compactions after open");
 
-    // A write on the reopened store survives its own reopen.
     reopened.put(b"late", b"entry").expect("Put");
     reopened.commit().expect("Commit");
     let third = open(&path, Options::default()).expect("second reopen");
@@ -261,8 +250,6 @@ fn reopen_snapshot_and_delta() {
     assert_eq!(third.len(), want.len() + 1, "Len");
 }
 
-// 3. torn tail: a truncated file opens without error, keeps every complete
-// frame, drops the torn one, and is repaired in place.
 #[test]
 fn torn_tail_repair() {
     const RECORDS: usize = 200;
@@ -308,7 +295,6 @@ fn torn_tail_repair() {
             "cut {cut}: file size after repair"
         );
 
-        // The repaired store keeps working.
         repaired
             .put(b"after-repair", b"ok")
             .expect("Put after repair");
@@ -324,8 +310,6 @@ fn torn_tail_repair() {
     }
 }
 
-// 4. corruption: one flipped payload byte drops that frame and everything after
-// it, keeps everything before, and is not an error.
 #[test]
 fn corrupt_frame_drops_rest() {
     const RECORDS: usize = 20;
@@ -375,10 +359,8 @@ fn corrupt_frame_drops_rest() {
     );
 }
 
-// 5. compaction: automatic and explicit.
 #[test]
 fn compaction() {
-    // automatic
     {
         const THRESHOLD: i64 = 16 << 10;
         const RECORDS: usize = 5000;
@@ -428,11 +410,9 @@ fn compaction() {
         );
     }
 
-    // snapshot-smaller-than-delta
     {
         let dir = TempDir::new();
         let path = dir.join("index.pflx");
-        // A budget no test run reaches, so the delta is the whole file.
         let db = open(
             &path,
             Options {
@@ -480,7 +460,6 @@ fn compaction() {
     }
 }
 
-// 6. large values, and MaxValueSize rejecting without breaking the DB.
 #[test]
 fn large_value_and_max_value_size() {
     let big = b"0123456789abcdef".repeat((256 << 10) / 16);
@@ -534,7 +513,6 @@ fn large_value_and_max_value_size() {
     assert_eq!(limited.len(), 2, "Len");
 }
 
-// 7. concurrent readers and writers.
 #[test]
 fn concurrent_access() {
     const WORKERS: usize = 8;
@@ -555,8 +533,6 @@ fn concurrent_access() {
                     let val = format!("w{w}-value-{i:04}").into_bytes();
                     db.put(&key, &val)
                         .map_err(|e| format!("worker {w}: Put: {e}"))?;
-                    // No other worker touches this worker's key space, so the
-                    // value right after Put is the value Get must return.
                     match db.get(&key) {
                         Some(got) if got[..] == val[..] => {}
                         other => return Err(format!("worker {w}: Get({key}) = {other:?}")),
@@ -600,7 +576,6 @@ fn concurrent_access() {
     db.close().expect("Close");
     let reopened = open(&path, Options::default()).expect("reopen");
     assert_eq!(reopened.len(), db.len(), "Len after reopen");
-    // Worker 0 rewrites w0-key-00 on every i % 37 == 0, so its last write wins.
     let last = (0..OPS).rfind(|i| i % 37 == 0).expect("at least one");
     let want_val = format!("w0-value-{last:04}").into_bytes();
     assert_eq!(
@@ -610,9 +585,6 @@ fn concurrent_access() {
     );
 }
 
-// 8. delete-while-open. This is the regression: a plain open shares the file as
-// FILE_SHARE_READ|FILE_SHARE_WRITE only, so while a handle is live the store
-// file cannot be removed - the exact failure being fixed.
 #[test]
 fn remove_while_open_is_not_blocked() {
     let dir = TempDir::new();
@@ -621,19 +593,13 @@ fn remove_while_open_is_not_blocked() {
     db.put(b"kept", b"value").expect("Put");
     db.commit().expect("Commit");
 
-    // The handle is live and the file holds data. Removing the whole directory
-    // must not report "being used by another process".
     fs::remove_dir_all(dir.path()).expect(
         "RemoveAll with a live store handle, want no error: the store file must be shared with FILE_SHARE_DELETE",
     );
     assert!(!path.exists(), "stat after RemoveAll: want the file gone");
-    // The document is released only by Close; the removal above is what a temp
-    // cleanup, "Clear index", or "Clear metadata" does.
     let _ = db.close();
 }
 
-// 9. the post-delete contract: reads keep serving memory, the durability claims
-// report ErrRemoved, and the report is sticky until Compact repairs.
 #[test]
 fn removal_while_open_reports_err_removed() {
     let dir = TempDir::new();
@@ -643,11 +609,8 @@ fn removal_while_open_reports_err_removed() {
     db.put(b"kept", b"value").expect("Put");
     db.commit().expect("Commit");
 
-    // Removal is allowed, and never observed by the writer as a write error:
-    // the bytes go into a file nothing can reach.
     fs::remove_dir_all(dir.path()).expect("RemoveAll with a live store handle");
 
-    // Reads claim no durability, so they keep serving the in-memory records.
     assert_eq!(
         db.get(b"kept").as_deref(),
         Some(&b"value"[..]),
@@ -657,7 +620,6 @@ fn removal_while_open_reports_err_removed() {
     db.for_each(|_, _| true)
         .expect("ForEach after removal, want Ok (reads stay in memory)");
 
-    // The durability claim reports it.
     assert!(
         db.commit().unwrap_err().is_removed(),
         "Commit after removal, want ErrRemoved"
@@ -666,7 +628,6 @@ fn removal_while_open_reports_err_removed() {
         !path.exists(),
         "stat after the failed Commit: want the file still gone"
     );
-    // Sticky, like every other append failure: the DB never silently writes on.
     assert!(
         db.put(b"late", b"x").unwrap_err().is_removed(),
         "Put after removal, want ErrRemoved"
@@ -680,9 +641,6 @@ fn removal_while_open_reports_err_removed() {
         "second Commit after removal, want ErrRemoved"
     );
 
-    // Compact is the repair: it writes a fresh snapshot at the path, which
-    // recreates the file, and clears the failure. The in-memory records are the
-    // ones it writes - they stayed authoritative while the file was gone.
     fs::create_dir_all(dir.path()).expect("recreate dir");
     db.compact().expect("Compact after removal");
     assert!(path.exists(), "stat after Compact: want the file rewritten");
@@ -696,9 +654,6 @@ fn removal_while_open_reports_err_removed() {
     );
 }
 
-// 10. compaction still works with the new open mode: the swap closes the handle
-// before the rename, and both open sites - Open and the reopen the swap does -
-// carry FILE_SHARE_DELETE, so a compacted store is removable too.
 #[test]
 fn compaction_and_removal_with_shared_open() {
     let dir = TempDir::new();
@@ -735,12 +690,9 @@ fn compaction_and_removal_with_shared_open() {
         "leftover temp files after the swap: {leftovers:?}"
     );
 
-    // Reopen: the file this handle points at is the renamed snapshot.
     db.close().expect("Close");
     let reopened = open(&path, Options::default()).expect("reopen after compaction");
     assert_eq!(reopened.len(), RECORDS, "Len after reopen");
-    // The reopened handle shares with delete as well: compaction's second open
-    // site must not regress the fix.
     fs::remove_dir_all(dir.path()).expect("RemoveAll after the compaction reopen");
     assert!(
         reopened.commit().unwrap_err().is_removed(),

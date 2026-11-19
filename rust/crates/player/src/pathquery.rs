@@ -1,15 +1,3 @@
-//! `pathquery` -- mirrors `go\internal\player\pathquery.go`: full-path query for
-//! the file PotPlayer is playing.
-//!
-//! Protocol (verified live): `PostMessageW(potHwnd, WM_USER (1024),
-//! POT_GET_PLAYFILE_NAME (24608 / 0x6020), receiverHwnd)`. PotPlayer answers
-//! `SendMessageW(receiverHwnd, WM_COPYDATA (0x004A), wParam, &COPYDATASTRUCT)`
-//! with `dwData == 0x6020` and `lpData` pointing at UTF-8 path bytes.
-//!
-//! `PostMessage` is used for the request (never `SendMessage` cross-thread); the
-//! calling thread pumps its own queue with `PeekMessageW` until the reply's
-//! WndProc signals or ~800ms elapse. Empty/timeout yields `Err` so the caller
-//! treats it as "no path".
 
 use core::ffi::c_void;
 use core::fmt;
@@ -138,7 +126,6 @@ unsafe extern "system" fn path_query_wnd_proc(
                 if let Ok(slot) = PATH_QUERY_CH.lock()
                     && let Some(tx) = slot.as_ref()
                 {
-                    // Non-blocking: a late or duplicate reply is dropped.
                     let _ = tx.try_send(path);
                 }
                 return 1;
@@ -253,8 +240,6 @@ pub fn current_file(hwnd: Handle) -> Result<String, PathQueryError> {
             0,
             0,
             0,
-            // (HWND)-3: a message-only window is never visible and only
-            // receives messages.
             HWND_MESSAGE,
             null_mut(),
             GetModuleHandleW(null()),

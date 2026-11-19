@@ -1,17 +1,3 @@
-//! Cancellation scope -- the Rust stand-in for Go's `context.Context` at the
-//! two points this crate blocks: the per-host rate-limit wait and the HTTP 429
-//! `Retry-After` sleep.
-//!
-//! `go\internal\metadata` passes a `context.Context` into both `waitForHost`
-//! (ratelimit.go:197) and `fetchWithRetry` (http.go:56) and aborts the wait on
-//! `ctx.Done()`. Neither blocking point may sleep past a cancellation, so the
-//! port needs the same primitive: a cloneable cancelled flag, an optional
-//! deadline, and a condition variable so a cancel wakes the sleep immediately
-//! instead of being noticed only when it expires on its own.
-//!
-//! `metadata-core::context` is a different thing entirely -- it mirrors
-//! `metadata\context.go`, which is the folder/file-path context, not
-//! cancellation -- so this lives here rather than there.
 
 use std::fmt;
 use std::sync::{Arc, Condvar, Mutex};
@@ -141,7 +127,6 @@ impl Cancel {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        // Poison-tolerant: a panicking test must not wedge the shared limiter.
         self.inner
             .state
             .lock()

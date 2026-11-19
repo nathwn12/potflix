@@ -1,14 +1,3 @@
-//! `discord::fakepipe` -- mirrors `go\internal\discord\fakepipe.go`.
-//!
-//! An in-process named-pipe server that speaks the Discord IPC framing. It
-//! exists so the package tests and `--selftest` can prove the transport end to
-//! end without a running Discord (and without ever touching the real
-//! `\\.\pipe\discord-ipc-*` namespace: every instance lives under a
-//! process-unique `\\.\pipe\potflix-fake-*` name).
-//!
-//! The server handle is deliberately *not* overlapped: it is created by
-//! `CreateNamedPipeW` and used with plain synchronous reads and writes, exactly
-//! as `os.NewFile` on a Go blocking handle behaves.
 
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};

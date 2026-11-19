@@ -1,34 +1,3 @@
-//! `metadata::ann` -- the Anime News Network encyclopedia source (keyless XML).
-//!
-//! ANN (`https://cdn.animenewsnetwork.com/encyclopedia/api.xml`) needs no key
-//! for title search: `GET ?anime=~<title>` returns one `<anime>` report per
-//! candidate, carrying the multilingual titles, the cover (`Picture`), the
-//! synopsis (`Plot Summary`), the episode count (`Number of episodes`), the
-//! running time and the vintage year.
-//!
-//! Four behaviours that are contract, not detail:
-//!
-//! * the pick is title-validated with [`pick_best_show`] over the reports'
-//!   Main titles: a low-confidence best returns a definitive MISS rather than
-//!   a wrong show. The vintage year NEVER rejects: at equal title strength
-//!   it prefers the candidate carrying the query's year, but a missing year,
-//!   or a year that disagrees with the filename, is a nice-to-have display
-//!   field, never a gate;
-//! * the `~` operator is a case-insensitive SUBSTRING match, so punctuation
-//!   in the stored title defeats a plain query (`re zero` misses `Re:ZERO`).
-//!   A miss therefore retries once with spaces rewritten as colons (`re:zero`,
-//!   verified live). Both attempts are title-validated, so the retry can only
-//!   add a validated answer, never a wrong one;
-//! * ANN carries an episode COUNT but no episode table, so the answer
-//!   synthesizes numbered absolute stubs ([`episode_stubs`]) -- numbers only,
-//!   never fabricated titles;
-//! * movies never reach the wire: this leg serves the series chain, so a
-//!   movie key returns `Ok(None)` before any fetch.
-//!
-//! The XML is scanned by hand: the workspace pins no XML crate, and the
-//! reports need only the `<anime>` blocks and their `<info>` rows. ANN emits
-//! `&#039;` for apostrophes, which the shared entity table does not cover,
-//! so it is decoded locally before the shared strip helpers run.
 
 use std::time::Duration;
 
@@ -219,8 +188,6 @@ fn parse_entry(open_tag: &str, inner: &str) -> Option<AnnEntry> {
         }
     }
     if entry.main.is_empty() {
-        // Reports always carry a Main title; without one there is nothing to
-        // validate the pick against.
         entry.main = alts.into_iter().next().unwrap_or_default();
     }
     if entry.main.is_empty() {
@@ -289,9 +256,6 @@ impl AnnSource {
     fn pick(&self, cancel: &Cancel, q: &Query) -> Result<Option<AnnEntry>, Error> {
         let mut entries = self.search(cancel, &ann_escape(&q.title))?;
         if entries.is_empty() && q.title.contains(' ') {
-            // The `~` operator is a literal substring match, so a space in
-            // the query misses a colon in the stored title (`re zero` vs
-            // `Re:ZERO`). One validated retry with colons, never a guess.
             entries = self.search(cancel, &ann_escape(&q.title.replace(' ', ":")))?;
         }
         let mut cands: Vec<ShowCand> = Vec::with_capacity(entries.len());
@@ -309,7 +273,6 @@ impl AnnSource {
             return Ok(None);
         }
         let Some(winner) = pick_best_show(&q.title, &cands) else {
-            // Low-confidence best: a wrong title is worse than no title.
             return Ok(None);
         };
         let mut winner_idx = None;
@@ -322,7 +285,6 @@ impl AnnSource {
         let Some(winner_idx) = winner_idx else {
             return Ok(None);
         };
-        // Soft year preference only: no year match keeps the title winner.
         let take =
             crate::yearpref::prefer_year_match(&q.title, q.year, &cands, &years, winner_idx);
         Ok(Some(entries[take].clone()))
@@ -344,7 +306,6 @@ impl crate::resolver::Source for AnnSource {
         let Some(entry) = self.pick(cancel, q)? else {
             return Ok(None);
         };
-        // Numbered absolute stubs only: ANN carries a count but no table.
         let episodes = episode_stubs(entry.episodes.unwrap_or(0), 0);
         Ok(Some(Media {
             source: "ann".to_string(),

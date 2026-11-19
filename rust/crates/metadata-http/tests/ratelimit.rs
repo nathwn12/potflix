@@ -1,10 +1,3 @@
-//! Port of `go\internal\metadata\ratelimit_test.go`.
-//!
-//! The Go tests share one process-wide limiter and the Go runner executes them
-//! one after another. Rust runs a test binary's tests on parallel threads, so
-//! these three take a lock: `reset_rate_limiter` clears every host's gate, and
-//! letting that land mid-loop in another test would erase the spacing it is
-//! measuring. Real clocks and the same tolerances as Go.
 
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -30,8 +23,6 @@ fn rate_limiter_spacing() {
     const HOST: &str = "test-ratelimit.example";
     const INTERVAL: Duration = Duration::from_millis(100);
     const N: usize = 4;
-    // Tolerance for timer/scheduling granularity (Windows sleep granularity is
-    // coarse; the limiter must never fire early by more than this).
     const TOLERANCE: Duration = Duration::from_millis(25);
 
     let _guard = serial();

@@ -1,24 +1,3 @@
-//! `presence` -- mirrors the Go package `go\internal\presence`.
-//!
-//! The presence state machine and the activity payload builder.
-//!
-//! This file is the module body for `go\internal\presence\presence.go`: the
-//! transition matrix ([`Tracker`]), the trailing-edge RUN debounce, the card line
-//! grammar ([`build_activity`]) and the metadata-resolved card
-//! ([`build_activity_resolved`]). [`gate`] is `gate.go` (the send gate) and
-//! [`cardspec`] is `cardspec.go` (the Card view's spec model).
-//!
-//! Ported from me.potflix.rpc.Main (PresenceTracker.poll :265-309,
-//! withStateTime :313-317, pushActivity :139-191, fmt :501-508), with one
-//! deliberate deviation from the fleet decisions (see [`Tracker`] and the
-//! README): repeated RUN pushes within ~1 s are debounced unless the title
-//! changed. The debounce is trailing-edge: the suppressed anchor is HELD and
-//! emitted when the window expires, so a seek is never dropped forever.
-//!
-//! Not carried from `presence.go`: the unexported `filterButtons` (:646-652) is
-//! never called in the Go original (the builders never populate buttons), so in
-//! Rust it would be dead code under `-D warnings`. The pristine-card decision it
-//! documents is stated where the call site used to be.
 
 use player::control::PlayStatus;
 use player::window::{APP_NAME, SUFFIX};
@@ -112,22 +91,14 @@ pub struct Tracker {
     ct_window_len: usize,
     ct_window_idx: usize,
 
-    // Fleet decision 10 (deviation, revised): RUN debounce anchor. A repeated
-    // RUN push inside the window is HELD (pending_run), not dropped, and emitted
-    // on the first poll after the window expires (trailing edge).
     has_run_push: bool,
     last_run_push_at: i64,
     last_run_push_title: String,
     pending_run: bool,
     pending_title: String,
 
-    // The most recent emitted action. `current` exposes it so the send gate can
-    // rebuild the card on every poll, including polls where the tracker emits
-    // nothing.
     last_action: Option<Action>,
 
-    // The monotonic interval clock for the trailing-edge debounce, so a
-    // wall-clock step cannot strand a held seek.
     clock: IntervalClock,
 }
 
@@ -182,11 +153,8 @@ impl Tracker {
     /// Consumes one sample and returns the action to push, or `None`
     /// (`presence.go:117`). `ps`/`ct` are the raw reads; `now` is epoch ms.
     pub fn poll(&mut self, raw_title: &str, ps: PlayStatus, ct: i64, now: i64) -> Option<Action> {
-        // Interval bookkeeping (the trailing-edge debounce) runs on a monotonic
-        // clock; anchors below keep the epoch now.
         let clk = self.clock.tick(now);
 
-        // New media: forget everything (Java :267-270).
         if self.have_prev && self.last_title != raw_title {
             self.have_prev = false;
             self.has_last_status = false;
@@ -199,8 +167,6 @@ impl Tracker {
             self.last_action = None;
         }
 
-        // A not-ready read (ct<=0) must NOT overwrite the seek baseline
-        // (:273-275).
         let ct_ok = ct > 0;
         let prev_ct_before = self.prev_ct;
         if ct_ok {
@@ -208,18 +174,13 @@ impl Tracker {
             self.prev_ct = ct;
         }
 
-        // ct ticks are coarse, so one delta is not proof of movement (:278).
         let moving = ct_ok && self.ct_window_len >= 2 && (ct - self.oldest_ct()) >= SETTLE_MOVE_MS;
 
-        // Undefined carries no information: emit nothing, change no state (:281).
         if ps == PlayStatus::UNDEFINED {
             self.have_prev = true;
             return None;
         }
 
-        // A non-Running report while the position is still moving, having
-        // settled into Running, is a transient glitch: the player is really
-        // playing (:285-286).
         let mut eff = ps;
         if ps != PlayStatus::RUNNING
             && moving
@@ -259,10 +220,6 @@ impl Tracker {
             }
         } else if eff == PlayStatus::PAUSED {
             if (changed || paused_seek) && ct_ok {
-                // No position suffix any more: the paused card carries a
-                // "Paused" marker and counts the pause duration UP from
-                // timestamps.start (set by the send gate), so there is no
-                // frozen " - 00:00" artifact.
                 self.frozen_ct = ct;
                 Some(Action {
                     paused: true,
@@ -273,7 +230,6 @@ impl Tracker {
                 None
             }
         } else if changed {
-            // Stopped.
             Some(Action {
                 ct,
                 ..Action::default()
@@ -282,12 +238,6 @@ impl Tracker {
             None
         };
 
-        // Fleet decision 10 (revised): debounce repeated RUN pushes (seek
-        // bursts) within ~1 s unless the title changed, but HOLD the suppressed
-        // anchor instead of dropping it. The old drop-then-forget behaviour lost
-        // the seek re-anchor forever: the per-poll delta never re-fires, so the
-        // card kept the pre-seek anchor. A `changed` RUN push is a real
-        // state/title transition and always emits.
         if action.as_ref().is_some_and(|a| a.running) {
             if !changed
                 && self.has_run_push
@@ -304,13 +254,9 @@ impl Tracker {
                 self.pending_run = false;
             }
         } else if action.is_some() {
-            // Any non-RUN emit supersedes a held seek.
             self.pending_run = false;
         }
 
-        // Trailing edge: once the window has expired the held seek lands with a
-        // fresh anchor (start = now - ct), so the last seek of a scrub is never
-        // lost.
         if action.is_none()
             && self.pending_run
             && ct_ok
@@ -331,8 +277,6 @@ impl Tracker {
             self.pending_run = false;
         }
 
-        // On emit only, remember title/status; have_prev is always set
-        // (:306-308).
         if let Some(a) = action.as_ref() {
             self.last_title = raw_title.to_string();
             self.last_status = eff;
@@ -444,8 +388,6 @@ pub fn with_state_time(context: &str, suffix: &str) -> String {
     if context.is_empty() {
         return strip_leading_dash(suffix).to_string();
     }
-    // `len` is BYTES in Go too (`128-len(suffix)`), so the budget is measured the
-    // same way here.
     trunc(context, 128usize.saturating_sub(suffix.len())) + suffix
 }
 
@@ -528,34 +470,24 @@ pub fn build_activity(raw_title: &str, a: Option<&Action>) -> Activity {
             type_: "PLAYING".to_string(),
             details: "Browsing".to_string(),
             state: "Idle".to_string(),
-            // No assets on the idle card: no branded mark as artwork, no icon.
             ..Activity::default()
         };
     }
 
     let c = clean(raw);
     let title = trunc(&c.title, 128);
-    // First body line: the episode name when known, else the episode tag, else
-    // the title.
     let mut details = title.clone();
     if !c.episode_name.is_empty() {
         details = trunc(&c.episode_name, 128);
     } else if !c.episode_tag.is_empty() {
         details = trunc(&c.episode_tag, 128);
     }
-    // Second body line: the episode tag, but only when it adds information
-    // beyond the first line. The comparison uses the FINAL emitted values: both
-    // sides are truncated to the 128 cap first, so a tag longer than the cap
-    // cannot repeat the details line it already fills.
     let mut state = String::new();
     let tag = trunc(&c.episode_tag, 128);
     if !tag.is_empty() && tag != details {
         state = tag;
     }
 
-    // Paused: the state is the episode tag plus a "Paused" marker, not a frozen
-    // position. The pause duration is the count-UP timer anchored by the gate
-    // (timestamps.start = the pause moment).
     if a.paused {
         state = with_state_time(&state, PAUSED_MARKER);
     }
@@ -563,18 +495,10 @@ pub fn build_activity(raw_title: &str, a: Option<&Action>) -> Activity {
         type_: "PLAYING".to_string(),
         details,
         state,
-        // No artwork is resolved on the filename-only path, and no branded mark
-        // is ever substituted for it.
         paused: a.paused,
         ..Activity::default()
     };
-    // The header is the media title on every path. The shipped per-kind
-    // composer sets the same identity; this fallback is pinned by its own
-    // unit tests, not sent.
     act.name = title;
-    // No small_image/small_text on any branch: the card carries no
-    // play/pause/stop corner icon. The pause is signalled by `paused` (for the
-    // gate) and the " · Paused" state marker (for the viewer).
     if a.has_start {
         act.has_start = true;
         act.start = a.start;
@@ -696,10 +620,6 @@ pub(crate) fn trim_word(s: &str, max: usize) -> String {
         if base.is_empty() {
             return "\u{2026}".to_string();
         }
-        // Sentence-end cut (matches `smart_trim_synopsis`): the last kept
-        // character is `.`/`!`/`?` and the next character is whitespace or
-        // end-of-text, so keep the complete sentence with its own terminator
-        // and no ellipsis.
         if let Some(last) = base.chars().next_back()
             && matches!(last, '.' | '!' | '?')
         {
@@ -712,17 +632,10 @@ pub(crate) fn trim_word(s: &str, max: usize) -> String {
         }
         return format!("{base}\u{2026}");
     }
-    // No word boundary in the prefix: still signal the cut. The already
-    // sanitized `prefix` (char boundary, `max-1` units) carries a single
-    // trailing U+2026 within budget; stripping only shrinks, so the budget
-    // still holds and no surrogate pair is split.
     let base = strip_cut_trail(&prefix);
     if base.is_empty() {
         return "\u{2026}".to_string();
     }
-    // Same sentence-end rule on the spaceless fallback: a character-boundary
-    // cut landing on `.`/`!`/`?` followed by whitespace or end-of-text keeps
-    // the sentence with no ellipsis.
     if let Some(last) = base.chars().next_back()
         && matches!(last, '.' | '!' | '?')
     {
@@ -926,9 +839,6 @@ pub(crate) fn smart_trim_synopsis(s: &str, max: usize) -> String {
             return format!("{base}\u{2026}");
         }
     }
-    // No boundary anywhere: still signal the cut. Hard-cut the sanitized text
-    // on a char boundary to `max-1` units with a single trailing U+2026,
-    // staying within budget without splitting a surrogate pair.
     let prefix: String = runes[..end_ell].iter().collect();
     let base = strip_cut_trail(&prefix);
     if base.is_empty() {
@@ -964,8 +874,6 @@ pub(crate) fn synopsis_snippet(s: &str) -> String {
         end = i + 1;
     }
     let mut prefix: String = runes[..end].iter().collect();
-    // Prefer a whole word: cut at the last space inside the budget. A spaceless
-    // run keeps the character-boundary prefix.
     if let Some(pos) = prefix.rfind(' ') {
         prefix.truncate(pos);
     }
@@ -1260,14 +1168,6 @@ pub(crate) fn compose_details_for(
     } else {
         canonical_series.clone()
     };
-    // The episode code never reaches the details line; movies never consult
-    // it either.
-    // Owner mapping: MOVIE line 1 is `<year> · <genres>` (never the title --
-    // the header carries it); SERIES line 1 is the canonical series title,
-    // never the episode title or the episode code. Both fall back to the
-    // clean filename title when the lookup is a miss. Over-budget genres drop
-    // whole (see `movie_details_line`); a word-aware cut would read as a
-    // truncation, a dropped genre reads as the complete list.
     let title_base = if !r.series.is_empty() {
         r.series.clone()
     } else {
@@ -1331,9 +1231,6 @@ fn default_movie_state(r: &Resolved, a: Option<&Action>) -> String {
     let paused = a.is_some_and(|x| x.paused);
     let base = rp_text(&r.length, STATE_BUDGET);
     if base.is_empty() {
-        // No runtime: the line stays empty and the paused marker rides the
-        // last populated body line, placed by the caller -- never a bare
-        // marker here.
         return String::new();
     }
     let cap = if paused {
@@ -1362,8 +1259,6 @@ fn default_episode_state(raw_title: &str, a: Option<&Action>, r: &Resolved) -> S
     let raw = raw_title.strip_suffix(SUFFIX).unwrap_or(raw_title);
     let c = clean(raw);
     let code = episode_code(r.season, r.number, r.absolute, &c.episode_tag);
-    // No resolved numbers: the filename's own tag is the only honest code, and
-    // it rides as-is (never normalized into a season the lookup did not give).
     let code = if code.is_empty() {
         rp_text(&c.episode_tag, STATE_BUDGET)
     } else {
@@ -1385,9 +1280,6 @@ fn default_episode_state(raw_title: &str, a: Option<&Action>, r: &Resolved) -> S
     };
     let paused = a.is_some_and(|x| x.paused);
     if joined.is_empty() {
-        // No episode fact: the line stays empty; the paused marker rides the
-        // last populated body line, placed by the caller -- never a bare
-        // marker here.
         return String::new();
     }
     let cap = if paused {
@@ -1395,8 +1287,6 @@ fn default_episode_state(raw_title: &str, a: Option<&Action>, r: &Resolved) -> S
     } else {
         STATE_BUDGET
     };
-    // Over budget the episode title drops whole before the code is touched:
-    // the code is the identity, the title the decoration.
     let line = if utf16_units(&joined) <= cap {
         joined
     } else if !code.is_empty() && utf16_units(&code) <= cap {
@@ -1419,9 +1309,6 @@ pub(crate) fn compose_state_for(
     state_preset: &str,
 ) -> String {
     let line = compose_state_inner(raw_title, a, r, is_movie, state_preset);
-    // No body line ever repeats the header: a clean-title fallback (or, in
-    // principle, any other rung) equal to the header blanks, keeping the
-    // deliberate one-line shape. Paused keeps the marker (`"Paused"`).
     if line.is_empty() {
         return line;
     }
@@ -1449,9 +1336,6 @@ fn compose_state_inner(
         return String::new();
     }
     let paused = a.is_some_and(|x| x.paused);
-    // The combined rung follows the explicit kind, not the stored flag. It is
-    // only live when a synopsis exists: `synopsis_state` parks an empty
-    // synopsis as "Paused", which must fall through the ladder instead.
     let mut shadow = r.clone();
     shadow.is_movie = is_movie;
     let combined = if rp_text(&r.synopsis, HUGE).is_empty() {
@@ -1551,7 +1435,6 @@ pub fn compose_card(
             type_: "PLAYING".to_string(),
             details: "Browsing".to_string(),
             state: "Idle".to_string(),
-            // No assets on the idle card: no branded mark as artwork, no icon.
             ..Activity::default()
         };
     }
@@ -1566,7 +1449,6 @@ pub fn compose_card(
         large_image: compose_large_image_inner(r),
         large_text: compose_large_text_inner(r, is_movie),
         paused,
-        // No small slot: the card carries no status icon over the artwork.
         ..Activity::default()
     };
     if let Some(x) = a
@@ -1575,9 +1457,6 @@ pub fn compose_card(
         act.has_start = true;
         act.start = x.start;
     }
-    // PAUSED carries no timestamps at all: a start-only anchor renders as a
-    // count-up that reads as playing. UNKNOWN carries none either: there is
-    // no resolved progress to anchor, and no art or prose to show.
     if paused || r.unknown {
         act.has_start = false;
         act.start = 0;
@@ -1665,8 +1544,6 @@ pub(crate) fn synopsis_state(raw_title: &str, a: Option<&Action>, r: &Resolved) 
         if !(raw.trim().is_empty() || raw == APP_NAME) {
             tag_raw = clean(raw).episode_tag;
         }
-        // The `SxxExx` code prefixes the synopsis where available; otherwise
-        // the current raw-tag behavior stands.
         let code = episode_code(r.season, r.number, r.absolute, &tag_raw);
         let tag_t = if code.is_empty() {
             rp_text(&tag_raw, STATE_BUDGET)
@@ -1708,6 +1585,4 @@ pub(crate) fn synopsis_state(raw_title: &str, a: Option<&Action>, r: &Resolved) 
     }
 }
 
-// Go callers write `presence.CardSpec`; the module path `cardspec::CardSpec` is
-// the canonical one.
 pub use cardspec::{CardPreset, CardSpec};

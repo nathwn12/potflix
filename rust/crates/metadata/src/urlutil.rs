@@ -1,15 +1,3 @@
-//! `net/url` escaping, hand-rolled.
-//!
-//! The workspace pins no percent-encoding crate, and the two Go helpers the
-//! providers use are fixed and small, so they are transcribed here rather than
-//! pulled in.
-//!
-//! * [`query_escape`] is `url.QueryEscape`: unreserved `A-Za-z0-9-_.~` verbatim,
-//!   a space as `+`, everything else `%XX` with UPPERCASE hex. This is the form
-//!   TVmaze's `q=`, Jikan's `q=` and Wikipedia's `srsearch=`/`titles=` take.
-//! * [`path_escape`] is `url.PathEscape`: `escape(s, encodePathSegment)`, which
-//!   keeps the unreserved set plus `:@&=+$` (RFC 3986 sub-delims that carry no
-//!   per-segment meaning) and escapes `/`, `;`, `,`, `?`.
 
 /// `url.QueryEscape`.
 pub fn query_escape(s: &str) -> String {

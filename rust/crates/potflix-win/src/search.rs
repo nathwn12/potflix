@@ -1,12 +1,3 @@
-//! `potflix-win::search` -- the "Fix match" provisional-override builder.
-//!
-//! [`provisional_override`] turns the picked [`Candidate`] into an
-//! identity-only [`Override`] the dialog saves immediately, so the card can
-//! become a series (or a movie) WITHOUT waiting for
-//! [`metadata::pin_from_candidate`] to fetch the provider identity and the
-//! whole episode table under its 90 s deadline. The full pin (or a later
-//! [`metadata::refresh`]) replaces this provisional record with the fetched
-//! payload.
 
 use metadata::{Candidate, Kind, Media, Override, Scope};
 
@@ -375,9 +366,6 @@ impl MediaPicker {
         if generation != self.generation {
             return false;
         }
-        // A finished stream owns the list: a batch that lands after the finish
-        // (same generation, job no longer running) is stale and must not
-        // reopen the list over the final count.
         if !self.busy {
             return false;
         }
@@ -394,13 +382,8 @@ impl MediaPicker {
             self.local.as_ref(),
             vec![existing, rows],
         );
-        // A stream of batches must not grow past the metadata cap; the ranked
-        // head is what the keyboard can reach.
         merged.truncate(metadata::search::SEARCH_LIMIT);
         self.candidates = merged;
-        // A batch that re-ranks the list must not move the highlight off the row
-        // the user already picked: the next click would then act on a different
-        // record.
         if let Some(picked) = self.picked.as_deref()
             && let Some(pos) = self
                 .candidates
@@ -411,9 +394,6 @@ impl MediaPicker {
         } else if self.selected >= self.candidates.len() {
             self.selected = 0;
         }
-        // The highlight must stay on screen: the viewport follows the selected
-        // row, so a re-rank can never leave it pointing at a row the list no
-        // longer shows.
         if self.candidates.is_empty() {
             self.top = 0;
         } else {
@@ -440,8 +420,6 @@ impl MediaPicker {
             title.clone()
         };
         self.status = if self.candidates.is_empty() {
-            // The empty state names the query it failed on, so "no matches" is
-            // never a silent blank panel.
             format!("No matches for \"{asked}\". Try a shorter title or add the year.")
         } else {
             format!(
@@ -1198,8 +1176,6 @@ mod tests {
             length: String::new(),
             episode_count: 0,
         };
-        // Arrival order is deliberately against the answer: the riff arrives
-        // first, from the higher-precedence leg, and is newer.
         for merged in [
             merge_candidates("avengers - endgame", vec![vec![riff.clone(), real.clone()]]),
             merge_candidates_for(
@@ -1215,8 +1191,6 @@ mod tests {
             );
             assert_eq!(merged[0].provider_id, "tt4154796");
         }
-        // A known year is a bonus, not the whole rank: with the query's year
-        // given, the matching release still leads and a mismatch follows.
         let merged = merge_candidates_for(
             "avengers - endgame",
             2019,
@@ -1236,8 +1210,6 @@ mod tests {
             kind,
             title: "Dune".to_string(),
             year: 0,
-            // One provider, so the leg order cannot decide the tie: only the
-            // shape prior can.
             provider: "cinemeta".to_string(),
             provider_id: id.to_string(),
             poster: String::new(),
@@ -1345,13 +1317,11 @@ mod tests {
             picker.candidates.is_empty() && !picker.open && !picker.searched,
             "no stale row can populate the list"
         );
-        // A fresh search in the new scope is the only thing that publishes.
         let (next, _, _, want) = picker.begin_search().expect("search starts again");
         assert_eq!(want, KindFilter::Movies, "the new scope is what is asked");
         assert!(next > generation, "the generation moved past the abandoned job");
         assert!(picker.finish_search(next, vec![movie_candidate()]));
         assert_eq!(picker.candidates.len(), 1);
-        // The same rule covers a query edit, which is also a new result set.
         let (stale, ..) = picker.begin_search().expect("search starts");
         picker.set_query("Dune: Part Two".to_string());
         assert!(
@@ -1376,17 +1346,13 @@ mod tests {
         picker.pick_row(key.clone());
         assert_eq!(picker.picked.as_deref(), Some(key.as_str()));
 
-        // Scope change.
         picker.set_filter(KindFilter::Movies);
         assert_eq!(picker.picked, None, "a scope change drops the pick");
 
-        // Query edit, with the same pick re-armed first.
         picker.pick_row(key.clone());
         picker.set_query("Dune 2021".to_string());
         assert_eq!(picker.picked, None, "a query edit drops the pick");
 
-        // A new search, with the same pick re-armed first: the same record can
-        // come back, and it is still not a choice.
         let (generation, ..) = picker.begin_search().expect("search starts");
         assert!(picker.finish_search(generation, Vec::new()));
         picker.pick_row(key.clone());
@@ -1411,7 +1377,6 @@ mod tests {
         assert_eq!(query_issue(&long), None, "exactly the cap is accepted");
         let over: String = "a".repeat(super::MAX_QUERY_CHARS + 1);
         assert_eq!(query_issue(&over), Some(QueryIssue::TooLong));
-        // Every issue explains itself and the search is refused for it.
         for (query, issue) in [
             ("", QueryIssue::Empty),
             ("2024", QueryIssue::YearOnly),
@@ -1436,8 +1401,6 @@ mod tests {
         assert_eq!(KindFilter::AnimeMovies.kinds(), &[Kind::MOVIE]);
         assert!(KindFilter::All.includes(Kind::MOVIE) && KindFilter::All.includes(Kind::SERIES));
         assert!(!KindFilter::Movies.includes(Kind::SERIES));
-        // Universal search has no user-visible scope words: no label API, no
-        // segment control. `All` is the whole search: both chains, every kind.
         assert_eq!(
             KindFilter::All.providers(),
             &[
@@ -1501,7 +1464,6 @@ mod tests {
             "an All-types search returns both kinds in one list"
         );
 
-        // A duplicate identity from two legs is one row, not two.
         let again = merge_candidates(
             "Dune",
             vec![vec![merged[0].clone()], vec![merged[0].clone()]],
@@ -1578,13 +1540,10 @@ mod tests {
     #[test]
     fn key_and_scope_pass_through_exactly() {
         let cand = series_candidate();
-        // Mixed case plus `/` separators: the helper must NOT normalise --
-        // [`metadata::overrides::Store::put`] normalises on write.
         let key = "M:/2SERIES/Show".to_string();
         let over = provisional_override(&cand, Scope::Season, key.clone());
         assert_eq!(over.scope, Scope::Season);
         assert_eq!(over.key, key, "key passes through byte-for-byte");
-        // A season scope is not a movie scope, so the candidate cover rides.
         assert_eq!(over.poster, "https://art/show-picked.jpg");
         assert!(over.media.is_some(), "the candidate snapshot rides");
         assert!(over.episodes.is_empty(), "provisional: no episode table");
@@ -1633,16 +1592,13 @@ mod tests {
         assert_eq!(count(KindFilter::Movies), 1, "Movies is regular movies only");
         assert_eq!(count(KindFilter::AnimeSeries), 1, "Anime TV is the anime leg's series");
         assert_eq!(count(KindFilter::AnimeMovies), 1, "Anime Movies is the anime leg's movie");
-        // Tenrai rides the same class.
         let mut tenrai = anime_series;
         tenrai.provider = "tenrai".to_string();
         assert!(KindFilter::AnimeSeries.includes_candidate(&tenrai));
         assert!(!KindFilter::Series.includes_candidate(&tenrai));
-        // A provider name is case/space-insensitive, like the leg's own id.
         let mut spaced = anime_movie;
         spaced.provider = " AniList ".to_string();
         assert!(KindFilter::AnimeMovies.includes_candidate(&spaced));
-        // Five distinct cache keys, one per scope.
         let keys: std::collections::HashSet<&str> =
             [KindFilter::All, KindFilter::Series, KindFilter::Movies, KindFilter::AnimeSeries, KindFilter::AnimeMovies]
                 .iter()
@@ -1654,9 +1610,6 @@ mod tests {
         assert_eq!(KindFilter::Movies.cache_key(), "movies");
         assert_eq!(KindFilter::AnimeSeries.cache_key(), "anime-tv");
         assert_eq!(KindFilter::AnimeMovies.cache_key(), "anime-movies");
-        // The providers a scope asks for: a Regular scope asks only Regular
-        // legs, an Anime scope only Anime legs, All asks both. Regular 3
-        // available, anime primary 4.
         assert_eq!(
             KindFilter::All.providers(),
             &[
@@ -1682,8 +1635,6 @@ mod tests {
             KindFilter::AnimeMovies.providers(),
             &["anilist", "tenrai", "kitsu", "animeschedule"]
         );
-        // The one key helper: title case and padding never split an entry, the
-        // year and the scope always do.
         assert_eq!(
             super::search_cache_key("  Dune  ", 2021, KindFilter::Movies),
             "dune|2021|movies"
@@ -1723,7 +1674,6 @@ mod tests {
         assert_eq!(detect_class("M:\\TV\\Show S01E01.mkv"), ClassHint::Regular);
         assert_eq!(detect_class("M:\\Series\\Show S01E01.mkv"), ClassHint::Regular);
         assert_eq!(detect_class("M:\\Downloads\\Show S01E01.mkv"), ClassHint::Unknown);
-        // Anime wins over a regular folder that contains it.
         assert_eq!(detect_class("M:\\TV\\Anime\\Show S01E01.mkv"), ClassHint::Anime);
     }
 
@@ -1768,15 +1718,12 @@ mod tests {
         assert!(picker.open && picker.searched);
         assert_eq!(picker.candidates.len(), 1);
         assert_eq!(picker.status, "1 match so far\u{2026}");
-        // A second batch merges and re-ranks; a duplicate identity is one row.
         let duplicate = movie_candidate();
         let series = series_candidate();
         assert!(picker.push_search(generation, vec![duplicate, series.clone()]));
         assert_eq!(picker.candidates.len(), 2, "dedupe on provider + provider id");
         assert_eq!(picker.status, "2 matches so far\u{2026}");
         assert!(picker.busy, "still running");
-        // A later batch that re-ranks the list keeps the highlight on the row
-        // the user picked: the next click must act on that same record.
         let show_key = crate::window::picked_row_key(&picker.candidates[1]);
         picker.selected = 1;
         picker.pick_row(show_key.clone());
@@ -1796,7 +1743,6 @@ mod tests {
         assert!(picker.finish_search_now(generation));
         assert!(!picker.busy && picker.open);
         assert_eq!(picker.status, "3 matches for \"Dune\"");
-        // An empty stream is the no-matches state, never a stale count.
         let (generation, ..) = picker.begin_search().expect("search starts");
         assert!(picker.push_search(generation, Vec::new()));
         assert!(picker.finish_search_now(generation));
@@ -1806,7 +1752,6 @@ mod tests {
             picker.status
         );
         assert!(!picker.open);
-        // A stale batch and a stale finish are both refused.
         assert!(!picker.push_search(generation + 1, vec![series]));
         assert!(!picker.finish_search_now(generation + 1));
     }
@@ -1878,8 +1823,6 @@ mod tests {
             MediaShape::Series,
             "the 1x02 form is an episode pattern"
         );
-        // A same-titled film beside an episode file is not itself an episode:
-        // the sibling needs its own episode tag.
         assert_eq!(
             classify_siblings(
                 "Show.mkv",
@@ -1913,8 +1856,6 @@ mod tests {
                 MediaShape::Series,
                 "the real folder's episode siblings make the show a series"
             );
-            // A folder of one movie is a movie, and a missing folder is no
-            // evidence at all.
             let lone_dir = dir.join("films");
             std::fs::create_dir_all(&lone_dir).unwrap();
             std::fs::write(lone_dir.join("Dune Part Two.mkv"), "x").unwrap();
@@ -1932,7 +1873,6 @@ mod tests {
                 MediaShape::Movie,
                 "an unreadable folder and a bare title are no evidence"
             );
-            // A season folder is series evidence by itself.
             let season_dir = dir.join("Show").join("Season 2");
             std::fs::create_dir_all(&season_dir).unwrap();
             std::fs::write(season_dir.join("ep.mkv"), "x").unwrap();
@@ -1946,11 +1886,6 @@ mod tests {
 
     #[test]
     fn provisional_override_persists_through_the_caller_store_write() {
-        // The helper itself takes no store handle (pure builder); the
-        // documented contract is that the CALLER persists the record. This
-        // drives that reachable path: build, save through `put_correction`,
-        // reload, resolve -- proving the built record is persistable, not
-        // merely that a pure function writes nothing.
         crate::test_env::EnvGuard::with_scratch("search-persist", |dir| {
             let store_path = metadata::overrides::default_path();
             assert!(
@@ -1985,7 +1920,6 @@ mod tests {
 
         assert_eq!(REGULAR_PROVIDERS.len(), 3, "regular path source count");
         assert_eq!(ANIME_LEG_PROVIDERS.len(), 4, "anime path source count");
-        // Every regular leg is concurrent and primary; every anime leg too.
         for name in REGULAR_PROVIDERS {
             assert!(
                 !ANIME_PROVIDERS.contains(name),
@@ -1998,7 +1932,6 @@ mod tests {
                 "anime leg {name} is classed anime"
             );
         }
-        // Regular scopes ask only regular legs.
         for filter in [KindFilter::Series, KindFilter::Movies] {
             for name in filter.providers() {
                 assert!(
@@ -2016,7 +1949,6 @@ mod tests {
             3,
             "regular TV walks all three regular legs"
         );
-        // Anime scopes ask only anime legs.
         for filter in [KindFilter::AnimeSeries, KindFilter::AnimeMovies] {
             assert_eq!(
                 filter.providers().len(),
@@ -2034,9 +1966,7 @@ mod tests {
                 );
             }
         }
-        // All asks both paths: 3 regular + 4 anime.
         assert_eq!(KindFilter::All.providers().len(), 7);
-        // Cache key already carries the scope, so no cross-path bleed.
         let tv = super::search_cache_key("Show", 2008, KindFilter::Series);
         let anime = super::search_cache_key("Show", 2008, KindFilter::AnimeSeries);
         assert_ne!(tv, anime, "scope is part of the cache key");
@@ -2047,10 +1977,6 @@ mod tests {
         use super::{KindFilter, search_cache_key};
         use std::collections::{HashMap, HashSet};
 
-        // The picker's persistent cache shape: key -> (rows, failed). A full
-        // hit (rows present, no failed legs) is served without walking any
-        // leg, so the leg-attempt set stays empty and no new observability
-        // line is emitted.
         let key = search_cache_key("Show", 2008, KindFilter::Series);
         let mut cache: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
         cache.insert(
@@ -2059,7 +1985,6 @@ mod tests {
         );
         let mut leg_attempts: HashSet<String> = HashSet::new();
         let mut log_lines: Vec<String> = Vec::new();
-        // Cache-hit branch: full entry returns rows, no legs walked.
         let hit = cache.get(&key).cloned();
         let served = if let Some((rows, failed)) = hit
             && failed.is_empty()
@@ -2067,8 +1992,6 @@ mod tests {
         {
             rows
         } else {
-            // Would walk `KindFilter::Series.providers()` here; the test
-            // proves this branch is not taken on a full hit.
             for leg in KindFilter::Series.providers() {
                 leg_attempts.insert((*leg).to_string());
                 log_lines.push(format!("search: leg {leg} ok 1 rows 1ms"));

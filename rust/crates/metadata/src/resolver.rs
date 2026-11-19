@@ -1,38 +1,3 @@
-//! `metadata::resolver` -- mirrors `go\internal\metadata\resolver.go`.
-//!
-//! The provider chain. The poll loop uses the NON-BLOCKING [`Resolver::resolve`]
-//! (a cache miss fires one background fetch per cache key, single-flight, and the
-//! card falls back to the clean title until it lands); the CLIs use the BLOCKING
-//! [`Resolver::lookup_now`]. Order: TVmaze for TV, AniList, Tenrai and Kitsu
-//! for anime, Cinemeta as the general fallback and the first movie leg.
-//! Wikipedia, JustWatch, Episodate, Bangumi, LiveChart.me and ANN stay as
-//! modules (with their tests) but sit OFF the default chain: they answered too
-//! slowly or too unreliably to keep in front of a user's lookup.
-//! Offline safe: with no cache entry and no
-//! network the card is exactly the clean card, and [`Options::offline`] serves
-//! cache-only. `force` bypasses and re-attempts.
-//!
-//! # The chain is behaviour, not detail
-//!
-//! * [`Resolver::ordered_sources`] ranks providers per kind. TVmaze is first for
-//!   EVERY series query including `Absolute` (its season/episode tables are
-//!   authoritative, while AniList `streamingEpisodes` are mislabeled for
-//!   absolute numbering -- Re:ZERO media 21355 serves 51-66 for an episode-1
-//!   query, and a wrong title is worse than no title). Unranked names keep their
-//!   relative order at rank 100, so an injected test source is still tried.
-//! * `fetchChain` keeps going past an error (`sawError`, first error kept),
-//!   past a source that answered but lacks the requested episode, and past a
-//!   match with no synopsis (kept as the fallback while the walk continues).
-//!   A movie answer with a synopsis returns immediately, as does a series
-//!   answer with a number-exact episode match ([`match_episode`], NEVER a
-//!   positional index) plus a synopsis; year never gates, cover and length
-//!   never gate.
-//! * `fetchMedia` retries the SAME chain once with the separator-normalized
-//!   alternate title, and ONLY after a definitive primary miss: a transient
-//!   primary is unknown, and substituting an alternate match would overwrite a
-//!   correct cached positive under the ORIGINAL key.
-//! * Only a definitive miss is cached negative (10 minutes in memory, 30 days on
-//!   disk). A transient failure -- including cancellation -- persists NOTHING.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -400,10 +365,6 @@ impl Resolver {
         if let Some(media) = cached_answer(&mut state, &self.inner.dir, &key, q) {
             return Ok(resolve_from_media(&media, q));
         }
-        // A cached entry that cannot answer q is treated as a miss so a
-        // stale/wrong source never pins the key; the fetch below may overwrite it
-        // with the source that does answer. The stale entry stays in mem for
-        // other episodes sharing this key.
         if let Some(expiry) = state.neg.get(&key).copied() {
             if SystemTime::now() < expiry {
                 if probed_live(&mut state, &self.inner.dir, &key) {
@@ -415,9 +376,6 @@ impl Resolver {
         }
         if let Some(entry) = cache_load_entry(&self.inner.dir, &key) {
             if entry.not_found {
-                // Fresh persisted miss: no network, same observable result as a
-                // fresh not-found lookup. Repopulate the in-memory fast path,
-                // bounded by the stored TTL.
                 let expiry =
                     negative_mem_expiry(&entry.checked_at, SystemTime::now(), NEGATIVE_BACKOFF);
                 state.neg.insert(key, expiry);
@@ -429,7 +387,6 @@ impl Resolver {
                 state.mem.insert(key, media.clone());
                 return Ok(resolve_from_media(&media, q));
             }
-            // Stale on-disk entry for this episode: fall through to the fetch.
         }
         if self.inner.offline {
             return Ok(Resolution::default());
@@ -456,11 +413,8 @@ impl Resolver {
         let mut state = self.lock();
         state.inflight.remove(key);
         let timed_out = fetch_cancel.err().is_some();
-        // Release the propagation watcher: this scope is finished.
         fetch_cancel.cancel();
         let Some(media) = chain.media else {
-            // A cancelled/timed-out fetch or any provider error is transient,
-            // never a confirmed not-found: persist nothing, suppress nothing.
             if timed_out || !chain.definitive {
                 return;
             }
@@ -527,8 +481,6 @@ impl Resolver {
             }
             if let Some(entry) = cache_load_entry(&self.inner.dir, &key) {
                 if entry.not_found {
-                    // Fresh persisted miss: no network, exactly the observable
-                    // result of a fresh not-found lookup.
                     let expiry =
                         negative_mem_expiry(&entry.checked_at, SystemTime::now(), NEGATIVE_BACKOFF);
                     state.neg.insert(key.clone(), expiry);
@@ -540,12 +492,8 @@ impl Resolver {
                     state.mem.insert(key.clone(), media.clone());
                     return Ok((resolve_from_media(&media, q), true));
                 }
-                // Stale on-disk entry: fall through to the fetch below.
             }
         } else {
-            // A forced refetch must never be pinned by a stale answer or a
-            // recent miss; the fetch below overwrites both on success. Save the
-            // cleared negative so a transient failure can restore it.
             prev_neg = state.neg.get(&key).copied();
             state.neg.remove(&key);
         }
@@ -560,18 +508,13 @@ impl Resolver {
             }
             let state = self.lock();
             if let Some(media) = state.mem.get(&key) {
-                // Served by a concurrent fetch, not the cache.
                 return Ok((resolve_from_media(media, q), false));
             }
             if let Some(expiry) = state.neg.get(&key).copied()
                 && SystemTime::now() < expiry
             {
-                // The owning fetch confirmed the miss (it recorded suppression
-                // before releasing the joiners).
                 return Ok((Resolution::default(), false));
             }
-            // The owning fetch ended without an answer and without recording a
-            // miss: its outcome was transient, so this join is transient too.
             return Err(Error::unavailable(format!(
                 "metadata: concurrent fetch failed transiently for {key:?}: {}",
                 crate::LOOKUP_UNAVAILABLE_MESSAGE
@@ -581,16 +524,9 @@ impl Resolver {
         state.inflight.insert(key.clone(), Arc::clone(&done));
         drop(state);
 
-        // The blocking lookup's total budget, the same order as the poll path's
-        // `timeout * 4` cap: a genuinely-unknown file must resolve in bounded
-        // time instead of walking every provider at the full per-request
-        // timeout. Reuses `child_scope` (the `Cancel::with_deadline`
-        // machinery); no new subsystem. The child carries the parent's
-        // cancellation, so its reason covers both.
         let budget = child_scope(cancel, self.inner.timeout * 4);
         let chain = self.fetch_media(&budget, q);
         let reason = budget.err();
-        // Release the propagation watcher: this scope is finished.
         budget.cancel();
 
         let mut state = self.lock();
@@ -598,17 +534,9 @@ impl Resolver {
         let _guard = DoneGuard(done);
         let Some(media) = chain.media else {
             if let Some(reason) = reason {
-                // A cancelled fetch persists nothing; restore the negative
-                // cleared above so a failed forced refresh leaves prior
-                // suppression intact.
                 if force && let Some(prev) = prev_neg {
                     state.neg.insert(key.clone(), prev);
                 }
-                // The child scope carries BOTH the parent's cancellation and
-                // its own total-budget deadline: only a dead parent is a user
-                // cancel. A budget expiry is bounded and transient, so it is
-                // lookup-unavailable, never `Cancelled` (which callers book
-                // as not-found).
                 if cancel.err().is_some() {
                     let parent = cancel.err().unwrap_or(reason);
                     return Err(Error::Cancelled(parent));
@@ -619,10 +547,6 @@ impl Resolver {
                 )));
             }
             if !chain.definitive {
-                // Transient provider error/timeout: not a confirmed not-found,
-                // so persist nothing and suppress nothing. A valid positive on
-                // disk is left intact. The sentinel keeps this distinguishable
-                // from a miss.
                 if force && let Some(prev) = prev_neg {
                     state.neg.insert(key.clone(), prev);
                 }
@@ -788,9 +712,6 @@ impl Resolver {
         if let Some(media) = primary.media {
             return Chain::found(self.backfill_artwork(cancel, q, media));
         }
-        // An unknown primary outcome (transient failure) must never be replaced
-        // by a substituted alternate match that the caller then persists under
-        // the ORIGINAL key, overwriting a correct cached positive.
         if !primary.definitive {
             return Chain::transient(primary.err);
         }
@@ -808,17 +729,10 @@ impl Resolver {
                 err: primary.err,
             };
         }
-        // One bounded retry of the SAME source chain under the
-        // separator-normalized title ("Show - Arc" -> "Show: Arc"). The sources
-        // match against the alternate title, while the caller caches and
-        // resolves under the ORIGINAL query key.
         let secondary = self.fetch_chain(cancel, &alt);
         if let Some(media) = secondary.media {
             return Chain::found(self.backfill_artwork(cancel, &alt, media));
         }
-        // The primary was a definitive miss, so a transient alternate is still
-        // unknown and surfaces the alternate's error; the primary error is nil
-        // here.
         if !secondary.definitive {
             return Chain::transient(secondary.err);
         }
@@ -843,23 +757,15 @@ impl Resolver {
         if cancel.err().is_some() {
             return media;
         }
-        // Bounded by the resolver's per-request budget inside the existing
-        // scope; released as soon as the find returns. A miss or a failure
-        // keeps the winner untouched and is never cached negative here.
         let scope = child_scope(cancel, self.inner.timeout);
         let found = anilist.find(&scope, q);
         scope.cancel();
         let Ok(Some(hit)) = found else {
             return media;
         };
-        // Exact-title match only: a looser match could backfill the wrong
-        // work's poster (the 2015 `Dragon Ball Super` series over the 2026
-        // `Dragon Ball Super: Beerus` season).
         if hit.title.trim() != media.title.trim() {
             return media;
         }
-        // `AnilistSource` already picks `extra_large → large → banner_image`;
-        // only a usable cover replaces the winner's.
         if artwork_unusable(&hit.artwork) {
             return media;
         }
@@ -906,9 +812,6 @@ impl Resolver {
                     }
                     if media.kind == Kind::MOVIE || q.kind == Kind::MOVIE {
                         if media.synopsis.trim().is_empty() {
-                            // A bare title must not settle the lookup when a
-                            // later source may hold the synopsis: keep it and
-                            // walk on.
                             self.log(&format!(
                                 "metadata: source {} answers {:?} without a synopsis, trying next",
                                 source.name(),
@@ -922,9 +825,6 @@ impl Resolver {
                         }
                     } else if match_episode(&media.episodes, q).is_some() {
                         if !episode_complete(&media, q) {
-                            // The episode matches but neither it nor the show
-                            // carries a synopsis: a later provider with the
-                            // complete record wins; this stays the fallback.
                             self.log(&format!(
                                 "metadata: source {} answers episode {} for {:?} without a synopsis, trying next",
                                 source.name(),
@@ -938,11 +838,6 @@ impl Resolver {
                             continue;
                         }
                     } else {
-                        // The show matched but its Numbers lack the requested
-                        // episode: fall through to the next source rather than
-                        // caching/returning a wrong (positional) title. The leg
-                        // did answer, so a lone error elsewhere must not turn
-                        // this genuine not-found into Unavailable.
                         self.log(&format!(
                             "metadata: source {} lacks episode {} for {:?}, trying next",
                             source.name(),
@@ -953,8 +848,6 @@ impl Resolver {
                         continue;
                     }
                     saw_ok = true;
-                    // A strong title settles here; a weaker eligible answer is
-                    // kept so an exact title from a later provider can win.
                     if title_similarity(&q.title, &media.title) >= CHAIN_STRONG_TITLE {
                         return Chain::found(media);
                     }
@@ -974,10 +867,6 @@ impl Resolver {
         if let Some(media) = bare {
             return Chain::found(media);
         }
-        // One erroring leg never turns a genuine not-found into Unavailable:
-        // only a chain with NO definitive leg outcome (every leg errored) is
-        // transient. A single failed leg alongside real misses still stores
-        // the definitive miss.
         if saw_error && !saw_ok {
             return Chain::transient(first_err);
         }
@@ -1147,8 +1036,6 @@ pub(crate) fn resolve_from_media(media: &Media, q: &Query) -> Resolution {
         resolution.found = true;
         return resolution;
     }
-    // Every source lacked the requested Number: not found, so the play path
-    // falls back to today's clean card. Never report a wrong title.
     resolution
 }
 

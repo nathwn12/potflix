@@ -1,24 +1,3 @@
-//! RFC3339 UTC text: the wire format Go's `time.Time` writes into a cache
-//! record's `checkedAt` and into [`metadata_core::types::Media::fetched_at`].
-//!
-//! The workspace pins no date crate (see the workspace dependency policy), and
-//! the port needs only the one format: the cache record's `checkedAt` must be
-//! readable by Go and Go's own `checkedAt` must be readable here. So this module
-//! carries the calendar arithmetic (Howard Hinnant's `days_from_civil` /
-//! `civil_from_days`, the same pair `metadata-http` uses for `Retry-After`
-//! dates) plus a parser and a formatter for `YYYY-MM-DDTHH:MM:SS[.frac]Z`.
-//!
-//! Named readings of Go's `time.Time`:
-//!
-//! * A fraction is emitted only when non-zero and with trailing zeros trimmed,
-//!   which is `time.RFC3339Nano`'s shape; a whole second prints without a dot.
-//! * The parser accepts a `Z` zone only, which is what every writer here (Go's
-//!   `time.Now().UTC()`) produces; an explicit numeric offset is rejected rather
-//!   than shifted, so a record this crate cannot interpret reads as absent
-//!   rather than as a wrong instant.
-//! * Go's zero `time.Time` is `0001-01-01T00:00:00Z`; it parses here to a
-//!   pre-epoch instant, so `negativeFresh` reports it expired exactly as Go's
-//!   `IsZero` branch does.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -78,10 +57,6 @@ pub fn parse_rfc3339(s: &str) -> Option<SystemTime> {
 
     let days = days_from_civil(year, month, day);
     let secs = days * 86_400 + hour * 3600 + minute * 60 + second;
-    // Windows' `SystemTime` floor is the FILETIME epoch (1601-01-01), so an
-    // earlier instant -- notably Go's zero `time.Time`, year 1 -- is clamped
-    // there. Every consumer only asks whether a stored `checkedAt` is fresh, and
-    // 1601 is expired under every gate.
     let secs = secs.max(MIN_REPRESENTABLE_SECS);
     let base = if secs >= 0 {
         UNIX_EPOCH + Duration::from_secs(secs as u64)
@@ -176,7 +151,6 @@ mod tests {
     #[test]
     fn round_trips_the_epoch_and_a_known_instant() {
         assert_eq!(format_rfc3339(UNIX_EPOCH), "1970-01-01T00:00:00Z");
-        // 2026-10-13T02:14:03Z.
         let at = UNIX_EPOCH + Duration::from_secs(1_791_857_643);
         assert_eq!(format_rfc3339(at), "2026-10-13T02:14:03Z");
         assert_eq!(parse_rfc3339("2026-10-13T02:14:03Z"), Some(at));

@@ -1,8 +1,3 @@
-//! `library::scan` -- mirrors `go\internal\library\scan.go`.
-//!
-//! The store-backed indexed scan: one walk, a per-file diff, and no network at
-//! all. An indexed `Scan` performs ZERO fetches; it walks, diffs, prunes, stamps
-//! rollups and hands the pending keys to the catch-up.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -206,7 +201,6 @@ pub(crate) fn scan_indexed(cancel: &crate::Cancel, opts: &Options) -> Result<Sta
         });
     }
 
-    // The pass owns its own lifetime, deliberately (see catchup.rs).
     if !opts.skip_catch_up && cancel.err().is_none() {
         start_catch_up(
             CatchUpConfig {

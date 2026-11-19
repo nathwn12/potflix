@@ -1,16 +1,3 @@
-//! Narrow chrome primitives: four explicit paint functions, each with a
-//! measured rect owned by the layout and exactly one caller in `window.rs`.
-//!
-//! - `bar` (48px): 20px mark left (no wordmark: the OS caption already reads
-//!   "Potflix"); right hairline chip plus 32px gear glyph (`#A7ABB4` rest,
-//!   `#F2F3F5` hover, accent never).
-//! - `hero` (<=124px): 64x96 poster, 20 semibold title single line, 12 muted
-//!   meta, 12 status, 32px ghost "Fix match" right-aligned on the status row.
-//! - `result_row` (56px): 32x48 cover thumb, 13 semibold title, 12 muted meta
-//!   built from the record only (provider names forbidden).
-//! - `settings_row` (48px): 13 label left at 16, 12 muted desc under it,
-//!   right-aligned 36px control; 11px caps labels 32px above each group
-//!   (layout owns the caps; this paints one row).
 
 use windows_sys::Win32::Graphics::Gdi;
 
@@ -76,8 +63,6 @@ pub fn hero_meta(
     } else {
         episode_code.trim().to_string()
     };
-    // A series with no episode code falls back to its runtime rather than a
-    // bare year + kind; a movie with no runtime stays bare.
     let detail = if detail.is_empty() && !kind_is_movie {
         length.trim().to_string()
     } else {
@@ -135,8 +120,6 @@ fn draw_center(
     font: Gdi::HFONT,
     color: u32,
 ) {
-    // No ellipsis: scope labels must never ellipsise at 460px; the layout
-    // guarantees the fit and the test pins it with GetTextExtent.
     let fmt = crate::win32::DT_CENTER
         | crate::win32::DT_SINGLE_LINE
         | crate::win32::DT_NO_PREFIX
@@ -173,7 +156,6 @@ pub fn bar(
         },
         COL_BORDER,
     );
-    // 20px mark.
     let mark = sc(20);
     let mark_rc = Rect {
         left: bar_rc.left + sc(16),
@@ -200,12 +182,6 @@ pub fn bar(
     }
     let chip_font = crate::brand::ui(sc(FS_CHIP), crate::brand::UI_WEIGHT);
     let gear_font = crate::brand::ui(sc(16), crate::brand::UI_WEIGHT);
-    // No in-app wordmark: the OS caption already reads "Potflix", so a second
-    // text label in this bar doubles the name. The mark stays at the left.
-    // Right side: hairline chip + 32px gear glyph. Gear rect is the layout's
-    // measured rect; the chip sits left of it with an 8px gap. A healthy link
-    // shows NO chrome: an empty chip text paints nothing, so the bar stays
-    // quiet unless there is a reason to name.
     if !chip_text.is_empty() {
         let chip_pad_x = sc(10);
         let chip_w = text_width_px(hdc, chip_font, chip_text) + chip_pad_x * 2;
@@ -222,9 +198,6 @@ pub fn bar(
             draw_center(hdc, chip_text, chip_rc, chip_font, COL_MUTED);
         }
     }
-    // Gear glyph centred in its 32px rect; never the "Settings" text (that is
-    // what clipped to "Set…"). Muted at rest, body text on hover/press --
-    // accent never (the gear is not the primary action).
     draw_center(hdc, "⚙", gear_rc, gear_font, gear_color(gear_hovered));
     // SAFETY: fonts created above.
     unsafe {
@@ -265,17 +238,12 @@ pub fn hero(
     }
     fill_round_rect(hdc, hero_rc, COL_CARD, sc(R_PANEL));
     stroke_round_rect_w(hdc, hero_rc, COL_BORDER, sc(R_PANEL), sc(STROKE_HAIR));
-    // 64x96 poster.
     super::paint_cover(hdc, cover_rc, dpi, cover);
     let title_font = crate::brand::ui(sc(FS_HERO_TITLE), crate::brand::UI_WEIGHT);
     let meta_font = crate::brand::ui(sc(FS_HERO_META), crate::brand::UI_WEIGHT);
-    // Title 20 semibold, single line, ellipsised (one line, never wraps).
     draw_left(hdc, title, title_rc, title_font, COL_TEXT, true);
     draw_left(hdc, meta, meta_rc, meta_font, COL_MUTED, true);
     draw_left(hdc, status, status_rc, meta_font, COL_MUTED, true);
-    // 32px ghost "Fix match" right-aligned on the status row: outline only at
-    // rest, hover fill; never accent. Absent when there is no live title: an
-    // empty rect paints nothing but keeps the object card.
     let ghost_font = crate::brand::ui(sc(12), crate::brand::UI_WEIGHT);
     if fix_rc.right > fix_rc.left && fix_rc.bottom > fix_rc.top && !fix_label.is_empty() {
         let fill = if pressed {
@@ -346,8 +314,6 @@ pub fn result_row(
             COL_ACCENT,
         );
     }
-    // 32x48 cover thumb: the decoded poster when cached, else the empty
-    // tile. Same tile painter as the hero cover, so rows and hero agree.
     let thumb = result_row_thumb(rc, dpi);
     super::paint_cover(hdc, thumb, dpi, cover);
     let title_font = crate::brand::ui(sc(FS_ROW_TITLE), crate::brand::UI_WEIGHT);
@@ -459,7 +425,6 @@ pub fn settings_row(
     );
     match ctl {
         NarrowCtl::Toggle(on) => {
-            // 36x20 pill switch right-aligned.
             let pill = Rect {
                 left: ctl_rc.right - sc(36),
                 top: ctl_rc.top,

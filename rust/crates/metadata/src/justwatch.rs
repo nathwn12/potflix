@@ -1,26 +1,3 @@
-//! `metadata::justwatch` -- the JustWatch movie leg (unofficial GraphQL).
-//!
-//! JustWatch (`https://apis.justwatch.com/graphql`) is keyless for search:
-//! one `GetSearchTitles` POST (`popularTitles` filtered by `searchQuery`)
-//! carries cover, synopsis and length for movies AND series in a single call.
-//!
-//! Two behaviours that are contract, not detail:
-//!
-//! * the search pick is title-validated with [`pick_best_show`]: a
-//!   low-confidence best returns a definitive MISS rather than a wrong title.
-//!   The pick's `originalReleaseYear` NEVER rejects: at equal title strength
-//!   it prefers the candidate carrying the query's year, but a missing year,
-//!   or a year that disagrees with the filename, is a nice-to-have display
-//!   field, never a gate;
-//! * the endpoint is unofficial and undocumented, so it is coverage only: it
-//!   ranks behind Cinemeta and Wikipedia in the movie chain and never serves
-//!   series queries (a series key returns `Ok(None)` before any fetch).
-//!
-//! Genre short codes (`"act"`, `"drm"`) are machine tags, not display genres,
-//! so they are deliberately dropped (the Kitsu precedent: no genres rather
-//! than wrong ones). The poster template (`/poster/<id>/{profile}/<slug>.
-//! {format}`) resolves against [`JW_IMAGE_BASE`] at `s718`/`jpg`, verified
-//! live (a `HEAD` returns `image/jpeg`).
 
 use std::time::Duration;
 
@@ -164,9 +141,6 @@ impl JustWatchSource {
             "query": JUSTWATCH_QUERY,
         });
         let url = format!("{}/graphql", self.base_url());
-        // Read-only GraphQL search: side-effect-free, so the idempotent POST
-        // retry (backoff + jitter, honoring Retry-After) applies. A mutating
-        // POST would use `post_json` and never retry.
         let response = self.client.post_json_idempotent(cancel, &url, &payload)?;
         if response.status() == StatusCode::NOT_FOUND {
             drain_and_close(response);
@@ -206,7 +180,6 @@ impl JustWatchSource {
             return Ok(None);
         }
         let Some(winner) = pick_best_show(&q.title, &cands) else {
-            // Low-confidence best: a wrong title is worse than no title.
             return Ok(None);
         };
         let mut winner_idx = None;
@@ -219,7 +192,6 @@ impl JustWatchSource {
         let Some(winner_idx) = winner_idx else {
             return Ok(None);
         };
-        // Soft year preference only: no year match keeps the title winner.
         let take =
             crate::yearpref::prefer_year_match(&q.title, q.year, &cands, &years, winner_idx);
         Ok(Some(entries[take].clone()))

@@ -1,6 +1,3 @@
-//! Ports `go\internal\metadata\artwork_test.go`: the text helpers, the cache
-//! schema gate, and the artwork/synopsis path through a real provider fixture
-//! and through the resolver.
 
 use std::sync::Arc;
 
@@ -29,7 +26,6 @@ fn strip_html_drops_tags_and_decodes_entities() {
         "line one line two line three"
     );
     assert_eq!(strip_html(""), "");
-    // A bare "<" with no closing ">" is literal text, not a tag.
     assert_eq!(strip_html("a < b"), "a < b");
 }
 
@@ -50,11 +46,9 @@ fn cap_synopsis_caps_at_a_sentence_or_word_boundary() {
     let short = "A short synopsis.";
     assert_eq!(cap_synopsis(short), short);
 
-    // Plain ASCII at exactly the budget is returned unchanged.
     let ascii_at_cap = "a".repeat(MAX_SYNOPSIS_UNITS);
     assert_eq!(cap_synopsis(&ascii_at_cap), ascii_at_cap);
 
-    // Long word-runs: capped at a word boundary within the cap.
     let long = "word ".repeat(100);
     let long = long.trim();
     let got = cap_synopsis(long);
@@ -69,7 +63,6 @@ fn cap_synopsis_caps_at_a_sentence_or_word_boundary() {
     );
     assert!(got.ends_with("word"), "capSynopsis word boundary = {got:?}");
 
-    // Sentence boundary wins when one exists in the back half.
     let sentences = format!(
         "First sentence ends here. {}",
         "filler text here. ".repeat(30)
@@ -81,9 +74,6 @@ fn cap_synopsis_caps_at_a_sentence_or_word_boundary() {
         "capSynopsis sentence boundary = {got:?}"
     );
 
-    // Astral runes cost 2 UTF-16 units each: 128 emoji are 256 units, so the
-    // stored note must cap to 64 whole emoji (128 units), never a split
-    // surrogate, and never over the hover budget.
     let emoji = "\u{1F600}".repeat(MAX_SYNOPSIS_UNITS);
     let got = cap_synopsis(&emoji);
     assert!(
@@ -203,8 +193,6 @@ fn tvmaze_artwork_fixture() {
         .lookup_now(&Cancel::background(), &q)
         .expect("LookupNow");
     assert!(res.found, "resolution = {res:?}, want found");
-    // Series poster always wins over episode stills; episode summary wins over
-    // show summary.
     assert_eq!(res.artwork, "https://example.com/show-original.jpg");
     assert!(
         res.synopsis.contains("episode one"),

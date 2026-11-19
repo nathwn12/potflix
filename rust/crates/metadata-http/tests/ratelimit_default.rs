@@ -1,10 +1,3 @@
-//! Port of `go\internal\metadata\ratelimit_default_test.go`.
-//!
-//! Deliberately its own test binary: it asserts the *initial* process state
-//! (turbo, the published intervals) and must observe a process in which
-//! nothing has called `set_rate_profile`. A separate integration-test file is
-//! a separate process, which is the Rust equivalent of Go keeping this test in
-//! its own file so it runs before the tests that mutate the global limiter.
 
 use std::time::Duration;
 
@@ -32,7 +25,6 @@ fn rate_limiter_initial_profile_is_turbo() {
         assert_eq!(got, want, "initial host {host:?} = {got:?}, want {want:?}");
     }
 
-    // An unlisted host is ungated, in every profile.
     assert_eq!(
         rate_interval_for_host("unknown-host-127-0-0-1.example"),
         Duration::ZERO

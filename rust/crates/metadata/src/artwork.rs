@@ -1,9 +1,3 @@
-//! `metadata::artwork` -- mirrors `go\internal\metadata\artwork.go`.
-//!
-//! The three text helpers every provider shares: `firstNonEmpty`, `stripHTML`
-//! and `capSynopsis`. They are small and load-bearing -- every cached synopsis
-//! in the owner's cache went through `capSynopsis`, so the cap and its
-//! boundaries are behaviour, not tuning.
 
 /// `maxSynopsisUnits` caps a synopsis at 128 UTF-16 code units (Discord's
 /// asset-text cap, so the LargeText hover tooltip carries the short synopsis
@@ -53,9 +47,6 @@ pub fn strip_html(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] != b'<' {
-            // Copy whole UTF-8 sequences: the byte scan only ever branches on
-            // '<' and '>', both ASCII, so a multi-byte rune can never contain a
-            // false tag boundary.
             let ch = s[i..].chars().next().unwrap_or('\u{fffd}');
             out.push(ch);
             i += ch.len_utf8();
@@ -96,8 +87,6 @@ pub fn cap_synopsis(s: &str) -> String {
         return s.to_string();
     }
     let runes: Vec<char> = s.chars().collect();
-    // Leading runes fitting in the UTF-16 budget (never splits a surrogate
-    // pair: astral runes cost 2 units).
     let mut used = 0usize;
     let mut end = 0usize;
     for (i, r) in runes.iter().enumerate() {
@@ -108,8 +97,6 @@ pub fn cap_synopsis(s: &str) -> String {
         used += sz;
         end = i + 1;
     }
-    // Start of the back half: the smallest leading rune count of the cut whose
-    // UTF-16 length reaches half the budget.
     let mut acc = 0usize;
     let mut half = 0usize;
     for (i, r) in runes.iter().enumerate().take(end) {

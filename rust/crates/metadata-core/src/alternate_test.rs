@@ -1,14 +1,3 @@
-//! Ports the `alternateQuery`-level tests of
-//! `go\internal\metadata\alternate_test.go`.
-//!
-//! `TestAlternateQuery` is here in full, and with it the two assertions the
-//! resolver-level tests still make about the derivation itself:
-//! `TestMovieMarkerMissIsCleanNegative` opens by proving a marker-derived movie
-//! query never alternates, and `TestMovieMarkerChainQueriesMovieSource` opens by
-//! proving the marker-derived movie query is exactly what reaches the movie
-//! source chain. The other seven tests in the file drive the RESOLVER (a fake
-//! `Source`, the store, the transient/miss verdicts) and belong to
-//! `metadata::resolver`, not to this network-free crate.
 
 use crate::alternate::alternate_query;
 use crate::parse::parse_raw;
@@ -117,8 +106,6 @@ fn alternate_query_cases() {
             continue;
         };
         assert_eq!(alt.title, *want_title, "alternate title [{name}]");
-        // The retry must still answer the ORIGINAL request: every field but the
-        // title carries over.
         assert_eq!(
             (alt.kind, alt.year, alt.season, alt.episode, alt.absolute),
             (q.kind, q.year, q.season, q.episode, q.absolute),

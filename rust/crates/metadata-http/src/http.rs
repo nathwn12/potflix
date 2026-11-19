@@ -1,29 +1,3 @@
-//! `metadata::http` -- mirrors `go\internal\metadata\http.go`.
-//!
-//! The shared HTTP client and fetch helpers: one wire contract for every
-//! provider, bounded 429 retries with backoff and jitter, and a capped decoder.
-//!
-//! In Rust this is `ureq` with the `native-tls` provider (SChannel on
-//! Windows) -- OS-native TLS, no C toolchain -- rooted in the platform
-//! verifier (`RootCerts::PlatformVerifier`: the OS trust store, exactly like
-//! Go's `http.Client`). `TlsConfig::builder()` starts from
-//! `TlsConfig::default()`, whose `root_certs` default is `WebPki` (the
-//! vendored Mozilla set, meant for the rustls provider); for the native-tls
-//! backend that default switches the OS store OFF (`disable_built_in_roots`),
-//! so the provider MUST be paired with `PlatformVerifier` or chains the OS
-//! already trusts stop verifying (Cloudflare/Google-Trust hosts failed while
-//! curl and .NET succeeded). Verification is never disabled: no
-//! `disable_verification`, no `danger_*`. `ureq`'s other defaults are the
-//! deliberate match for Go's `http.Client` here: `http_status_as_error(false)`
-//! so a 429 reaches the retry instead of surfacing as a transport error, and
-//! `timeout_global` as the whole-request budget. `gzip` is off (the workspace
-//! pins `default-features = false`), so no `Accept-Encoding` is sent and the
-//! providers answer identity -- also deliberate.
-//!
-//! Wire constants are contract, not tuning: `User-Agent:
-//! potflix-metadata/1.0`, `Accept: application/json`, a 4 MiB body cap, a 10 s
-//! retry-wait cap and a 512 KiB post-decode drain. A response body is NEVER
-//! logged and never carried in an error message.
 
 use std::fmt;
 use std::io::{self, Read};
@@ -135,15 +109,9 @@ impl HttpClient {
             .tls_config(
                 TlsConfig::builder()
                     .provider(TlsProvider::NativeTls)
-                    // PlatformVerifier is the OS trust store (SChannel here),
-                    // i.e. Go's `http.Client` posture. Without it the builder
-                    // keeps ureq's `WebPki` default, which for native-tls
-                    // disables the OS roots and breaks chains the OS trusts.
                     .root_certs(RootCerts::PlatformVerifier)
                     .build(),
             )
-            // Go's `client.Do` hands back every status; non-2xx is
-            // `decode_capped`'s error and a 429 is the retry's trigger.
             .http_status_as_error(false)
             .build();
         HttpClient {
@@ -231,8 +199,6 @@ impl HttpClient {
             if response.status().as_u16() != StatusCode::TOO_MANY_REQUESTS.as_u16() {
                 return Ok(response);
             }
-            // Non-idempotent calls and an exhausted budget hand the last 429
-            // back instead of sleeping: the caller still owns the body.
             if !idempotent || attempt >= MAX_429_RETRIES {
                 return Ok(response);
             }
@@ -244,9 +210,6 @@ impl HttpClient {
             let server_wait = parse_retry_after(retry_after, SystemTime::now());
             let wait = retry_wait_for_attempt(server_wait, attempt);
             drain_and_close(response);
-            // Go bounds the wait, then a zero wait still checks `ctx.Err()` -
-            // which is exactly what `wait` does here; the backoff floor means
-            // this wait is never zero for a live scope.
             cancel.wait(wait).map_err(Error::Cancelled)?;
             attempt += 1;
         }
@@ -260,15 +223,10 @@ impl HttpClient {
         accept: &str,
     ) -> Result<Response<Body>, Error> {
         wait_for_host(cancel, uri.host().unwrap_or_default()).map_err(Error::Cancelled)?;
-        // Go's `client.Do` honors the request context: an already-cancelled or
-        // expired scope fails the round trip instead of reaching the wire, and
-        // the limiter does not check the scope for an ungated host.
         if let Some(reason) = cancel.err() {
             return Err(Error::Cancelled(reason));
         }
         let accept = if accept.is_empty() { ACCEPT_JSON } else { accept };
-        // `ureq` type-states the request body, so the two wire shapes are
-        // built separately: same headers, same contract as Go's one closure.
         let result = match payload {
             Some(body) => self
                 .agent
@@ -377,10 +335,6 @@ pub fn decode_capped<T: DeserializeOwned>(response: Response<Body>) -> Result<T,
         drain(&mut body, CLOSE_DRAIN_BYTES);
         return Err(Error::Status(status));
     }
-    // Stream the value out of a capped reader: the decoder stops at the end of
-    // the first JSON value, exactly like `json.Decoder.Decode`, leaving the
-    // rest of the body for the drain below. Trailing content is not an error
-    // here, which is also Go's behaviour.
     let decoded = {
         let reader = body.as_reader().take(MAX_BODY_BYTES);
         let mut deserializer = serde_json::Deserializer::from_reader(reader);
@@ -409,21 +363,18 @@ fn parse_http_date(value: &str) -> Option<SystemTime> {
     let normalized = value.replace([',', '-'], " ");
     let fields: Vec<&str> = normalized.split_whitespace().collect();
     let (year, month, day, time) = match fields.as_slice() {
-        // RFC 1123 / RFC 850, both with a zone.
         [_weekday, day, month, year, time, zone] => {
             if !is_gmt(zone) {
                 return None;
             }
             (*year, *month, *day, *time)
         }
-        // ANSI C asctime, no zone.
         [_weekday, month, day, time, year] => (*year, *month, *day, *time),
         _ => return None,
     };
 
     let year: i64 = match year.len() {
         4 => year.parse().ok()?,
-        // Go's stdYear rule: 2-digit years below 69 mean 2000+, the rest 1900+.
         2 => {
             let short: i64 = year.parse().ok()?;
             if short >= 69 {
@@ -440,9 +391,6 @@ fn parse_http_date(value: &str) -> Option<SystemTime> {
         return None;
     }
     let (hour, minute, second) = parse_clock(time)?;
-    // Day-of-month is not checked against the month length: Go's parser
-    // normalizes an overlong day rather than rejecting it, and a `Retry-After`
-    // date in the wild is always well formed.
     let days = days_from_civil(year, month, day);
     let secs = days * 86_400 + hour * 3600 + minute * 60 + second;
     if secs < 0 {
@@ -467,14 +415,12 @@ fn month_number(name: &str) -> Option<i64> {
 
 fn parse_clock(time: &str) -> Option<(i64, i64, i64)> {
     let mut parts = time.split(':');
-    // `time.Parse` accepts one- or two-digit fields.
     let hour: i64 = parts.next()?.parse().ok()?;
     let minute: i64 = parts.next()?.parse().ok()?;
     let second: i64 = parts.next()?.parse().ok()?;
     if parts.next().is_some() {
         return None;
     }
-    // 60 is a leap second; it is accepted and treated as the following minute.
     if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=60).contains(&second) {
         return None;
     }
@@ -506,7 +452,6 @@ mod tests {
         assert_eq!(parse_retry_after(" 12 ", now), Duration::from_secs(12));
         assert_eq!(parse_retry_after("-3", now), Duration::ZERO);
         assert_eq!(parse_retry_after("soon", now), Duration::ZERO);
-        // 2001-09-09 01:46:40 UTC, from the 1_000_000_000 s epoch second.
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
         assert_eq!(
             parse_retry_after("Sun, 09 Sep 2001 01:46:40 GMT", at),
@@ -519,7 +464,6 @@ mod tests {
             ),
             Duration::from_secs(30)
         );
-        // RFC 850 and asctime name the same instant as RFC 1123.
         assert_eq!(
             parse_retry_after(
                 "Sunday, 09-Sep-01 01:46:40 GMT",
@@ -546,14 +490,12 @@ mod tests {
         assert_eq!(backoff_for_attempt(1), Duration::from_millis(400));
         assert_eq!(backoff_for_attempt(2), Duration::from_millis(800));
         assert_eq!(backoff_for_attempt(3), Duration::from_millis(1600));
-        // Far-future attempts never exceed the retry-wait cap.
         assert_eq!(backoff_for_attempt(100), MAX_RETRY_WAIT);
     }
 
     #[test]
     fn compute_retry_wait_honors_retry_after_and_caps() {
         let jitter = Duration::from_millis(50);
-        // No server hint: pure backoff plus jitter.
         assert_eq!(
             compute_retry_wait(Duration::ZERO, 0, jitter),
             Duration::from_millis(250)
@@ -562,12 +504,10 @@ mod tests {
             compute_retry_wait(Duration::ZERO, 1, jitter),
             Duration::from_millis(450)
         );
-        // A usable Retry-After wins over backoff.
         assert_eq!(
             compute_retry_wait(Duration::from_secs(2), 0, jitter),
             Duration::from_millis(2050)
         );
-        // ... but never past the cap plus jitter.
         assert_eq!(
             compute_retry_wait(Duration::from_secs(3600), 0, jitter),
             MAX_RETRY_WAIT + jitter
@@ -576,7 +516,6 @@ mod tests {
             compute_retry_wait(Duration::ZERO, 100, jitter),
             MAX_RETRY_WAIT + jitter
         );
-        // Jitter itself is capped.
         assert_eq!(
             compute_retry_wait(Duration::ZERO, 0, Duration::from_secs(60)),
             RETRY_BASE_DELAY + RETRY_JITTER_CAP
@@ -585,9 +524,6 @@ mod tests {
 
     #[test]
     fn retry_wait_for_attempt_stays_in_bounds() {
-        // The jittered policy is non-deterministic by design (wall-clock
-        // mixed); assert the bounds, never an exact value. This check CAN go
-        // red: a missing jitter term or an uncapped wait fails it.
         for attempt in 0..=MAX_429_RETRIES {
             let wait = retry_wait_for_attempt(Duration::ZERO, attempt);
             let base = backoff_for_attempt(attempt);

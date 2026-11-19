@@ -1,52 +1,3 @@
-//! `metadata::searchcache` -- the Fix-match picker's result cache.
-//!
-//! NEW SURFACE: `go\` has no search-result cache, so nothing here is diffed
-//! against a ported file; the contract is stated plainly instead. A search
-//! costs one request per provider leg, and the picker answers the same typed
-//! name again and again, so the ranked, merged rows ([`crate::search`]) are
-//! remembered under the picker's own key: [`search_cache_put`] records them,
-//! [`search_cache_get`] serves them back. A PARTIAL answer keeps both halves --
-//! the rows that arrived and the provider legs that failed -- so a restart can
-//! retry just the legs that did not answer. There is NO TTL: a stored key is
-//! served forever -- its rows are identities, not dates, and the picker's next
-//! search of that key is what replaces them.
-//!
-//! # Store file
-//!
-//! `%LOCALAPPDATA%\Potflix\search-cache.json` ([`default_path`]), the same
-//! directory convention as [`crate::overrides`]'s latch store: the path is
-//! derived from that store's own path, so the two can never disagree about the
-//! config directory. The shape is
-//! `{"version":1,"entries":[{"key","rows","failed"}]}` and
-//! [`SearchCache::save`] always writes version 1. `failed` carries the provider
-//! names whose leg errored; an entry written before that field existed loads
-//! with an empty list (`#[serde(default)]`), so old caches stay readable.
-//! Entries are written in key order, so the same cache produces the same bytes.
-//!
-//! # A broken file is never fatal
-//!
-//! The cache is best-effort by design: an absent, unreadable or malformed file
-//! loads as an empty cache, and an entry that does not decode as a
-//! `{key, rows, failed}` pair is dropped on its own while its neighbours still
-//! load. Nothing here reports an error and loading never rewrites the bad file;
-//! the next successful [`SearchCache::put`] replaces it with a clean one.
-//!
-//! # What is never stored
-//!
-//! A blank key, a row carrying no identity at all (no provider, no provider id
-//! and no title) and an answer that is BOTH empty and failure-free are all
-//! dropped: a search that found nothing and lost nothing is a miss, not a
-//! cached answer, and it never clears an entry the key already holds. A partial
-//! entry (rows, failed legs, or both) IS stored, and a later clean put replaces
-//! it so the stale failures are cleared.
-//!
-//! # Atomic saves
-//!
-//! [`SearchCache::save`] follows the repo's existing atomic-write convention
-//! (the latch store's [`crate::overrides`] writer): marshal, create a uniquely
-//! named `.tmp-<pid>-<nanos>-<seq>.json` beside the target, write, close,
-//! rename over the target. A failed write or rename removes the temp file and
-//! leaves the previous file exactly as it was.
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -522,7 +473,6 @@ mod tests {
             "keys compare trimmed and case-insensitively"
         );
 
-        // The bytes on disk are the versioned envelope, in key order.
         let raw = std::fs::read_to_string(&path).expect("read the cache");
         let value: serde_json::Value = serde_json::from_str(&raw).expect("the envelope is JSON");
         assert_eq!(value["version"], SEARCH_CACHE_VERSION);
@@ -538,7 +488,6 @@ mod tests {
             "a clean answer writes an empty failed list"
         );
 
-        // A fresh load serves the same answer: no TTL, no re-search.
         let reloaded = SearchCache::load_from(&path);
         assert_eq!(
             reloaded.get("Show|2008|series"),
@@ -554,7 +503,6 @@ mod tests {
         let dir = TempDir::new();
         let path = cache_path(&dir);
 
-        // Not JSON at all: a miss, never a panic.
         std::fs::write(&path, "{not json").expect("seed a broken file");
         let mut cache = SearchCache::load_from(&path);
         assert!(cache.get("Show|2008|series").is_none());
@@ -571,8 +519,6 @@ mod tests {
             "the next put replaces the broken file with a clean one"
         );
 
-        // One malformed ENTRY (and one with neither rows nor failed legs)
-        // drops only itself.
         std::fs::write(&path, "{not json").expect("break it again");
         let good = serde_json::json!({
             "key": "Show|2009|series",
@@ -597,7 +543,6 @@ mod tests {
             "an entry with no rows and no failed legs is dropped"
         );
 
-        // A wrong envelope version is not ours to read.
         std::fs::write(&path, r#"{"version":99,"entries":[]}"#).expect("write v99");
         assert!(SearchCache::load_from(&path).get("Show|2009|series").is_none());
     }
@@ -612,7 +557,6 @@ mod tests {
         assert!(cache.get("Show|2008|series").is_none(), "a miss is not an answer");
         assert!(!path.exists(), "an empty result writes no file");
 
-        // A row with no identity at all is an empty result too.
         let blank = Candidate {
             kind: Kind::SERIES,
             title: String::new(),
@@ -630,13 +574,11 @@ mod tests {
             .expect("put blanks");
         assert!(!path.exists(), "blank rows are not a cached answer");
 
-        // A blank key is never stored.
         cache
             .put("   ", &[cand("tvmaze", "169", "Show")], &[])
             .expect("blank key");
         assert!(!path.exists());
 
-        // Empty rows are dropped from a real result, never stored beside it.
         cache
             .put(
                 "Show|2008|series",
@@ -652,7 +594,6 @@ mod tests {
         );
         assert_eq!(stored.rows[0].provider_id, "169");
 
-        // An empty result never clears what the key already holds.
         cache.put("Show|2008|series", &[], &[]).expect("put empty again");
         assert_eq!(
             cache.get("Show|2008|series").map(|answer| answer.rows.len()),
@@ -683,7 +624,6 @@ mod tests {
             "one trimmed name, once"
         );
 
-        // The failed legs survive the disk: a restart retries just them.
         let stored = SearchCache::load_from(&path)
             .get("show|2008|series")
             .expect("the partial answer reloads");
@@ -693,8 +633,6 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
         assert_eq!(value["entries"][0]["failed"], serde_json::json!(["kitsu"]));
 
-        // A successful retry stores the same rows with no failure: the stale
-        // failure is CLEARED, not carried.
         let retried = vec![cand("tvmaze", "169", "Show"), cand("kitsu", "k1", "Show")];
         cache
             .put("Show|2008|series", &retried, &[])
@@ -726,7 +664,6 @@ mod tests {
             Some(vec!["tvmaze".to_string()])
         );
 
-        // ...and an answer with neither half is still a no-op.
         cache.put("Show|2009|series", &[], &[]).expect("put nothing");
         assert!(cache.get("Show|2009|series").is_none());
     }

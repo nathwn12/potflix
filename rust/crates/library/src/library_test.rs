@@ -1,7 +1,3 @@
-//! `library_test` -- mirrors `go\internal\library\library_test.go`, plus the
-//! shared fixtures the other three test modules use. Every test takes the
-//! process-wide lock (`ResolverScope`) so the resolver/parse/walk seams are
-//! safe against the parallel test runner.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -606,7 +602,6 @@ fn scan_incremental_and_force() {
         assert!(metadata::cache::cache_has(&cache.path, &key));
     }
 
-    // Run 2 (non-force): no fetch, served from cache.
     let fake2 = Arc::new(FakeSource::new("V2-should-never-fetch"));
     let f2 = Arc::clone(&fake2);
     rx.set(move |dir| resolver_with(f2.clone(), dir));
@@ -622,7 +617,6 @@ fn scan_incremental_and_force() {
         assert!(metadata::cache::cache_live(&cache.path, &key));
     }
 
-    // Run 3 (force): refetch, rewrite.
     std::thread::sleep(Duration::from_millis(60));
     let fake3 = Arc::new(FakeSource::new("V2"));
     let f3 = Arc::clone(&fake3);
@@ -1712,8 +1706,6 @@ fn mid_walk_add_uses_fresh_decision() {
     .unwrap();
     assert!(mutated.load(Ordering::SeqCst));
     if !restore_ok.load(Ordering::SeqCst) {
-        // The platform cannot restore the dir mtime exactly, so the hook's
-        // precondition is unverifiable here (mirrors Go's t.Skipf).
         return;
     }
     assert_eq!(st2.files, 2);

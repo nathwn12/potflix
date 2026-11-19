@@ -1,15 +1,3 @@
-//! `settings` -- mirrors the settings surface split out of the Go root package.
-//!
-//! In Go the settings window and its sections live in `window.go` /
-//! `settings_sections.go`; the persisted values they edit are `config.go`. This
-//! module owns the Settings view's LIBRARY + STARTUP + SCAN seams: the pure
-//! status-string mappers, the window-free clear/export/import cores, the native
-//! Save-As/Open dialogs, and the HKCU Run startup toggle. The stateful handlers
-//! live on `window::UiState`; the win32/dialog/registry work lives here so
-//! `window.rs` keeps only layout rects, paint labels, and action routing.
-
-// Win32 entry points take raw handles by design; see the same allow in
-// `window.rs`.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::path::Path;
@@ -680,7 +668,6 @@ pub fn set_startup_enabled(on: bool) -> Result<(), String> {
         unsafe { RegCloseKey(hk) };
         return Err("startup: cannot resolve exe path".to_string());
     }
-    // Double-NUL-terminated UTF-16, byte length len*2 (`go\settings_sections.go:578-580`).
     let mut data: Vec<u16> = startup_command_for(&exe).encode_utf16().collect();
     data.push(0);
     data.push(0);

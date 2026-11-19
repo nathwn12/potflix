@@ -1,4 +1,3 @@
-//! Ports `go\internal\metadata\force_test.go`.
 
 use std::time::{Duration, SystemTime};
 
@@ -68,8 +67,6 @@ fn lookup_now_force_rewrites_cache() {
     assert_eq!(calls1.load(std::sync::atomic::Ordering::SeqCst), 1);
     let (body1, mtime1) = cache_entry_state(&d, &cache_key(&q));
 
-    // Run 2, non-force, through a FRESH resolver (proves the store entry is the
-    // no-op source): still V1, zero fetches, record untouched.
     let fake2 = FakeSource::with_media("fake", media_with("V2"));
     let calls2 = fake2.counter();
     let r2 = resolver_with(&d, vec![fake2.shared()]);
@@ -89,7 +86,6 @@ fn lookup_now_force_rewrites_cache() {
     assert_eq!(body, body1, "run 2 rewrote the cache entry without force");
     assert_eq!(mtime, mtime1, "run 2 rewrote the store file");
 
-    // Run 3, force: refetch and rewrite.
     std::thread::sleep(Duration::from_millis(60)); // separate mtimes
     let res3 = r2
         .lookup_now_force(&Cancel::background(), &q, true)
@@ -110,7 +106,6 @@ fn lookup_now_force_rewrites_cache() {
         "run 3 did not rewrite the cache entry ({mtime3:?} vs {mtime1:?})"
     );
 
-    // force=false stays exactly LookupNow: served from memory, no fetch.
     let res4 = r2
         .lookup_now_force(&Cancel::background(), &q, false)
         .expect("force=false LookupNow");
@@ -166,7 +161,6 @@ fn lookup_now_force_src_provenance() {
         "the forced refetch must be counted"
     );
 
-    // Delegating wrappers keep their historical behavior.
     let res = resolver
         .lookup_now(&Cancel::background(), &q)
         .expect("LookupNow");

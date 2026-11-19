@@ -1,35 +1,3 @@
-//! `repair` -- mirrors the Go package `go\internal\repair`.
-//!
-//! `needs-repair.json` + `needs-repair.txt` for the media files that resolved to
-//! nothing usable, written into `<dir of index>\inventory` (temp + rename, never
-//! a half report), plus the GitHub issue path: `gh issue create` when the GitHub
-//! CLI is on PATH, else a prefilled new-issue URL. The published body carries the
-//! app version, timestamps, totals and, per entry, reason + basename + attempts +
-//! a sanitized error -- NEVER a local path
-//! (`TestIssueBodyNeverCarriesALocalPath`); the local report keeps the full path
-//! on purpose. Go files: `report.go`, `issue.go`, `sanitize.go`.
-//!
-//! Two audiences, two forms of the same data:
-//!
-//!   * The LOCAL report ([`report::write_report`]) never leaves the machine. The
-//!     machine form keeps [`report::Entry::path`] so the repair step can open the
-//!     file; the human form leads with that path.
-//!   * The PUBLISHED form ([`report::issue_body`]) is sanitized.
-//!     [`report::Entry::path`] is never written into it, the name is collapsed to
-//!     its basename, and every free-text field runs through
-//!     [`sanitize::sanitize_error`]. The published issue must never carry a local
-//!     path, a drive letter, a UNC path, the Windows username, an environment
-//!     value, the Discord client id or a token.
-//!
-//! Workspace seams, ported 1:1 from the Go files:
-//!
-//!   * [`sanitize`] -- the published-text filter and its byte-level path grammar.
-//!     The pipeline ORDER is the contract; see the module doc.
-//!   * [`report`] -- the report types, the staged (temp + rename) writer, the
-//!     reader, the issue title and the markdown body.
-//!   * [`issue`] -- argv, the prefilled fallback URL, `first_url`, the `gh` seams.
-//!   * [`time`] -- the report's timestamp: RFC3339 in UTC, hand-rolled because the
-//!     workspace pins no date/time crate (`Cargo.toml` dependency policy).
 
 pub mod issue;
 pub mod report;

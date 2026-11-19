@@ -1,23 +1,3 @@
-//! `metadata::tvmaze` -- mirrors `go\internal\metadata\tvmaze.go`.
-//!
-//! TVmaze provider (the TV branch of the resolver chain, and the FIRST source
-//! for every series query including absolute anime numbering).
-//!
-//! Wire shape: `/search/shows?q=<lowercased title>`, then either
-//! `/shows/<id>/seasons` + `/seasons/<seasonId>/episodes` for a
-//! `Season>0 && !Absolute` query, or `/shows/<id>/episodes` for the whole show
-//! in air order (the `Season==0` and `Absolute` branch).
-//!
-//! Two behaviours that are contract, not detail:
-//!
-//! * the search query is LOWERCASED before escaping, and the score order
-//!   `/search/shows` returns is re-ranked by [`pick_best_show`] -- the live
-//!   ranking puts the "Re:Zero kara Hajimeru Break Time" spinoff above the main
-//!   show, and a low-confidence best returns a definitive MISS rather than a
-//!   wrong title;
-//! * an `Absolute` query RENUMBERS the episodes positionally (`i + 1` in
-//!   `(season, number)` air order) so number-exact matching holds; without it an
-//!   absolute anime query never matches. `season` is kept for display.
 
 use std::time::Duration;
 
@@ -230,15 +210,6 @@ impl crate::resolver::Source for TvmazeSource {
         let base = self.base_url();
         let client = self.http_client();
 
-        // Ranked search: `/search/shows` returns score order, which misranks
-        // (singlesearch picked the "Re:Zero ... Break Time" spinoff over the
-        // main show), so pick_best_show re-ranks by title similarity with
-        // TVmaze-weight tie-breaks. Two guards keep a fuzzy score from ever
-        // becoming a card: only candidates that clear the matcher's own floor
-        // on their own rank at all (a shows-only search returns ten fuzzy
-        // rows and zero exact matches for films -- `inception` must miss, not
-        // become `Deception`), and a low-confidence best returns not-found so
-        // the resolver falls through to AniList/Jikan.
         let shows = self.search_shows(cancel, &q.title)?;
         if shows.is_empty() {
             return Ok(None);
@@ -252,9 +223,6 @@ impl crate::resolver::Source for TvmazeSource {
                 aliases: Vec::new(),
             })
             .collect();
-        // Title identity: rank only candidates that match the query on their
-        // own. No year can rescue a title miss, so this runs before any year
-        // preference; an empty confident set is a definitive miss.
         let mut conf_cands: Vec<ShowCand> = Vec::with_capacity(cands.len());
         let mut conf_idx: Vec<usize> = Vec::with_capacity(cands.len());
         for (i, cand) in cands.iter().enumerate() {
@@ -279,8 +247,6 @@ impl crate::resolver::Source for TvmazeSource {
         let Some(winner_at) = winner_at else {
             return Ok(None);
         };
-        // Soft year preference only: a known query year prefers a challenger
-        // carrying it at equal title strength, never a miss.
         let years: Vec<i32> = shows
             .iter()
             .map(|show| date_year(&show.premiered))
@@ -319,8 +285,6 @@ impl crate::resolver::Source for TvmazeSource {
             let episodes_url = format!("{base}/shows/{}/episodes", show.id);
             let response = client.get(cancel, &episodes_url)?;
             let mut raw: Vec<TvmazeEpisode> = decode_capped(response)?;
-            // The nil-safe sort runs BEFORE the nil-numbered entries are
-            // dropped, exactly as the Go original orders those two steps.
             raw.sort_by(|a, b| {
                 (a.season, a.number.unwrap_or(0)).cmp(&(b.season, b.number.unwrap_or(0)))
             });
@@ -331,10 +295,6 @@ impl crate::resolver::Source for TvmazeSource {
                 }
             }
             if q.absolute {
-                // Absolute N maps to the Nth episode in (season, number) air
-                // order: renumber so number-exact matching holds. An empty or
-                // short table simply lacks the Number, so the resolver falls
-                // through to the next source.
                 for (i, episode) in out.iter_mut().enumerate() {
                     episode.number = i as i32 + 1;
                 }
@@ -365,7 +325,6 @@ impl crate::resolver::Source for TvmazeSource {
                 episode_count: 0,
                 aliases: Vec::new(),
             };
-            // The same floor `Find` applies: a fuzzy row never becomes a pick.
             if pick_best_show(&q.title, std::slice::from_ref(&cand)).is_none() {
                 continue;
             }

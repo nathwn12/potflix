@@ -1,6 +1,3 @@
-//! Mirrors `go\internal\titleclean\clean.go`: the cleaner and its helpers,
-//! including the two deliberate deviations from the frozen Java cleaner
-//! (P12 headless NCBOOK, P13 title-mark fold).
 
 use std::sync::LazyLock;
 
@@ -319,8 +316,6 @@ pub fn clean(raw: &str) -> Cleaned {
             if !nc.episode_name.is_empty() {
                 ntitle = std::mem::take(&mut nc.episode_name);
             } else {
-                // P12 deliberate deviation: a headless tag with no name shows
-                // the tag alone; the frozen Java yields "ED 3 - ED 3".
                 nc.title = java_trunc(&nc.episode_tag, 100);
                 nc.display = nc.title.clone();
                 return nc;

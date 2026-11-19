@@ -1,11 +1,3 @@
-//! `titleclean` CLI -- parity harness over a corpus, mirrors `go\cmd\titleclean`.
-//!
-//! Reads a corpus (UTF-8); per line: trim, skip empty, strip a trailing
-//! " - PotPlayer" (as the Java runner does), call the cleaner, and write
-//! `input \t title \t display \t episodeTag \t episodeName` with LF endings,
-//! no header and a trailing newline.
-//!
-//! It is the bake-off harness kept runnable against the shipped package.
 
 use std::fs;
 use std::io::{BufWriter, Write};
@@ -55,8 +47,6 @@ fn usage() -> ExitCode {
 
 fn run(corpus: &str, out: &str) -> Result<(), String> {
     let data = fs::read(corpus).map_err(|e| format!("read corpus: {e}"))?;
-    // Java's Files.readAllLines(..., UTF_8) throws MalformedInputException on
-    // invalid UTF-8; match that by failing instead of silently mangling bytes.
     let text =
         std::str::from_utf8(&data).map_err(|_| format!("corpus is not valid UTF-8: {corpus}"))?;
     let file = fs::File::create(out).map_err(|e| format!("create out: {e}"))?;

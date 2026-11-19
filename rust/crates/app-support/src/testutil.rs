@@ -1,12 +1,3 @@
-//! `testutil` -- test-only scratch directories for the `app-support` unit tests.
-//!
-//! The Go tests never touch the real store: every case runs against
-//! `t.TempDir()`. Rust's std has no temp-dir type, so this module supplies the
-//! equivalent: a uniquely named directory under the process temp root
-//! (`std::env::temp_dir()`, i.e. `%TEMP%`), removed when the guard drops.
-//!
-//! The real store (`%LOCALAPPDATA%\Potflix`) and the live single-instance port
-//! (17843) are never touched by a test in this crate.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

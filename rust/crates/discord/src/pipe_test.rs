@@ -1,8 +1,3 @@
-//! `discord::pipe_test` -- mirrors `go\internal\discord\pipe_test.go`: transport
-//! tests against the in-process fake pipe (handshake shape, suffix fallback,
-//! PING -> PONG, reconnect after the server drops, bounded writes, overlapping
-//! sends, the reconnect backoff). No test connects to the real
-//! `\\.\pipe\discord-ipc-*` namespace.
 
 use std::io;
 use std::ops::Deref;
@@ -494,8 +489,6 @@ fn test_stalled_peer_write_is_bounded() {
         Err(_) => panic!("SetActivity never returned; the write is not bounded"),
     }
 
-    // The client must reconnect on a fresh instance; the new server drains and a
-    // later push must be served.
     let (rx2, erx2) = spawn_accept(Arc::clone(&srv));
     let sc2 = accept_one(
         &rx2,

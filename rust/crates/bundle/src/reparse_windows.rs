@@ -1,10 +1,3 @@
-//! Windows reparse-point attribute check -- mirrors `reparse_windows.go`.
-//!
-//! `FILE_ATTRIBUTE_REPARSE_POINT` (0x400) is set on symlinks, junctions and
-//! other reparse points; `GetFileAttributesW` reads it without following the
-//! path, which catches a junction `symlink_metadata` alone may not flag. An
-//! unstatable path reports false (`INVALID_FILE_ATTRIBUTES`), so the caller
-//! keeps its normal error path.
 
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;

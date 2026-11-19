@@ -1,29 +1,3 @@
-//! `metadata::parse` -- mirrors `go\internal\metadata\parse.go`.
-//!
-//! Classifies a cleaned title (plus titleclean's episode tag/name) into a
-//! [`Query`]. The PRECEDENCE ORDER is the spec: OP/ED theme first, then a
-//! strong SxxEyy tag, then the "Episode N+M" range (FIRST number), then a movie
-//! marker, then episode>0, then extras, then no-letter/year-only. Years
-//! 1900-2100 are never episodes.
-//!
-//! # Pattern port
-//!
-//! The workspace forbids a regex crate, so every Go pattern is transcribed into
-//! the subset `titleclean::Regex` (the port's own leftmost-first matcher)
-//! understands and compiled through `titleclean::javacompat::port_pattern`,
-//! which applies the rewrites that matcher needs: `(?i)` expanded to ASCII
-//! letter classes, `^`/`$` to `\A`/`\z`. Two Go constructs have no equivalent
-//! and are handled explicitly:
-//!
-//!   * `\s` -- Go's `\s` is `[\t\n\f\r ]`; the class is spelled out inline in
-//!     every transcribed pattern (the matcher has no `\s`);
-//!   * `\b` -- Go's ASCII word boundary; re-applied as an explicit check by
-//!     [`word_bounded_match`] instead of an assertion. The same helper serves
-//!     `context.rs`, which guards its extras pattern the same way.
-//!
-//! Case folding is ASCII-only, matching `port_pattern` and titleclean's
-//! Java-exact convention; Go's `(?i)` also folds a handful of non-ASCII runes
-//! (U+017F, U+212A) that no real filename carries.
 
 use std::sync::LazyLock;
 
@@ -200,11 +174,6 @@ fn salvage_year(q: &mut Query, tag: &str, raw: &str) {
         };
         return;
     }
-    // A bare year titleclean mistook for the release year: raw
-    // `Blade Runner 2049 (2017)` arrives as title `Blade Runner` year 2049
-    // because the parenthesised year was stripped and the bare 2049 took its
-    // place. When the raw parenthesised year disagrees and the title year sits
-    // immediately before it in the raw, the bare number belongs to the title.
     if q.kind == Kind::MOVIE
         && q.season == 0
         && q.episode == 0
@@ -392,7 +361,6 @@ pub fn parse(title: &str, episode_tag: &str, episode_name: &str) -> Query {
             t = group(&caps, 1).trim().to_string();
         }
     }
-    // OP/ED theme outranks every episode form.
     if is_theme(&t, episode_tag.trim()) {
         return Query {
             kind: Kind::UNKNOWN,
@@ -416,7 +384,6 @@ pub fn parse(title: &str, episode_tag: &str, episode_name: &str) -> Query {
             q.episode = atoi(group(&caps, 2));
             strong = true;
         } else if EPISODE_ONLY_RE.is_match(tag) {
-            // A 19xx/20xx "absolute" is a year, never an episode.
             let caps = EPISODE_ONLY_RE.captures(tag).expect("is_match agreed");
             let n = atoi(group(&caps, 1));
             if !is_year_num(n) {
@@ -424,12 +391,7 @@ pub fn parse(title: &str, episode_tag: &str, episode_name: &str) -> Query {
                 q.absolute = true;
             }
         }
-        // Unknown tag text (e.g. "Special") carries no signal.
     }
-    // "Episode 53+54" ranges: titleclean splits those at the wrong "+", leaving
-    // a bogus weak tag (E2) while the true range stays in the title. The FIRST
-    // number wins over any weak absolute tag, so this runs before the tag
-    // result is accepted.
     if !strong
         && let Some((n, head)) = range_episode(&q.title)
         && n > 0
@@ -443,12 +405,6 @@ pub fn parse(title: &str, episode_tag: &str, episode_name: &str) -> Query {
         }
         return q;
     }
-    // A movie marker outranks the weak absolute tag titleclean's ALT_EP split
-    // left behind (see the Go comment for the Dragon Ball Super case). The
-    // marker only counts when something follows it -- its number or the
-    // subtitle -- so a title that merely ends in the word (e.g. "The Lego
-    // Movie" with nothing after it) is left exactly as parsed. Extras keep
-    // their skip, and a strong SxxEyy tag always wins.
     if !strong
         && !extra_re_matches(&q.title)
         && let Some(base) = movie_marker(&q.title)

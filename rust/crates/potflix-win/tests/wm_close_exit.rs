@@ -1,22 +1,3 @@
-//! `QA7-G1` (WM_CLOSE zombie): a window close must END THE PROCESS when there
-//! is no tray icon to come back from.
-//!
-//! The main window's `WM_CLOSE` parks the window back to the tray
-//! (`ShowWindow(SW_HIDE)`, never `DestroyWindow`) -- correct while a notify
-//! icon exists, because the tray menu is the way back in. A tray-less process
-//! (the notify-icon `NIM_ADD` failed) is left with the window visible as its
-//! ONLY way in and its ONLY way out, so hiding it there is a zombie: no icon,
-//! no window, and the single-instance port still held, so a relaunch answers
-//! "Potflix is already running." and exits.
-//!
-//! This is a PROCESS-level proof, not a handler-level one: the child creates
-//! the real main window and pumps messages; the parent posts `WM_CLOSE` and
-//! then requires the child PROCESS to be gone. A hidden window that keeps the
-//! process alive fails here, which is exactly the reported defect.
-//!
-//! The child is this same test binary, re-executed with `POTFLIX_WM_CLOSE_CHILD`
-//! set and a single exact test selected, so nothing here needs a second crate
-//! or a live PotPlayer/Discord.
 
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};

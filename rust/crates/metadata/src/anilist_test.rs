@@ -1,4 +1,3 @@
-//! Ports `go\internal\metadata\anilist_test.go`.
 
 use std::sync::{Arc, Mutex};
 

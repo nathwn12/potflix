@@ -1,6 +1,3 @@
-//! The AniList artwork backfill at `Resolver::fetch_media`: a winning media
-//! whose artwork is unusable for Discord gets one bounded direct AniList
-//! lookup, kept only on an exact title match.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -47,10 +44,6 @@ fn beerus_query() -> Query {
 /// backfill itself.
 fn winner_media(artwork: String) -> Media {
     Media {
-        // Named `tvmaze` (not `kitsu`) so the winner outranks `anilist` and
-        // the chain settles before reaching it: every AniList call below is
-        // the backfill itself. The backfill only cares that the source is not
-        // `anilist` and the artwork is a signed 396-char URL.
         source: "tvmaze".to_string(),
         source_id: "50497".to_string(),
         kind: Kind::SERIES,

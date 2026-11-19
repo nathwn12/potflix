@@ -1,23 +1,3 @@
-//! `discord::win` -- the Win32 named-pipe primitives under `pipe.go`.
-//!
-//! `pipe.go` leans on Go's runtime poller: `os.NewFile` on a
-//! `FILE_FLAG_OVERLAPPED` handle registers it with the poller, so concurrent
-//! `Read` and `Write` are safe and `SetWriteDeadline` can cancel a stuck write.
-//! Rust has no such poller, so this module does explicitly what the Go runtime
-//! does implicitly:
-//!
-//! * every client handle is opened with `FILE_FLAG_OVERLAPPED`;
-//! * every read and write is issued as an overlapped operation carrying its own
-//!   `OVERLAPPED` plus event, and the result is collected by waiting on that
-//!   event -- so a pending read never blocks a write on the same handle;
-//! * a write deadline is a `WaitForSingleObject` timeout: on expiry the
-//!   operation is cancelled (`CancelIoEx`), drained, and reported as
-//!   `ErrorKind::TimedOut` (`os.ErrDeadlineExceeded` in Go);
-//! * `close` cancels any pending operation before `CloseHandle`, so a blocked
-//!   read pump unblocks exactly as `os.File.Close` does for Go.
-//!
-//! The fake server's handle stays synchronous (`fakepipe.go`): a blocking
-//! `CreateNamedPipeW` handle takes no `OVERLAPPED` at all.
 
 use std::io;
 use std::ptr;
@@ -185,8 +165,6 @@ impl ReadBytes for NamedPipe {
         }
         let len = buf.len().min(u32::MAX as usize) as u32;
         match self.mode {
-            // No deadline on a read: the pump is unblocked by `close`, exactly as
-            // the Go read pump is.
             IoMode::Overlapped => overlapped_op(self.h, buf.as_mut_ptr(), len, IoDir::Read, None),
             IoMode::Blocking => blocking_op(self.h, buf.as_mut_ptr(), len, IoDir::Read),
         }

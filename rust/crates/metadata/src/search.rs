@@ -1,71 +1,3 @@
-//! `metadata::search` -- the identity search and manual latch builder behind
-//! the "Fix match" UI.
-//!
-//! NEW SURFACE: `go\` has no search-and-latch layer, so nothing here is diffed
-//! against a ported file; the contract is stated plainly instead. The
-//! automatic ladder ([`crate::resolver`]) answers a filename; this module
-//! answers a person. The user types a real name plus an optional year,
-//! [`search`] returns the entries the provider legs offer for it as
-//! [`Candidate`]s, and [`pin_from_candidate`] turns the picked entry into an
-//! [`Override`] latch -- a movie file, one season folder or a whole show --
-//! carrying the candidate's cover and the entry's episode table as
-//! per-episode pins. [`refresh`] re-fetches a stored latch's identity and
-//! returns the same latch with a refreshed payload. Persistence is
-//! [`crate::overrides`]'s job; this module only builds the record.
-//!
-//! # One concurrent pass, ranked
-//!
-//! [`search`] walks the legs applicable to the wanted kind ONCE -- the movie
-//! legs for [`Kind::MOVIE`], the series/anime legs otherwise (the resolver's
-//! own ranking, with Cinemeta as the general fallback) -- with EVERY leg on its
-//! own thread ([`std::thread::scope`]), so one slow provider never holds the
-//! picker. Each leg answers with its provider's own multi-row search
-//! ([`Source::find_all`]): one request per leg, no episode table.
-//! [`search_stream`] hands each leg's rows to a sink the moment THAT leg
-//! finishes; the returned vector is deduplicated by (provider, provider_id),
-//! merged by work ([`merge_same_work`], so one work is one row), ranked and
-//! capped at [`SEARCH_LIMIT`], and is the same sequence on every run whatever
-//! order the threads complete in. The rank is the shared closeness order
-//! ([`rank_rows`]): the title closest to the typed name first (an exact
-//! normalized title is strongest), then a known query year exact above unknown
-//! above a mismatch, then the wanted kind as a soft prior, then provider order.
-//! No kind is ever filtered out by the rank; the caller's per-kind pass is what
-//! scopes a leg.
-//! A leg's failure is recorded by provider name in [`SearchOutcome::failed`]
-//! (an EMPTY answer is a success), so [`search_stream_only`] can run the
-//! picker's next pass over exactly the legs that did not answer; a cancelled
-//! scope ends the pass early and nothing here panics.
-//!
-//! # The year is a gate
-//!
-//! A known year is an identity check, NOT a preference: with `year > 0` every
-//! candidate whose year is unknown or different is DROPPED, before it can
-//! reach the rank or the streaming sink. `edgerunners 2026` used to surface a
-//! 1990s entry through the soft year preference; no rank term may reintroduce
-//! a mismatch.
-//!
-//! # The latch's identity
-//!
-//! A latch stores the provider and the provider's own id
-//! ([`Override::provider`], [`Override::provider_id`]) next to the picked
-//! title/year. [`pin_from_candidate`] and [`refresh`] call THAT leg only and
-//! refuse any answer whose `source_id` differs from the stored id, so a
-//! re-ranked search can never silently latch a different work: a mismatched
-//! or missing answer is an [`Error`] the caller shows, never a half-built
-//! latch. The provider legs expose find-by-query only -- no fetch-by-id entry
-//! point -- so when `find` lands on the wrong-year entry (a soft preference
-//! can still pick a same-titled work) the fetch falls back to
-//! [`Source::find_all`] and takes the row carrying the STORED id, and only a
-//! search that lacks that id refuses. The refusal is proven in
-//! `refresh_and_pin_refuse_a_mismatched_provider_id` below.
-//!
-//! # Cancellation
-//!
-//! Both fetching functions block like the provider legs do and every wire
-//! wait is the [`Cancel`]'s to end: hand them a deadline-bearing scope (the
-//! CLIs build one, `metacheck`: 90 s). A dead scope ends a search early -- the
-//! hits already found stand -- and propagates from a fetch, never
-//! masquerading as a miss.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -352,9 +284,6 @@ fn search_core(
             .filter(|name| !name.is_empty())
             .collect()
     });
-    // The legs in provider order: (position, source). One thread per leg, the
-    // same walk the sequential pass made, so a source mounted twice still
-    // answers twice (its rows dedupe below).
     let mut legs: Vec<(usize, Arc<dyn Source>)> = Vec::new();
     for leg in legs_for(want) {
         if let Some(only) = &only
@@ -380,8 +309,6 @@ fn search_core(
                     let elapsed_ms = started.elapsed().as_millis();
                     let Ok(candidates) = outcome
                     else {
-                        // A leg error is a PARTIAL answer: the other legs'
-                        // rows stand and the caller learns which name to retry.
                         if let Some(log) = log {
                             log(&format!(
                                 "search: leg {provider} fail 0 rows {elapsed_ms}ms"
@@ -392,7 +319,6 @@ fn search_core(
                     let mut seen: HashSet<(String, String)> = HashSet::new();
                     let mut rows: Vec<Candidate> = Vec::new();
                     for candidate in candidates {
-                        // The HARD year gate: a known year admits only its own.
                         if !year_admits(candidate.year, year) {
                             continue;
                         }
@@ -401,8 +327,6 @@ fn search_core(
                             rows.push(candidate);
                         }
                     }
-                    // This leg is done: its rows are the picker's NOW, before
-                    // the slower legs answer.
                     if !rows.is_empty() {
                         sink(rows.clone());
                     }
@@ -434,9 +358,6 @@ fn search_core(
             }
         }
     }
-    // The same work can be offered by several legs: the best-ranked row keeps
-    // the identity and gains the fields it lacks from the others, and the cap
-    // applies to the merged result so a duplicate never costs a slot.
     let mut rows = merge_same_work(rank_hits(hits, name, year, want));
     rows.truncate(SEARCH_LIMIT);
     SearchOutcome { rows, failed }
@@ -642,10 +563,6 @@ fn closeness_evidenced(
     let mut similarity = typed;
     let mut extent_miss = 0;
     if let Some(local) = local {
-        // The local terms only break a near-tie: a candidate more than 0.10
-        // below the best typed title is never lifted by the folder or the
-        // siblings. The whole local BONUS is capped at +0.05; penalties for a
-        // spin-off branch and a too-small episode count are separate.
         let near = typed + 0.10 + 1e-9 >= top_typed;
         if near {
             let alt = [
@@ -660,28 +577,17 @@ fn closeness_evidenced(
             if let Some(branch) = branch_after_query(query, &cand.title) {
                 let group = clusters.get(&branch).copied().unwrap_or(1);
                 if group >= 2 {
-                    // A larger branch is stronger evidence; the cap is +0.05.
                     let scaled = 0.05 * f64::from(group - 1) / f64::from(largest - 1).max(1.0);
                     bonus = bonus.max(scaled.min(0.05));
                 } else if largest >= 3 {
-                    // A lone branch inside a real multi-row franchise is the
-                    // one-word spin-off (PETIT/Break Time): nudge it down.
                     similarity -= 0.10;
                 }
             }
-            // The file is a series: a movie answer is a shape miss, not the
-            // work. The prior is bounded so a genuinely better movie title is
-            // still allowed to win.
             if cand.kind != Kind::SERIES {
                 similarity -= 0.10;
             }
             similarity += bonus;
 
-            // A `S1-S2` / `Season 2` marker says at least a short cour per
-            // season. A series far below the local season count is a partial
-            // season or a spin-off; the bounded penalty keeps it under the
-            // full run. An unknown count stays neutral; a movie has no
-            // episode extent at all.
             let expected = if local.season_extent > 1 {
                 local
                     .local_count
@@ -914,9 +820,6 @@ pub(crate) fn pin_from_candidate_with(
         cand.year,
         scope_kind(scope),
     )?;
-    // The picked row can carry a synopsis/genre/length the identity record has
-    // none of (another provider answered the search): fill each field the
-    // fetch left empty from the candidate, never replacing a provider value.
     fill_missing_fields(
         &mut media,
         &cand.poster,
@@ -972,9 +875,6 @@ pub(crate) fn refresh_with(
         over.year,
         scope_kind(over.scope),
     )?;
-    // A latch may carry data the provider never returns again (a synopsis
-    // spliced from another leg): a refresh fills what the fetch lacks from the
-    // stored snapshot, so it never drops the spliced fields.
     if let Some(prev) = &over.media {
         fill_missing_fields(
             &mut media,
@@ -985,10 +885,6 @@ pub(crate) fn refresh_with(
             prev.year,
         );
     }
-    // A refresh that returns an empty table must not zero the pins: the
-    // provider is having a bad day (or the `find_all` fallback answered with
-    // a search row that never carries a table), so keep the existing episodes
-    // and report instead of a clean success.
     if over.scope != Scope::Movie
         && media.episodes.is_empty()
         && (!over.episodes.is_empty()
@@ -1455,8 +1351,6 @@ mod tests {
             length: String::new(),
             episode_count: 0,
         };
-        // The search pass over the same fixture offers that entry as a
-        // zero-episode pick.
         let hits = search_with(
             &[cinemeta_leg(&server.url())],
             &cancel(),
@@ -1559,8 +1453,6 @@ mod tests {
                 synopsis: "Krazy-8.".to_string(),
             }
         );
-        // The pins serve the store's own lookups: (season, number) and
-        // absolute.
         assert_eq!(show.episode_pin(2, 1).map(|pin| pin.absolute), Some(3));
         assert_eq!(show.episode_pin_absolute(3).map(|pin| pin.number), Some(1));
         assert_eq!(
@@ -1568,8 +1460,6 @@ mod tests {
             Some("Show")
         );
 
-        // A season scope pins the same table: the pins carry their own season,
-        // so one table serves every season of the show.
         let season = pin_from_candidate_with(
             &sources,
             &cancel(),
@@ -1641,7 +1531,6 @@ mod tests {
             refreshed.media.as_ref().map(|media| media.artwork.as_str()),
             Some("https://art/v2.jpg")
         );
-        // The input latch is untouched: refresh builds a new record.
         assert_eq!(over.episodes[0].title, "Pilot v1");
         assert_eq!(over.poster, "https://art/v1.jpg");
     }
@@ -1669,7 +1558,6 @@ mod tests {
         let mut over =
             pin_from_candidate_with(&sources, &cancel(), &cand, Scope::Series, "k").expect("pin");
 
-        // A stored id the leg cannot answer is refused, never latched over.
         over.provider_id = "999".to_string();
         let err = refresh_with(&sources, &cancel(), &over).expect_err("a drifted id is refused");
         assert!(
@@ -1715,13 +1603,10 @@ mod tests {
         };
         assert!(pin_from_candidate_with(&dead, &cancel(), &cand, Scope::Series, "k").is_err());
         assert!(refresh_with(&dead, &cancel(), &over).is_err());
-        // A missing provider name is an error too, and an empty source set
-        // never half-builds either.
         let none: [Arc<dyn Source>; 0] = [];
         assert!(pin_from_candidate_with(&none, &cancel(), &cand, Scope::Series, "k").is_err());
         assert!(refresh_with(&none, &cancel(), &over).is_err());
 
-        // A malformed provider body is reported, not panicked on.
         let junk = FakeServer::start(|_req: &Request| Response::json("{not json"));
         let junk_leg: [Arc<dyn Source>; 1] = [tvmaze_leg(&junk.url())];
         assert!(pin_from_candidate_with(&junk_leg, &cancel(), &cand, Scope::Series, "k").is_err());
@@ -2000,8 +1885,6 @@ mod tests {
         assert_eq!(merged[0].length, "45 min");
         assert_eq!(merged[0].episode_count, 5, "the larger table wins");
 
-        // A duplicate carrying nothing never clears a spliced field, and a
-        // different year is another work.
         let mut with_synopsis = cand("tvmaze", "169", "Show", 2008);
         with_synopsis.synopsis = "Show.".to_string();
         let merged = merge_same_work(vec![
@@ -2013,7 +1896,6 @@ mod tests {
         assert_eq!(merged[0].synopsis, "Show.");
         assert_eq!(merged[1].provider, "anilist");
 
-        // The roman and the digit spelling of a sequel numeral are one title.
         let merged = merge_same_work(vec![
             cand("tvmaze", "1", "Cyberpunk: Edgerunners II", 2022),
             cand("anilist", "2", "Cyberpunk: Edgerunners 2", 2022),
@@ -2024,8 +1906,6 @@ mod tests {
             "a trailing II folds to 2"
         );
 
-        // A token subset never merges, even with a known equal year: the
-        // sequel is a different work and keeps its own row.
         let merged = merge_same_work(vec![
             cand("tvmaze", "1", "National Treasure", 2004),
             cand("anilist", "2", "National Treasure: Book of Secrets", 2004),
@@ -2041,8 +1921,6 @@ mod tests {
 
     #[test]
     fn pin_fills_the_media_snapshot_from_the_candidate() {
-        // The leg's identity record carries no synopsis, genres, length, cover
-        // or year: the picked candidate's copy is what the latch keeps.
         let sources = [MultiSource::shared("tvmaze", vec![row("169", "Show", 0)])];
         let mut picked = cand("tvmaze", "169", "Show", 2008);
         picked.poster = "https://art/search.jpg".to_string();
@@ -2110,8 +1988,6 @@ mod tests {
             "the failing leg is named"
         );
 
-        // A clean pass names no leg: an empty answer is a success, not a
-        // failure, and a dead scope runs no leg at all.
         let clean: Vec<Arc<dyn Source>> = vec![
             MultiSource::shared("tvmaze", vec![row("t1", "Show", 2008)]),
             MultiSource::shared("kitsu", Vec::new()),
@@ -2159,8 +2035,6 @@ mod tests {
             "the named leg is called once"
         );
 
-        // No names walk nothing; a name outside the want's leg list matches
-        // nothing either.
         let outcome =
             search_stream_only_with(&sources, &cancel(), "Show", 0, Kind::SERIES, &[], &|_| {});
         assert!(outcome.rows.is_empty() && outcome.failed.is_empty());
@@ -2183,7 +2057,6 @@ mod tests {
 
     #[test]
     fn retrying_only_the_failed_leg_clears_the_failure() {
-        // First pass: tvmaze answers, kitsu fails.
         let sources = vec![
             FakeSource::with_media("tvmaze", row("t1", "Show", 2008)).shared(),
             FakeSource::with_error("kitsu", "down").shared(),
@@ -2195,8 +2068,6 @@ mod tests {
             vec![("tvmaze".to_string(), "t1".to_string())]
         );
 
-        // The retry walks only the failed name, now healthy: its rows arrive
-        // and the failure list is empty.
         let retry: Vec<Arc<dyn Source>> = vec![
             FakeSource::with_media("kitsu", row("k1", "Show", 2008)).shared(),
             FakeSource::with_media("tvmaze", row("t1", "Show", 2008)).shared(),
@@ -2223,8 +2094,6 @@ mod tests {
             source: name.to_string(),
             source_id: id.to_string(),
             kind: Kind::SERIES,
-            // Distinct titles per leg so the same-work merge keeps every
-            // leg's row: the test counts attempted legs, not merged works.
             title: format!("Show {name}"),
             year: 2008,
             ..Media::default()
@@ -2342,8 +2211,6 @@ mod tests {
     fn full_cache_hit_issues_zero_leg_attempts() {
         use std::collections::HashMap;
         use std::sync::atomic::Ordering;
-        // First pass populates a cache map (the picker's persistent cache
-        // shape); the second pass hits it and never touches a leg.
         let fake = FakeSource::with_media("cinemeta", counting_media("cinemeta", "c1"));
         let calls = fake.counter();
         let sources = vec![fake.shared()];
@@ -2368,7 +2235,6 @@ mod tests {
         assert_eq!(calls_after_first, 1);
         let lines_after_first = logs.lock().unwrap().len();
         assert_eq!(lines_after_first, 1);
-        // Cache hit: serve without walking any leg.
         let hit = cache.get(&key).cloned().unwrap_or_default();
         assert_eq!(hit, first.rows);
         assert_eq!(
