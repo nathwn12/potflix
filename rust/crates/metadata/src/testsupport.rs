@@ -23,7 +23,6 @@ use crate::Error;
 use crate::resolver::{Done, Options, Resolver, Source};
 use crate::wikipedia::WikiClient;
 
-// --- HTTP fakes -------------------------------------------------------------
 
 /// One parsed request.
 pub(crate) struct Request {
@@ -316,7 +315,6 @@ where
     }
 }
 
-// --- temp directories -------------------------------------------------------
 
 static TEMP_SEQ: AtomicUsize = AtomicUsize::new(0);
 
@@ -356,7 +354,6 @@ impl Drop for TempDir {
     }
 }
 
-// --- fake sources -----------------------------------------------------------
 
 /// The shared test client (`srv.Client()`).
 pub(crate) fn http_client() -> HttpClient {

@@ -61,9 +61,6 @@ use metadata::{Candidate, Kind, Override, Scope};
 #[path = "narrow.rs"]
 mod narrow;
 
-// ---------------------------------------------------------------------------
-// Button ids (`go\window.go:39-70`): rect-table keys, not child control ids.
-// ---------------------------------------------------------------------------
 
 /// Main view "Add folder".
 pub const BTN_ADD: i32 = 1;
@@ -154,9 +151,6 @@ pub const BTN_PICKER_CLOSE: i32 = 89;
 /// query field, one Search and this one control.
 pub const BTN_ADVANCED: i32 = 84;
 
-// ---------------------------------------------------------------------------
-// Worker -> UI messages (`go\window.go:74-93`).
-// ---------------------------------------------------------------------------
 
 pub const WM_APP_SCAN_PROGRESS: u32 = crate::win32::WM_APP + 3;
 pub const WM_APP_SCAN_DONE: u32 = crate::win32::WM_APP + 4;
@@ -182,9 +176,6 @@ pub const SCAN_TIMER_ID: usize = 7;
 /// Live repaints are capped at ~10/s (`go\window.go:92`).
 pub const SCAN_PAINT_INTERVAL: Duration = Duration::from_millis(100);
 
-// ---------------------------------------------------------------------------
-// Settings-view message, key, and text constants (`go\window.go:220-239`).
-// ---------------------------------------------------------------------------
 
 pub const WM_CHAR: u32 = 0x0102;
 pub const WM_KEYDOWN: u32 = 0x0100;
@@ -208,7 +199,6 @@ pub const VK_DOWN: u32 = 0x28;
 pub const SW_SHOW_NORMAL: i32 = 1;
 pub const DT_WORD_BREAK: u32 = 0x0010;
 
-// ---------------------------------------------------------------------------
 // Palette -- the repo's own brand system (`brand`, ported from
 // `design\make_logo.py`).
 //
@@ -219,7 +209,6 @@ pub const DT_WORD_BREAK: u32 = 0x0010;
 //
 // The roles are kept (canvas / chrome / panel / control / text) so no paint site
 // had to change shape; only the values moved to the brand palette.
-// ---------------------------------------------------------------------------
 
 /// `rgb(r, g, b)` (`go\window.go:3487`).
 #[must_use]
@@ -447,9 +436,6 @@ pub const BTN_TOGGLE: i32 = 7;
 /// avoids the red selection indicator (minimal dark workspace, white controls).
 pub const BTN_TOGGLE_ON: i32 = 8;
 
-// ---------------------------------------------------------------------------
-// Types.
-// ---------------------------------------------------------------------------
 
 /// The visible view (`go\window.go:141-150`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -681,9 +667,6 @@ pub const BOTTOM_L: i32 = 14;
 /// The header mark tile's side.
 pub const MARK_TILE_L: i32 = 32;
 
-// ---------------------------------------------------------------------------
-// Pure geometry (`go\window.go:3466-3472, :470-492`).
-// ---------------------------------------------------------------------------
 
 /// `scalePx` (`go\window.go:3467`): scale a 96-DPI logical px to `dpi`.
 #[must_use]
@@ -773,9 +756,6 @@ pub fn rects_intersect(a: Rect, b: Rect) -> bool {
     a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
 }
 
-// ---------------------------------------------------------------------------
-// computeLayout (`go\window.go:503-604`).
-// ---------------------------------------------------------------------------
 
 /// Build the main-view hit-test table for `dirs`, client size and DPI, with the
 /// list viewport at its top (`list_top = 0`).
@@ -896,7 +876,6 @@ pub fn compute_layout_total(total: i32, cw: i32, ch: i32, dpi: i32, top: i32) ->
     let (margin, content_w) = content_span(cw, dpi);
 
     let mut l = UiLayout::default();
-    // --- The vertical stack -------------------------------------------------
     //
     // One column, top to bottom: chrome header, tab strip, section micro-label,
     // the folder panel, then the action grid and the status line. Every number
@@ -929,7 +908,6 @@ pub fn compute_layout_total(total: i32, cw: i32, ch: i32, dpi: i32, top: i32) ->
         bottom: header_h,
     };
 
-    // --- The tab strip ------------------------------------------------------
     let (card_tab, settings_tab) = tab_strip_rects(cw, dpi);
     l.tab_strip = Rect {
         left: card_tab.left,
@@ -946,7 +924,6 @@ pub fn compute_layout_total(total: i32, cw: i32, ch: i32, dpi: i32, top: i32) ->
         bottom: section_top + section_h,
     };
 
-    // --- The folder panel ---------------------------------------------------
     let avail = panel_max_h - pad * 2;
     let mut max_rows = (avail + gap) / (row_h + gap);
     if max_rows < 1 {
@@ -1021,7 +998,6 @@ pub fn compute_layout_total(total: i32, cw: i32, ch: i32, dpi: i32, top: i32) ->
         l.thumb = scrollbar_thumb(track, total, max_rows, top, sc(SCROLLBAR_MIN_THUMB));
     }
 
-    // --- The action grid ----------------------------------------------------
     //
     // ONE grid for every action, all three rows of it. Equal columns
     // (`col_w = (content_w - gap) / 2`), one gap between columns and one between
@@ -1354,9 +1330,6 @@ pub fn settings_layout_scrolled(
     apply_settings_scroll(l, scroll, ch, dpi)
 }
 
-// ---------------------------------------------------------------------------
-// Text-rect tables (`go\window.go:666-727`, `:1602-1635`).
-// ---------------------------------------------------------------------------
 
 /// `mainTextRects` (`go\window.go:674`): the stable audit id for every string
 /// the main view paints, in the same rect the paint path draws it in.
@@ -1482,9 +1455,6 @@ pub fn settings_text_rects(cw: i32, ch: i32, dpi: i32, l: &SettingsLayout) -> Ve
     out
 }
 
-// ---------------------------------------------------------------------------
-// Focus model (`go\window.go:1244-1316`).
-// ---------------------------------------------------------------------------
 
 /// `mainFocusOrder` (`go\window.go:1244`), in visual order: the tab strip first
 /// (it is the topmost control row), then the action grid row by row.
@@ -1589,9 +1559,6 @@ pub fn main_focus_rect(l: &UiLayout, id: i32) -> Option<Rect> {
     l.btns.iter().find(|b| b.id == id).map(|b| b.rc)
 }
 
-// ---------------------------------------------------------------------------
-// Card view (`go\window.go:1453-1731`).
-// ---------------------------------------------------------------------------
 
 /// `cardPresetForButton` (`go\window.go:1463`). Only the State row offers
 /// presets: the Details row is removed (line 1 is fixed by the shipped
@@ -2064,7 +2031,6 @@ pub fn compute_card_layout_state(
     let stage_left = if wide { col_right + sc(SP_6) } else { margin };
     let stage_right = margin + content_w;
 
-    // --- 1. the object card ------------------------------------------------
     let top = tab_bottom + sc(SP_3);
     let obj_h = sc(if compact { 96 } else { 128 });
     l.object = Rect {
@@ -2102,7 +2068,6 @@ pub fn compute_card_layout_state(
         bottom: l.obj_meta.bottom + sc(SP_2) + sc(18),
     };
 
-    // --- 2. one field, one verb -------------------------------------------
     let field_h = sc(BTN_H);
     let search_top = l.object.bottom + sc(SP_3);
     let search_w = sc(84);
@@ -2127,7 +2092,6 @@ pub fn compute_card_layout_state(
         bottom: search_top + field_h,
     };
 
-    // --- 3. one disclosure -------------------------------------------------
     let adv_top = l.picker_bar.bottom + sc(SP_1);
     let adv_h = sc(32);
     let adv_w = sc(132);
@@ -2185,7 +2149,6 @@ pub fn compute_card_layout_state(
     // one rect cannot be both a preview and a result set.
     l.picker_results = stage;
 
-    // --- 4. the presence surfaces -----------------------------------------
     if wide {
         let stage_h = stage.bottom - stage.top;
         let member_h = sc(140).min((stage_h - sc(SP_2)).max(sc(60)));
@@ -2288,7 +2251,6 @@ pub fn compute_card_layout_state(
     };
     let _ = surface;
 
-    // --- the control table -------------------------------------------------
     l.btns = vec![
         UiButton {
             id: BTN_CARD,
@@ -3229,9 +3191,6 @@ pub fn preview_tooltip(act: &Activity, have: bool) -> String {
     format!("Tooltip: {}", act.large_text)
 }
 
-// ---------------------------------------------------------------------------
-// RPC designer: one preview model for the three Discord surfaces.
-// ---------------------------------------------------------------------------
 
 /// Which Discord surface the narrow Card view shows. The wide workspace shows
 /// all three at once; the narrow composition keeps one at a time so no panel
@@ -3468,9 +3427,6 @@ pub fn surface_lines(p: &SurfacePreview, surface: PreviewSurface) -> Vec<String>
     out
 }
 
-// ---------------------------------------------------------------------------
-// Scan status strings (`go\window.go:1809-2024`).
-// ---------------------------------------------------------------------------
 
 /// `maxScanStatusLen` (`go\window.go:1809`).
 pub const MAX_SCAN_STATUS_LEN: usize = 160;
@@ -3755,9 +3711,6 @@ pub fn scan_terminal_text(force: bool, s: &Stats, err: Option<&UiScanError>) -> 
     scan_result_text(kind, s, err)
 }
 
-// ---------------------------------------------------------------------------
-// Responsive scan display (`go\window.go:2038-2596`).
-// ---------------------------------------------------------------------------
 
 /// `scanKeyFraction` (`go\window.go:2041`).
 #[must_use]
@@ -4088,9 +4041,6 @@ pub fn scan_bar_progress(p: &Progress, active: bool) -> (bool, bool, f64) {
     scan_bar_model(active, p.resolved, p.keys_total)
 }
 
-// ---------------------------------------------------------------------------
-// Native measurement + DPI helpers (`go\window.go:2256-2304`, `:3442-3464`).
-// ---------------------------------------------------------------------------
 
 /// Client rect of `hwnd` (`go\window.go:2818`).
 #[must_use]
@@ -4282,9 +4232,6 @@ pub fn scan_live_status_text(
     ))
 }
 
-// ---------------------------------------------------------------------------
-// Report button (`go\window.go:1032-1203`).
-// ---------------------------------------------------------------------------
 
 /// `reportButtonLabel` (`go\window.go:1034`).
 pub const REPORT_BUTTON_LABEL: &str = "Report";
@@ -4419,9 +4366,6 @@ fn report_failed_text(reason: &str, url: &str, opened: bool) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Process-wide debug log (`go\window.go:3491`).
-// ---------------------------------------------------------------------------
 
 static APP_LOG: std::sync::OnceLock<&'static app_support::debuglog::Logger> =
     std::sync::OnceLock::new();
@@ -4444,9 +4388,6 @@ pub fn app_logf(message: &str) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// UiState: the UI-thread state (`go\window.go:97-176`, `:1427-1431`).
-// ---------------------------------------------------------------------------
 
 /// One recorded preview input: what a preview needs (the composer inputs), not
 /// the finished payload. The preview composes on demand through the same
@@ -5022,7 +4963,6 @@ pub fn open_external_url(url: &str) -> bool {
     ret as isize > 32
 }
 
-// ---------------------------------------------------------------------------
 // "Fix match" -- the manual latch picker's pure half.
 //
 // Everything in this section is UI-free and unit-tested: the copy (frozen), the
@@ -5047,7 +4987,6 @@ pub fn open_external_url(url: &str) -> bool {
 // offers ONE radio for that folder instead of two identical targets, and says
 // so in its note. The choice is `Scope::Series` because the label describes the
 // folder as the show; the keys are identical either way.
-// ---------------------------------------------------------------------------
 
 /// The Card hero's ghost repair verb. Approved copy drops the ellipsis.
 pub const FIX_MATCH_LABEL: &str = "Fix match";
@@ -11866,9 +11805,6 @@ pub fn build_scan_options(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Painting (`go\window.go:2812-3422`): double-buffered owner-drawn dark UI.
-// ---------------------------------------------------------------------------
 
 /// `wr` helper: `Rect` -> Win32 `RECT`.
 #[must_use]
@@ -11896,7 +11832,6 @@ pub fn create_ui_font(height: i32, weight: i32) -> Gdi::HFONT {
     brand::ui(height.abs(), weight)
 }
 
-// ---------------------------------------------------------------------------
 // Antialiased geometry (GDI+).
 //
 // The whole client area is already painted into one memory DC and blitted, so
@@ -11904,7 +11839,6 @@ pub fn create_ui_font(height: i32, weight: i32) -> Gdi::HFONT {
 // and ring in the frame. It lives in a thread-local because the paint is
 // single-threaded on the UI thread and because `fill_round_rect` is called from
 // a dozen paint sites that have no business threading a context through.
-// ---------------------------------------------------------------------------
 
 thread_local! {
     /// The current frame's `GpGraphics*` as a raw address (0 = none).
@@ -14510,7 +14444,6 @@ fn paint_card_view(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState) {
         fill_round_rect(hdc, l.rail, COL_SURFACE, sc(R_PANEL));
         stroke_round_rect_w(hdc, l.rail, COL_BORDER, sc(R_PANEL), sc(STROKE_HAIR));
     }
-    // --- The one object this window is about ------------------------------
     // Cover, title, year/kind and the plain connection state. Everything below
     // is either this object's presence preview or a correction to it.
     fill_round_rect(hdc, l.object, COL_SURFACE, sc(R_PANEL));
@@ -14776,9 +14709,6 @@ fn paint_card_view(hdc: Gdi::HDC, rc: Rect, dpi: i32, st: &UiState) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Window creation and the main wndproc (`go\window.go:284-462`).
-// ---------------------------------------------------------------------------
 
 /// `mainClassName` (`go\window.go:35`).
 pub const MAIN_CLASS_NAME: &str = "PotflixMainWnd";
@@ -15384,7 +15314,6 @@ fn track_mouse_leave(hwnd: HWND) {
     }
 }
 
-// ===TESTS===
 
 #[cfg(test)]
 mod tests {
@@ -15437,9 +15366,7 @@ mod tests {
 
     const NULL: HWND = std::ptr::null_mut();
 
-    // -- window_test.go -----------------------------------------------------
 
-    // -- window_test.go -----------------------------------------------------
 
     #[test]
     fn pt_in_rect_boundaries() {
@@ -18020,7 +17947,6 @@ mod tests {
         assert!(path.to_string_lossy().to_lowercase().contains("potflix"));
     }
 
-    // -- cardview_test.go ---------------------------------------------------
 
     #[test]
     fn card_view_switch() {
@@ -19195,7 +19121,6 @@ mod tests {
         );
     }
 
-    // -- scan_status_test.go ------------------------------------------------
 
     #[test]
     fn scan_progress_text_folders() {
@@ -19515,7 +19440,6 @@ mod tests {
         assert!(scan_refresh_enabled(false));
     }
 
-    // -- settings_scan_test.go ----------------------------------------------
 
     /// Owner order 2026-11-03: Scan speed has no Settings row. The layout
     /// carries no scan segment and no SCAN caption; the profile still
@@ -19874,7 +19798,6 @@ mod tests {
         );
     }
 
-    // -- Fix match picker (pure half) ----------------------------------------
 
     fn fix_candidate(
         title: &str,
@@ -20159,7 +20082,6 @@ mod tests {
         );
     }
 
-    // -- Fix match provisional correction (T2-A2) --------------------------
 
     // Every test below that touches the store or `LOCALAPPDATA` runs under
     // the crate-shared [`crate::test_env::EnvGuard`] serial: one lock for the
@@ -23966,9 +23888,6 @@ mod tests {
         presence::set_live_designer(presence::designer::DesignerSpec::default());
     }
 
-    // ------------------------------------------------------------------
-    // Persistent search cache + background preload
-    // ------------------------------------------------------------------
 
     /// Arm the in-memory search cache for one test and keep the serial guard
     /// for its lifetime, so no unit test reads or writes the owner's file.

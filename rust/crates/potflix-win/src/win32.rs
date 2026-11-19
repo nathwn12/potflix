@@ -44,14 +44,12 @@ use core::mem::size_of;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 pub use windows_sys::Win32::Graphics::Gdi;
 
-// ---------------------------------------------------------------------------
 // Binding table (`go\win32.go:8-36`).
 //
 // Each `pub use` IS the proc pointer Go builds with `NewLazyProc`: same DLL,
 // same entry point. A few user32 entries live in `windows-sys`'s `Gdi` module
 // because the header that documents them is `wingdi.h`, not because the DLL
 // differs.
-// ---------------------------------------------------------------------------
 
 // user32 (`go\win32.go:13-28`).
 pub use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -70,10 +68,6 @@ pub use windows_sys::Win32::UI::Shell::{
     SHBrowseForFolderW, SHGetPathFromIDListW, Shell_NotifyIconW,
 };
 
-// ---------------------------------------------------------------------------
-// Settings-window bindings (`go\win32.go:140-172`): paint, show, message,
-// cursor, and folder-picker procs; gdi32 + ole32.
-// ---------------------------------------------------------------------------
 
 // user32 (`go\win32.go:141-151`; `BeginPaint`/`EndPaint`/`DrawTextW`/
 // `UpdateWindow` are declared under `Gdi` in `windows-sys` but still come from
@@ -93,10 +87,6 @@ pub use windows_sys::Win32::Graphics::Gdi::{
 pub use windows_sys::Win32::System::Com::CoTaskMemFree;
 pub use windows_sys::Win32::System::Ole::OleInitialize;
 
-// ---------------------------------------------------------------------------
-// Owner-drawn settings-window bindings, round 2 (`go\win32.go:270-286`): DPI,
-// geometry, mouse tracking, and GDI helpers.
-// ---------------------------------------------------------------------------
 
 pub use windows_sys::Win32::Graphics::Gdi::{
     CreateCompatibleBitmap, CreatePen, FillRect, GetStockObject, InvalidateRect,
@@ -141,7 +131,6 @@ pub fn dpi_awareness() -> i32 {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Native dark window chrome (Rust-only; `go\win32.go` has no counterpart -- the
 // Go build keeps the stock light caption).
 //
@@ -154,7 +143,6 @@ pub fn dpi_awareness() -> i32 {
 // is 20 (Windows 11 22000+; the pre-22000 Windows 10 attribute was 19, which this
 // app does not target), `DWMWA_WINDOW_CORNER_PREFERENCE` 33, `DWMWA_BORDER_COLOR`
 // 34, `DWMWA_CAPTION_COLOR` 35, `DWMWA_TEXT_COLOR` 36.
-// ---------------------------------------------------------------------------
 
 pub use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -203,14 +191,12 @@ pub fn apply_dark_caption(hwnd: HWND, caption: u32, text: u32) {
     dwm_set(hwnd, DWMWA_BORDER_COLOR, caption);
 }
 
-// ---------------------------------------------------------------------------
 // Dark owner-drawn tray menu (Rust-only: the Go build leaves the stock white
 // popup). `SetMenuInfo`/`MIM_BACKGROUND` paints the popup's interior dark
 // (learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setmenuinfo, verified
 // 2026-10-14); `MF_OWNERDRAW` + `WM_MEASUREITEM`/`WM_DRAWITEM` gives each item
 // palette-correct text and hover. The menu's own item ids, labels and dispatch
 // are untouched, so the tray's behavior is unchanged.
-// ---------------------------------------------------------------------------
 
 pub use windows_sys::Win32::UI::Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT};
 pub use windows_sys::Win32::UI::WindowsAndMessaging::{MENUINFO, SetMenuInfo};
@@ -257,7 +243,6 @@ pub const ODT_LISTBOX: u32 = 2;
 pub const ODT_BUTTON: u32 = 4;
 pub const ODT_STATIC: u32 = 5;
 
-// ---------------------------------------------------------------------------
 // GDI+ (`gdiplus.dll`) -- antialiased rounded geometry.
 //
 // GDI's own `RoundRect` rasterises with the selected 1px pen and aliased
@@ -267,7 +252,6 @@ pub const ODT_STATIC: u32 = 5;
 // win32/gdiplus/-gdiplus-antialiasing-with-lines-and-curves-about, verified
 // 2026-10-14). Same DLL family as gdi32, same windows-sys FFI path: no new
 // dependency, no C toolchain.
-// ---------------------------------------------------------------------------
 
 pub use windows_sys::Win32::Graphics::GdiPlus::{
     CombineModeReplace, FillModeAlternate, GdipAddPathArcI, GdipClosePathFigure,
@@ -308,9 +292,6 @@ const _: () = assert!(size_of::<GdiplusStartupInput>() == 24);
 const _: () =
     assert!(size_of::<windows_sys::Win32::Graphics::GdiPlus::GdiplusStartupInput>() == 24);
 
-// ---------------------------------------------------------------------------
-// Window messages (`go\win32.go:38-49`).
-// ---------------------------------------------------------------------------
 
 pub const WM_NULL: u32 = 0x0000;
 pub const WM_DESTROY: u32 = 0x0002;
@@ -518,9 +499,6 @@ pub const CLIP_DEFAULT_PRECIS: u32 = 0;
 
 pub const NULL_BRUSH_STOCK: i32 = 5;
 
-// ---------------------------------------------------------------------------
-// Structs (`go\win32.go:81-135, :232-265, :328-334`).
-// ---------------------------------------------------------------------------
 
 /// `WNDPROC`: the window-procedure signature both windows register.
 pub type WndProc = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
@@ -667,7 +645,6 @@ pub struct TrackMouseEvent {
     pub dw_hover_time: u32,
 }
 
-// ---------------------------------------------------------------------------
 // Brand-surface bindings (Rust-only; `go\win32.go` has no counterpart).
 //
 // The identity pass in `design\make_logo.py` ships the app's own typefaces and
@@ -691,7 +668,6 @@ pub struct TrackMouseEvent {
 // `CreateIconFromResourceEx` (already exported above) is the loader: the
 // embedded `.ico` holds one BMP/DIB frame, which is exactly the "resource bits"
 // shape it consumes, so no temp file and no `LoadImageW` are needed.
-// ---------------------------------------------------------------------------
 
 pub use windows_sys::Win32::Graphics::Gdi::AddFontMemResourceEx;
 pub use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -731,10 +707,6 @@ pub const LR_DEFAULTCOLOR: u32 = 0;
 /// verified 2026-10-14.)
 pub use windows_sys::Win32::Graphics::Gdi::SetTextCharacterExtra;
 
-// ---------------------------------------------------------------------------
-// Compile-time size assertions: a field added or reordered here fails the
-// build, not `Shell_NotifyIconW`/`RegisterClassExW`/`BeginPaint` at runtime.
-// ---------------------------------------------------------------------------
 
 #[cfg(target_arch = "x86_64")]
 const _: () = assert!(size_of::<WndClassEx>() == 80);
@@ -755,10 +727,6 @@ const _: () = assert!(size_of::<BrowseInfoW>() == 64);
 #[cfg(target_arch = "x86_64")]
 const _: () = assert!(size_of::<TrackMouseEvent>() == 24);
 
-// ---------------------------------------------------------------------------
-// UTF-16 helpers (Go reaches for `syscall.UTF16PtrFromString` /
-// `syscall.StringToUTF16`, which Rust's std does not provide).
-// ---------------------------------------------------------------------------
 
 /// Go `syscall.UTF16PtrFromString(s)`: `s` as NUL-terminated UTF-16 units. The
 /// returned `Vec` owns the buffer; callers pass `.as_ptr()` and keep it alive

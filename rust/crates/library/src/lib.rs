@@ -107,7 +107,6 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-// --- seams -----------------------------------------------------------------
 
 /// A resolver factory; tests replace the production one to inject fake sources.
 pub(crate) type ResolverFactory = Arc<dyn Fn(&str) -> metadata::Resolver + Send + Sync>;
@@ -297,7 +296,6 @@ fn walk_rec(path: &str, entry: &WalkEntry, cb: &mut WalkCb<'_>) -> std::io::Resu
     Ok(())
 }
 
-// --- stats -----------------------------------------------------------------
 
 /// `Stats` tallies one Scan run.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -364,7 +362,6 @@ pub struct Options {
     pub app_version: String,
 }
 
-// --- collect ---------------------------------------------------------------
 
 /// `CollectFiles` walks each root recursively for video files.
 pub fn collect_files(roots: &[String], limit: i32) -> (Vec<String>, i64, Option<Error>) {
@@ -484,7 +481,6 @@ pub fn walk(dirs: &[String], mut f: impl FnMut(&str) -> Result<(), Error>) -> Re
     Ok(())
 }
 
-// --- plan ------------------------------------------------------------------
 
 /// `DedupeKey` is the resolver's cache identity for one query.
 pub fn dedupe_key(q: &Query) -> String {
@@ -554,7 +550,6 @@ pub fn build_plan(files: &[String]) -> (Vec<FilePlan>, Vec<Group>) {
     (plans, groups)
 }
 
-// --- fetch -----------------------------------------------------------------
 
 /// `LookupFunc` resolves one unique query.
 pub type LookupFn<'a> =
@@ -686,7 +681,6 @@ pub fn scan(
     )
 }
 
-// --- fresh identities ------------------------------------------------------
 
 /// A fresh tier-1 names hash (one `read_dir`, names sorted).
 fn fresh_names_hash(dir: &str, mod_nanos: i64) -> std::io::Result<String> {
@@ -1040,7 +1034,6 @@ pub fn collect_indexed_public(
     }
 }
 
-// --- record ----------------------------------------------------------------
 
 /// `RecordScan` re-records every visited dir from an indexed walk.
 pub fn record_scan(
@@ -1391,7 +1384,6 @@ impl CachedDir {
     }
 }
 
-// --- scan ------------------------------------------------------------------
 
 struct Agg {
     done: i64,

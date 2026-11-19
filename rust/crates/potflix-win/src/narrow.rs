@@ -21,9 +21,6 @@ use super::{
 };
 use crate::win32;
 
-// ---------------------------------------------------------------------------
-// Providers forbidden: record-only meta.
-// ---------------------------------------------------------------------------
 
 /// The narrow result meta, built from the record only: no provider names.
 ///
@@ -147,10 +144,6 @@ fn draw_center(
     super::draw_ui_text(hdc, s, rc, fmt, font, color);
 }
 
-// ---------------------------------------------------------------------------
-// bar: 48px chrome. Measured rect = the top bar; one caller =
-// `window::paint_narrow_bar`.
-// ---------------------------------------------------------------------------
 
 /// Paint the narrow top bar: 20px mark left (the OS caption already carries
 /// the wordmark, so no in-app text label), 12px hairline chip plus 32px gear
@@ -247,10 +240,6 @@ pub fn gear_color(hovered: bool) -> u32 {
     if hovered { COL_TEXT } else { COL_MUTED }
 }
 
-// ---------------------------------------------------------------------------
-// hero: <=124px object card. Measured rects = object/cover/title/meta/status +
-// ghost; one caller = `window::paint_narrow_card`.
-// ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
 pub fn hero(
@@ -308,10 +297,6 @@ pub fn hero(
     }
 }
 
-// ---------------------------------------------------------------------------
-// result_row: 56px record row. Measured rect = the row; one caller =
-// `window::paint_narrow_card` (via the results panel loop).
-// ---------------------------------------------------------------------------
 
 /// The 32x48 cover thumb of one result row. Pure, so the paint and the test
 /// that proves the thumb fits inside the row read the same rect.
@@ -404,10 +389,6 @@ pub fn result_row(
     let _ = win32::SRCCOPY;
 }
 
-// ---------------------------------------------------------------------------
-// settings_row: 48px settings row. Measured rect = the row; one caller =
-// `window::paint_narrow_settings`.
-// ---------------------------------------------------------------------------
 
 /// What the right-aligned 36px control of a settings row is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

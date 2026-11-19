@@ -50,9 +50,6 @@ pub const fn rgb(r: u32, g: u32, b: u32) -> u32 {
     r | (g << 8) | (b << 16)
 }
 
-// ---------------------------------------------------------------------------
-// Palette (`design\make_logo.py:41-50`).
-// ---------------------------------------------------------------------------
 
 /// `RED = (0xE5, 0x09, 0x14)` -- lit ribbon facets, the accent, badges.
 pub const RED: u32 = rgb(0xE5, 0x09, 0x14);
@@ -77,9 +74,6 @@ pub const CARD_DET: u32 = rgb(0xDB, 0xDE, 0xE1);
 /// `CARD_MUT = (0xB5, 0xBA, 0xC1)` -- the card's muted text.
 pub const CARD_MUT: u32 = rgb(0xB5, 0xBA, 0xC1);
 
-// ---------------------------------------------------------------------------
-// Derived surfaces. Each is a stated step off a token above, not a new hue.
-// ---------------------------------------------------------------------------
 
 /// `(0x1A, 0x1B, 0x1E)` -- `make_logo.py`'s own sheet background
 /// (`candidate_sheet()`, `badges_variants_sheet()`). One luminance step above
@@ -133,9 +127,6 @@ pub const DIM_V2: u32 = rgb(0x8A, 0x8F, 0x99);
 pub const ACCENT_V2: u32 = rgb(0xE5, 0x34, 0x3F);
 pub const ACCENT_HOV_V2: u32 = rgb(0xF0, 0x4B, 0x55);
 
-// ---------------------------------------------------------------------------
-// The house squircle.
-// ---------------------------------------------------------------------------
 
 /// The house fraction's numerator: the app icon's radius, 112px on a 512px
 /// square (`assets\appicon.png`; the brief's 21.9%).
@@ -160,9 +151,6 @@ pub fn dark_is_red_scaled() -> bool {
     rgb(scale(0xE5), scale(0x09), scale(0x14)) == DARK
 }
 
-// ---------------------------------------------------------------------------
-// Type scale (logical px at 96 DPI).
-// ---------------------------------------------------------------------------
 
 /// The wordmark.
 pub const FS_WORDMARK: i32 = 20;
@@ -185,9 +173,6 @@ pub const TRACK_WORDMARK: f32 = 0.08;
 /// The micro-label's tracking, in em: a 10px uppercase label needs it to read.
 pub const TRACK_LABEL: f32 = 0.14;
 
-// ---------------------------------------------------------------------------
-// The shipped faces.
-// ---------------------------------------------------------------------------
 
 /// Archivo Black -- the chosen wordmark/display face (`CHOSEN = "archivo"`:
 /// "single-master display black, even color, tight grotesque caps"). OFL, and
@@ -317,9 +302,6 @@ pub fn face_of(hdc: Gdi::HDC, hfont: Gdi::HFONT) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Contrast (WCAG 2.x relative luminance), measured from the constants above.
-// ---------------------------------------------------------------------------
 
 /// Relative luminance of a `COLORREF`, per WCAG 2.1.
 #[must_use]
@@ -343,9 +325,6 @@ pub fn contrast(a: u32, b: u32) -> f64 {
     (hi + 0.05) / (lo + 0.05)
 }
 
-// ---------------------------------------------------------------------------
-// The mark: the Ribbon P, loaded from the embedded `assets\icon.ico`.
-// ---------------------------------------------------------------------------
 
 /// The app icon as an `HICON` of `cx` x `cy` px, built straight from the
 /// embedded `.ico` bytes.
@@ -448,7 +427,6 @@ pub fn class_icon(hwnd: HWND) -> HICON {
     unsafe { win32::GetClassLongPtrW(hwnd, win32::GCLP_HICON) as HICON }
 }
 
-// ===TESTS===
 
 #[cfg(test)]
 mod tests {

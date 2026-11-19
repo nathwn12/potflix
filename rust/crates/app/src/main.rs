@@ -3330,12 +3330,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    // -----------------------------------------------------------------------
     // Poll-loop sequence tests over the injected probe seam. The REAL loop body
     // (`poll_step`) runs -- real tracker, real gate, real push_activity, real
     // clear logic -- against a scripted player, a fake clock and the in-process
     // fake Discord pipe; only the player reads and the sleeps are injected.
-    // -----------------------------------------------------------------------
 
     /// The scripted player the poll-loop tests drive: one window whose identity,
     /// aliveness, title, status and times the test mutates between steps. The
@@ -4101,13 +4099,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    // -----------------------------------------------------------------------
     // T5-C (red first): no idle `Browsing`/`Idle` card, no `Watching
     // PotFlix`/`Watching PotPlayer`. An idle title (empty/whitespace, the
     // player app name) or a window with no current file must never send the
     // idle card: clear instead, record no preview, and keep real media
     // sending with the stop grace intact.
-    // -----------------------------------------------------------------------
 
     /// T5-C: the idle-title predicate covers the app names and the empty
     /// cases (suffix-stripped, trimmed).

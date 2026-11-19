@@ -21,7 +21,6 @@ use super::*;
 /// go stale by design and fail liveness asserts).
 const TEST_SCHEMA: i32 = metadata::cache::CACHE_SCHEMA;
 
-// --- helpers ----------------------------------------------------------------
 
 /// `t.TempDir()`: a fresh directory under the approved temp root, removed on
 /// drop -- including the store file that lives BESIDE it (`<dir>.idx`).
@@ -173,7 +172,6 @@ fn make_file_link(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }
 
-// --- tests ------------------------------------------------------------------
 
 #[test]
 fn TestBundleRoundTrip() {

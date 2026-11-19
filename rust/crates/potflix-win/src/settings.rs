@@ -28,9 +28,6 @@ use crate::window::fit_scan_status;
 /// can never disagree with the binary that wrote it.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-// ---------------------------------------------------------------------------
-// Status strings (`go\settings_sections.go:48-91`).
-// ---------------------------------------------------------------------------
 
 /// `clearCacheStatus` (`go\settings_sections.go:48`).
 #[must_use]
@@ -113,9 +110,6 @@ pub fn startup_toggle_label(on: bool) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------------
-// SCAN speed section (`go\settings_sections.go:99-191`).
-// ---------------------------------------------------------------------------
 
 /// `scanHintText` (`go\settings_sections.go:105`).
 pub const SCAN_HINT_TEXT: &str = "Turbo = each provider's published limit (default). Balanced = half speed, Gentle = quarter speed - pick one if you want to be gentler on the services.";
@@ -242,9 +236,6 @@ pub fn on_select_scan_speed(cfg_path: &Path, profile: &str) -> Result<String, St
     Ok(format!("Scan speed: {}", scan_segment_label(profile)))
 }
 
-// ---------------------------------------------------------------------------
-// Window-free cores (`go\settings_sections.go:203-275`).
-// ---------------------------------------------------------------------------
 
 /// `clearLibraryCache` (`go\settings_sections.go:203`).
 pub fn clear_library_cache(
@@ -331,9 +322,6 @@ pub fn import_bundle_from(
     bundle::import(meta_dir, &mut f, schema).map_err(|e| repair::Error::new(e.to_string()))
 }
 
-// ---------------------------------------------------------------------------
-// Native dialogs (`go\settings_sections.go:281-428`).
-// ---------------------------------------------------------------------------
 
 const MB_YESNO: u32 = 0x0000_0004;
 const MB_ICONWARNING: u32 = 0x0000_0030;
@@ -513,9 +501,6 @@ fn call_file_dialog_with(mut ofn: OpenFileNameW, save: bool) -> String {
     String::from_utf16_lossy(&file[..end])
 }
 
-// ---------------------------------------------------------------------------
-// STARTUP registry (`go\settings_sections.go:435-585`).
-// ---------------------------------------------------------------------------
 
 const STARTUP_RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const STARTUP_RUN_VALUE: &str = "Potflix";
@@ -772,7 +757,6 @@ pub fn browse_for_folder(owner: HWND) -> String {
     }
 }
 
-// ===TESTS===
 
 #[cfg(test)]
 mod tests {

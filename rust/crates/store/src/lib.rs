@@ -807,7 +807,6 @@ impl Inner {
     }
 }
 
-// --- encoding ---------------------------------------------------------------
 
 fn encode_header(dst: &mut [u8; HEADER_SIZE]) {
     dst[0..8].copy_from_slice(&MAGIC);
@@ -918,7 +917,6 @@ fn create_temp(dir: &Path, base: &str) -> io::Result<(File, PathBuf)> {
     Err(last)
 }
 
-// --- replay -----------------------------------------------------------------
 
 /// Reads and validates the 24-byte header at offset 0, as `Open` does.
 fn read_header(path: &Path, f: &mut File, hdr: &mut [u8; HEADER_SIZE]) -> Result<(), Error> {

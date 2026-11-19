@@ -146,7 +146,6 @@ pub fn folder_names_hash(dir: &str) -> std::io::Result<String> {
     Ok(hash_names(mtime_nanos(&md), names.len(), &names))
 }
 
-// --- legacy migration ------------------------------------------------------
 
 const MAX_SCAN_INDEX_BYTES: u64 = 8 << 20;
 
@@ -242,7 +241,6 @@ pub fn legacy_scan_index_counts(path: &str) -> Result<LegacyCounts, Error> {
     read_legacy_scan_index(path).map(|(_, counts)| counts)
 }
 
-// --- the folder tier -------------------------------------------------------
 
 /// The folder tier of the store-backed library index.
 #[derive(Clone)]

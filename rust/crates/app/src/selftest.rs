@@ -34,9 +34,6 @@ use player::control::PlayStatus;
 use potflix_win::{tray, win32};
 use presence::Tracker;
 
-// ---------------------------------------------------------------------------
-// `go\events.go`: the exact event strings the port contract lists.
-// ---------------------------------------------------------------------------
 
 /// `eventConnected` (`events.go:19`): the SECRET RULE redacts the client id.
 pub fn event_connected(log: &Logger) {
@@ -163,9 +160,6 @@ pub fn event_session_dropped(log: &Logger, err: &impl std::fmt::Display) {
     log.log(&format!("session dropped: {err}"));
 }
 
-// ---------------------------------------------------------------------------
-// `attachConsole` (`go\selftest.go:31-58`).
-// ---------------------------------------------------------------------------
 
 /// Keeps the `CONOUT$` handle open for the process life when the fallback path
 /// opened one (Go keeps the `*os.File` alive as `os.Stdout`).
@@ -211,9 +205,6 @@ pub fn attach_console() {
     let _ = CONSOLE_HANDLE.set(handle as isize);
 }
 
-// ---------------------------------------------------------------------------
-// The transcript sink and the two failure exits (`go\selftest.go:66-84, :306-310`).
-// ---------------------------------------------------------------------------
 
 /// The transcript file mirrored with stdout. Created FIRST so a failing stdout
 /// write cannot stop it (`go\selftest.go:66-73`).

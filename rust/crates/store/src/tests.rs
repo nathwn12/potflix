@@ -749,7 +749,6 @@ fn compaction_and_removal_with_shared_open() {
     let _ = reopened.close();
 }
 
-// --- cross-implementation gate ---------------------------------------------
 
 /// The records the Go generator wrote: `k4` was put then tombstoned, `k2` was
 /// overwritten, `k5` holds a zero-length value.

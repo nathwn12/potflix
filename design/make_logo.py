@@ -38,7 +38,6 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SS = 8  # supersample factor: the crispness source
 
-# ---------------------------------------------------------------- palette
 RED = (0xE5, 0x09, 0x14, 255)  # #E50914 brand red (lit facets)
 DARK = (0x8E, 0x06, 0x0C, 255)  # #8E060C = round(#E50914 * 0.62)
 BLACK = (0x0B, 0x0B, 0x0B, 255)  # #0B0B0B tiles
@@ -53,7 +52,6 @@ PALETTE_REPORT = (
     "RED=#E50914 DARK=#8E060C(round(#E50914*0.62)) BLACK=#0B0B0B WHITE=#FFFFFF"
 )
 
-# ---------------------------------------------------------------- type data
 FDIR = os.path.join(ROOT, "design", "fonts")
 FONTS = {  # key: file, expected family, variable->named instance, tracking em
     "archivo": dict(
@@ -105,7 +103,6 @@ def load_inter(size, named):
     return f
 
 
-# ---------------------------------------------------------------- primitives
 def new(size, color=(0, 0, 0, 0)):
     return Image.new("RGBA", (int(size[0] * SS), int(size[1] * SS)), color)
 
@@ -126,7 +123,6 @@ def tile(size, bg):
     return img
 
 
-# ---------------------------------------------------------------- Ribbon P
 # Grid: box is 24u x 24u. All strokes 5u. Counter punched in tile bg.
 # Facets: (1) front face RED, (2) receding ribbon plane DARK offset (+ex,+ex),
 # (3) diagonal fold crease DARK across the bowl upright.
@@ -161,7 +157,6 @@ def ribbon_p(img, box):
     poly(crease, 0, 0, DARK)  # fold crease
 
 
-# ---------------------------------------------------------------- wordmark
 def tracked_width(font, text, track_em):
     w, size = 0.0, font.size
     for i, ch in enumerate(text):
@@ -193,7 +188,6 @@ def draw_wordmark(img, box, key, fill):
     return fam
 
 
-# ---------------------------------------------------------------- artifacts
 def render_mark_tile(size, margin_frac=0.21):
     t = tile(size, BLACK)
     m = size * margin_frac
@@ -220,7 +214,6 @@ def render_lockup(size, key):
     return down(t), fam
 
 
-# ---------------------------------------------------------------- badge variants
 # Dark-mode Discord badges (1024 fractions; S = 1024):
 #   DISC_D  = 0.90 S  disc diameter (V1 + V3); margin 0.05 S per side (51.2 px)
 #   RING_W  = 0.055 S ring stroke (56.3 px); ring outer flush with disc edge,
@@ -384,7 +377,6 @@ def candidate_sheet():
     return sheet, fams
 
 
-# ---------------------------------------------------------------- badge sheet
 VARIANT_BLURB = {
     "V1": "V1 PRIMARY: black disc + red ring + red glyph",
     "V2": "V2: black disc + red glyph + dark-red offset facet (no ring)",
@@ -558,7 +550,6 @@ def border_check(named):
         assert bad == 0, "%s clipped: %d border pixels opaque" % (name, bad)
 
 
-# ---------------------------------------------------------------- cover art
 # Discord Rich Presence Invite "Cover Image" slot: 1024x576 RGBA.
 # Discord draws over it: the app icon top-left, name/status lines beside it,
 # and a full-width Join button across the bottom band. So: NO wordmark in the
@@ -756,7 +747,6 @@ PROTECTED = [
 ]
 
 
-# ---------------------------------------------------------------- cards
 def fmt(s):
     return "%d:%02d" % (s // 60, s % 60)
 
@@ -850,7 +840,6 @@ def card(
     return down(img, "RGB")
 
 
-# ---------------------------------------------------------------- ico
 def write_ico(im256, path):
     """ONE 256x256 BMP/DIB ICO frame; hand-rolled DIB fallback if Pillow emits PNG."""
     rgba = im256.convert("RGBA")
@@ -1029,7 +1018,6 @@ def main():
     covers["C1"].save(P("assets", "discord", "cover.png"))
     cover_variants_sheet(covers).save(P("design", "preview", "cover-variants.png"))
 
-    # ---- PROOF ----
     from PIL import Image as I
 
     print("palette " + PALETTE_REPORT)

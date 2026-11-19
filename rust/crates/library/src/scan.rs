@@ -89,7 +89,6 @@ pub(crate) fn scan_indexed(cancel: &crate::Cancel, opts: &Options) -> Result<Sta
         return Ok(st);
     }
 
-    // --- diff ---------------------------------------------------------
     let parse = current_parse();
     let mut keys: HashMap<String, String> = HashMap::new();
     let mut unchanged = 0;
@@ -151,14 +150,12 @@ pub(crate) fn scan_indexed(cancel: &crate::Cancel, opts: &Options) -> Result<Sta
         }
     }
 
-    // --- prune --------------------------------------------------------
     let mut enumerated_paths: HashMap<String, bool> = HashMap::new();
     for p in &outcome.files {
         enumerated_paths.insert(normalize_scan_dir(p), true);
     }
     let pruned = idx.prune_files(&visited_set(&outcome.visited), &enumerated_paths);
 
-    // --- folder rollups ----------------------------------------------
     record_index_keys(
         &si,
         &outcome.visited,
@@ -169,7 +166,6 @@ pub(crate) fn scan_indexed(cancel: &crate::Cancel, opts: &Options) -> Result<Sta
         outcome.walk.as_ref(),
     );
 
-    // --- report the index phase --------------------------------------
     let state = idx.state();
     let st = Stats {
         files: enumerated.borrow().len() as i64,

@@ -231,16 +231,8 @@ function Fail([string]$Message) {
   throw ([System.Exception]::new($script:FailPrefix + $Message))
 }
 
-# ---------------------------------------------------------------------------
-# Everything below runs only on direct invocation; dot-sourcing stops here and
-# gets the helpers above (same guard style as tools\check.ps1).
-# ---------------------------------------------------------------------------
 if ($MyInvocation.InvocationName -eq '.') { return }
 
-# ---------------------------------------------------------------------------
-# Preconditions: each one is a missing environment input (exit 2), never a check
-# failure, and none of them changes anything on the machine.
-# ---------------------------------------------------------------------------
 
 # Windows only. $IsWindows exists on PowerShell 6+; Windows PowerShell 5.1 has no
 # such variable and runs only on Windows anyway.
@@ -307,9 +299,6 @@ if (Test-PotflixLockHeld) {
   Write-Host 'Exit Potflix from its tray menu, then rerun; this script never kills a running instance.'
   exit 2
 }
-# ---------------------------------------------------------------------------
-# Baseline: record the log offset so every line this run produces is attributable.
-# ---------------------------------------------------------------------------
 $script:LogPath = Join-Path (Split-Path -Parent $exePath) 'potflix-debug.log'
 $script:LogBase = [pscustomobject]@{ Existed = $false; Lines = 0; Length = [long]-1; Hash = $null }
 if (Test-Path -LiteralPath $script:LogPath) {
@@ -333,9 +322,6 @@ Write-Host "  file: $File"
 
 $scriptExit = 1   # pessimistic; set to 0 only after the whole cycle is verified
 try {
-  # -------------------------------------------------------------------------
-  # Launch the app; wait for the freshness line past the recorded offset.
-  # -------------------------------------------------------------------------
   Add-Evidence "run started $(Get-Date -Format 'HH:mm:ss')"
   Add-Evidence "app:  $exePath"
   Add-Evidence "file: $File"
@@ -375,9 +361,6 @@ try {
     Fail "the app exited right after acquiring the lock (exit code $($proc.ExitCode))."
   }
 
-  # -------------------------------------------------------------------------
-  # Play the file: launch PotPlayer with the media file.
-  # -------------------------------------------------------------------------
   if (-not (Test-Path -LiteralPath $PotPlayer)) {
     Fail "PotPlayer not found at $PotPlayer (renamed or moved?); nothing was played, so the check cannot run."
   }
@@ -402,9 +385,6 @@ try {
     Fail 'PotPlayer did not stay running after launch; nothing was played.'
   }
 
-  # -------------------------------------------------------------------------
-  # The card: a push details line for the played file, then its Discord ack.
-  # -------------------------------------------------------------------------
   Write-Host "[live-check] waiting up to ${CardTimeoutSeconds}s for the card push and its Discord ack"
   # The pushed title is the file's cleaned title; compare alphanumerics only so the
   # U+0A789 colon and other punctuation cannot break the match, and the unrelated
@@ -454,9 +434,6 @@ try {
     Fail "no 'push details=[' line for '$([System.IO.Path]::GetFileName($File))' within ${CardTimeoutSeconds}s; no card was pushed."
   }
 
-  # -------------------------------------------------------------------------
-  # Close PotPlayer gently and confirm it exits.
-  # -------------------------------------------------------------------------
   Write-Host '[live-check] closing PotPlayer: taskkill without /F (WM_CLOSE request, never a kill)'
   if (-not (Get-Process -Name PotPlayerMini64 -ErrorAction SilentlyContinue)) {
     Add-Evidence 'note: PotPlayer was already gone before the close request'
@@ -468,9 +445,6 @@ try {
   }
   Add-Evidence "player closed $(Get-Date -Format 'HH:mm:ss')"
 
-  # -------------------------------------------------------------------------
-  # The clear: a cleared line, then an ack with no ack timeout in between.
-  # -------------------------------------------------------------------------
   Write-Host "[live-check] waiting up to ${ClearTimeoutSeconds}s for the clear and its ack"
   $clearLine = $null
   $clearAbs = 0
@@ -555,9 +529,6 @@ try {
   Restore-LogIfUnchanged
 }
 
-# ---------------------------------------------------------------------------
-# Evidence and verdict.
-# ---------------------------------------------------------------------------
 Write-Host ''
 Write-Host '[live-check] evidence'
 foreach ($e in $script:Evidence) { Write-Host "  $e" }

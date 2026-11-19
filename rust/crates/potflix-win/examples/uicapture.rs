@@ -777,7 +777,6 @@ fn mode_facts() -> Result<(), String> {
         }
         let sc = |v: i32| window::scale_px(96, v);
 
-        // --- the icon -------------------------------------------------------
         let cls = potflix_win::brand::class_icon(hwnd);
         println!("FACT class-icon GCLP_HICON=0x{:X} non-zero={}", cls as usize, !cls.is_null());
         let small = unsafe {
@@ -795,7 +794,6 @@ fn mode_facts() -> Result<(), String> {
             println!("FACT window-icon {name}=0x{h:X} non-zero={}", h != 0);
         }
 
-        // --- the faces ------------------------------------------------------
         let hdc = unsafe { windows_sys::Win32::Graphics::Gdi::GetDC(hwnd) };
         let display = potflix_win::brand::display(sc(20));
         let ui = potflix_win::brand::ui(sc(13), potflix_win::brand::UI_WEIGHT);
@@ -816,7 +814,6 @@ fn mode_facts() -> Result<(), String> {
             windows_sys::Win32::Graphics::Gdi::ReleaseDC(hwnd, hdc);
         }
 
-        // --- the grid -------------------------------------------------------
         let (cw, ch) = (sc(window::MAIN_CLIENT_W), sc(window::MAIN_CLIENT_H));
         let l = window::compute_layout(&dirs(4), cw, ch, 96);
         let mut grid: Vec<&window::UiButton> = l
@@ -861,7 +858,6 @@ fn mode_facts() -> Result<(), String> {
             l.list_capacity, l.overflow, l.card.top, l.card.bottom, l.card.right
         );
 
-        // --- contrast -------------------------------------------------------
         use potflix_win::brand as b;
         for (name, fg, bg) in [
             ("CARD_HDR/BLACK", b::CARD_HDR, b::BLACK),

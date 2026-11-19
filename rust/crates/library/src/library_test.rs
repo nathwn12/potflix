@@ -19,7 +19,6 @@ use crate::{
     FilePlan, Options, Progress, ProgressFn, WalkCb, WalkEntry, WalkFn, WalkResult,
 };
 
-// --- serialization ---------------------------------------------------------
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -96,7 +95,6 @@ impl Drop for ParseScope {
     }
 }
 
-// --- temp dirs -------------------------------------------------------------
 
 static TEMP_SEQ: AtomicI32 = AtomicI32::new(0);
 
@@ -132,7 +130,6 @@ pub(crate) fn meta_cache_dir() -> TempDir {
     temp_dir("meta")
 }
 
-// --- fake providers --------------------------------------------------------
 
 fn now_fetched_at() -> String {
     repair::time::Time::now().rfc3339_nanos()
@@ -347,7 +344,6 @@ pub(crate) fn resolver_with(source: Arc<dyn metadata::Source>, dir: &str) -> met
     })
 }
 
-// --- corpora ---------------------------------------------------------------
 
 fn write_file(path: &str, content: &str) {
     if let Some(parent) = std::path::Path::new(path).parent() {
@@ -422,7 +418,6 @@ pub(crate) fn index_path_in(dir: &TempDir) -> String {
     path_join(&[&dir.path, "scanindex.json"])
 }
 
-// --- tests -----------------------------------------------------------------
 
 #[test]
 fn build_plan_skips_unknown_and_dedupes() {

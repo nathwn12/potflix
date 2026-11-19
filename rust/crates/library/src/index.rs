@@ -174,7 +174,6 @@ pub fn index_store_path(index_path: &str) -> String {
     path_join(&[&path_dir(index_path), INDEX_STORE_NAME])
 }
 
-// --- lifecycle -------------------------------------------------------------
 
 static LIVE_INDEXES: Mutex<Option<HashMap<String, Arc<Index>>>> = Mutex::new(None);
 
@@ -535,7 +534,6 @@ impl Index {
         }
     }
 
-    // --- state -----------------------------------------------------------------
 
     pub(crate) fn state(&self) -> IndexState {
         state_of(&self.inner.lock().unwrap())
@@ -580,7 +578,6 @@ fn state_of(inner: &IndexInner) -> IndexState {
     s
 }
 
-// --- folder rollups --------------------------------------------------------
 
 impl Index {
     pub(crate) fn folder(&self, dir: &str) -> Option<FolderRecord> {
@@ -630,7 +627,6 @@ impl Index {
         n
     }
 
-    // --- file records ----------------------------------------------------------
 
     pub(crate) fn file(&self, path: &str) -> Option<FileRecord> {
         self.inner
@@ -705,7 +701,6 @@ impl Index {
     }
 }
 
-// --- encoding --------------------------------------------------------------
 
 pub(crate) fn put_uvarint(dst: &mut Vec<u8>, mut v: u64) {
     while v >= 0x80 {
