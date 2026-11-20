@@ -10,6 +10,20 @@
   <img src="assets/screenshot-card.png" width="420" alt="Potflix showing a matched card for Dune: Part Two while PotPlayer plays" />
 </p>
 
+<p align="center">
+  <img src="https://img.shields.io/badge/platform-windows--64bit-2b3137?logo=windows&logoColor=white" alt="Platform" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT" /></a>
+</p>
+
+## Why Potflix
+
+PotPlayer has no built-in way to show what it is playing on Discord. Potflix reads the playing title, matches it against a provider and publishes a Rich Presence card with the artwork and details.
+
+- **Matched cards.** Poster, year, runtime or episode line appear when a provider finds the title.
+- **One fix for a bad match.** Fix match searches again and applies the chosen result to the playing title.
+- **Out of the way.** Closing the window parks the app in the tray; the gear opens Settings.
+- **Your own app id.** Point it at your Discord application when you want your own name and artwork.
+
 ## Install
 
 Download `Potflix-Setup-*.exe` from the [latest release](https://github.com/nathwn12/potflix/releases/latest) and run it. It installs for the current user with no admin prompt.
@@ -74,3 +88,5 @@ The first builds `dist\potflix.exe` from the Rust workspace with `--locked`. The
 - [Third-party notices](THIRD-PARTY-NOTICES.md)
 - [Upstream: PotPlayer-DiscordRPC by ayunami2000](https://github.com/ayunami2000/PotPlayer-DiscordRPC)
 - [MIT](LICENSE)
+
+Built by nathwn12
