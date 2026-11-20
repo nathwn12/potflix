@@ -89,4 +89,4 @@ The first builds `dist\potflix.exe` from the Rust workspace with `--locked`. The
 - [Upstream: PotPlayer-DiscordRPC by ayunami2000](https://github.com/ayunami2000/PotPlayer-DiscordRPC)
 - [MIT](LICENSE)
 
-Built by nathwn12
+<p align="center"><sub>Built by nathwn12</sub></p>
