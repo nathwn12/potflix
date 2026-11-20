@@ -7,12 +7,16 @@
 <p align="center"><strong>Show what PotPlayer is playing on your Discord profile, with matched artwork and episode details.</strong></p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/platform-windows--64bit-2b3137?logo=windows&logoColor=white" alt="Platform" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT" /></a>
+</p>
+
+<p align="center">
   <img src="assets/screenshot-card.png" width="420" alt="Potflix showing a matched card for Dune: Part Two while PotPlayer plays" />
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/platform-windows--64bit-2b3137?logo=windows&logoColor=white" alt="Platform" />
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT" /></a>
+  <img src="assets/screenshot-settings.png" width="300" alt="The Potflix settings window with providers and presence options." />
 </p>
 
 ## Why Potflix
