@@ -1,0 +1,13 @@
+---
+project: potflix
+one_line: Show what PotPlayer is playing on your Discord profile with matched artwork and episode details.
+stack: [Rust]
+status: draft
+since: 2026-10
+capabilities: []
+limits: []
+updated: 2026-11-22
+draft: true
+---
+
+PotPlayer has no built-in way to show what it is playing on Discord. Potflix reads the playing title, matches it against a provider and publishes a Rich Presence card with the artwork and details.
