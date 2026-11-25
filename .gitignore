@@ -15,8 +15,6 @@ AGENTS.md
 .opencode/
 opencode.json
 opencode.jsonc
-.seed/
-.opencode/skills/*-seed/
 
 # os
 Thumbs.db
