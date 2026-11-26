@@ -1,7 +1,8 @@
 name: automerge-docs
 # Docs-only, zero-code PRs from the owner or Dependabot merge themselves once
 # every other required check is green. A single file outside the allowlist
-# below blocks the merge; no PR code is ever executed by this workflow.
+# below leaves the check neutral (success) and the PR for a human; nothing merges.
+# No PR code is ever executed by this workflow.
 
 on:
   pull_request_target:
