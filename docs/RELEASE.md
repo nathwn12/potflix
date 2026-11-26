@@ -31,6 +31,6 @@ Checklist, in order. Each step names what it proves.
 14. Compare installed hash with `dist\potflix.exe`: `Get-FileHash` on the installed exe must equal the `dist\potflix.exe` hash.
     Proves the installed bytes are the built bytes.
 
-`ci.yml` (`.github/workflows/ci.yml`) triggers on `pull_request` and `workflow_dispatch` only, so a release commit pushed to `main` has no CI run by design; the release gate is step 4 (`check.ps1`), run on the exact tree that becomes the tag target.
+`ci.yml` (`.github/workflows/ci.yml`) triggers on `pull_request`, on `push` to `main`, and on `workflow_dispatch`, so a release commit pushed to `main` gets a CI run; the release gate is step 4 (`check.ps1`), run on the exact tree that becomes the tag target.
 
 `check.ps1`, `make-installer.ps1` and `make-icons.ps1` are build steps and stay; no release driver script exists on purpose.

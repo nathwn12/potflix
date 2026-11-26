@@ -1,8 +1,8 @@
 # Potflix title-cleaner parity contract: hashes only, never the corpus.
 # The corpora are gitignored because they carry real media filenames.
-# Regenerate the oracle from the frozen Go reference, from the repo root:
-#   (cd go; go build -o ..\build\parity\titleclean-go.exe ./cmd/titleclean)
-#   .\build\parity\titleclean-go.exe -corpus tools\titles-sample4.txt -out build\parity\golden-2604.tsv
-#   .\build\parity\titleclean-go.exe -corpus tools\titles-sample.txt  -out build\parity\golden-402.tsv
+# Regenerate the oracle from the Rust reference (see tools\check.ps1), from the repo root:
+#   (cd rust; cargo build --release --locked -p titleclean --bin titleclean)
+#   .\rust\target\release\titleclean.exe -corpus tools\titles-sample4.txt -out build\parity\golden-2604.tsv
+#   .\rust\target\release\titleclean.exe -corpus tools\titles-sample.txt  -out build\parity\golden-402.tsv
 149F6411FE740FBC3360B02814A01FB52C7111C7E823215EC07BAA9D7FE9C1B2  tools/titles-sample4.txt
 FD5C0EE747B25E17C6EF9E01F3B2E1F94AECB64FC2BB0425F956C744BFB924C2  tools/titles-sample.txt
