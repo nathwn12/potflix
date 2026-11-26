@@ -1,0 +1,142 @@
+name: lock-refresh
+
+# Regenerate JavaScript lockfiles when a manifest or lockfile changes on a
+# same-repository pull request, then push the refreshed lock back to the PR head.
+# Hard guards: never run install scripts, never resolve Cargo.lock, never write
+# on fork PRs or dependabot PRs, never push to the default branch, never force.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**/package.json'
+      - '**/bun.lock'
+      - '**/bun.lockb'
+      - '**/pnpm-lock.yaml'
+      - '**/package-lock.json'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lock-refresh-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  refresh-lockfiles:
+    # Same-repo PRs only; dependabot never gets a write token. Manual dispatch
+    # stays available, but the default-branch guard in the job still applies.
+    if: >-
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+      && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Resolve branch and detect lockfiles
+        id: lockinfo
+        shell: bash
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          ref="$HEAD_REF"
+          default="$DEFAULT_BRANCH"
+          if [ -z "$ref" ] || [ "$ref" = "$default" ]; then
+            echo "lock-refresh: refusing to write to the default branch ('$ref')" >&2
+            echo "safe=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "safe=true" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$ref" >> "$GITHUB_OUTPUT"
+          if [ -n "$(find . -type f \( -name bun.lock -o -name bun.lockb \) -not -path '*/node_modules/*' -print -quit)" ]; then echo "bun=true" >> "$GITHUB_OUTPUT"; else echo "bun=false" >> "$GITHUB_OUTPUT"; fi
+          if [ -n "$(find . -type f -name pnpm-lock.yaml -not -path '*/node_modules/*' -print -quit)" ]; then echo "pnpm=true" >> "$GITHUB_OUTPUT"; else echo "pnpm=false" >> "$GITHUB_OUTPUT"; fi
+          if [ -n "$(find . -type f -name package-lock.json -not -path '*/node_modules/*' -print -quit)" ]; then echo "npm=true" >> "$GITHUB_OUTPUT"; else echo "npm=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Attach to PR head branch
+        if: steps.lockinfo.outputs.safe == 'true'
+        shell: bash
+        env:
+          HEAD_REF: ${{ steps.lockinfo.outputs.head_ref }}
+        run: |
+          set -euo pipefail
+          git checkout -B "$HEAD_REF"
+
+      - name: Set up Bun
+        if: steps.lockinfo.outputs.safe == 'true' && steps.lockinfo.outputs.bun == 'true'
+        uses: oven-sh/setup-bun@v2
+
+      - name: Set up Node
+        if: steps.lockinfo.outputs.safe == 'true' && (steps.lockinfo.outputs.pnpm == 'true' || steps.lockinfo.outputs.npm == 'true')
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up pnpm
+        if: steps.lockinfo.outputs.safe == 'true' && steps.lockinfo.outputs.pnpm == 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Refresh lockfiles (no install scripts)
+        if: steps.lockinfo.outputs.safe == 'true'
+        shell: bash
+        env:
+          HAS_BUN: ${{ steps.lockinfo.outputs.bun }}
+          HAS_PNPM: ${{ steps.lockinfo.outputs.pnpm }}
+          HAS_NPM: ${{ steps.lockinfo.outputs.npm }}
+        run: |
+          set -euo pipefail
+          if [ "$HAS_BUN" = 'true' ]; then
+            while IFS= read -r lock; do
+              dir="$(dirname "$lock")"
+              echo "lock-refresh: bun install --ignore-scripts in $dir"
+              ( cd "$dir" && bun install --ignore-scripts )
+            done < <(find . -type f \( -name bun.lock -o -name bun.lockb \) -not -path '*/node_modules/*' -print)
+          fi
+          if [ "$HAS_PNPM" = 'true' ]; then
+            while IFS= read -r lock; do
+              dir="$(dirname "$lock")"
+              echo "lock-refresh: pnpm install --lockfile-only --ignore-scripts in $dir"
+              ( cd "$dir" && pnpm install --lockfile-only --ignore-scripts )
+            done < <(find . -type f -name pnpm-lock.yaml -not -path '*/node_modules/*' -print)
+          fi
+          if [ "$HAS_NPM" = 'true' ] && [ "$HAS_BUN" != 'true' ]; then
+            while IFS= read -r lock; do
+              dir="$(dirname "$lock")"
+              echo "lock-refresh: npm install --package-lock-only --ignore-scripts in $dir"
+              ( cd "$dir" && npm install --package-lock-only --ignore-scripts )
+            done < <(find . -type f -name package-lock.json -not -path '*/node_modules/*' -print)
+          fi
+          echo "lock-refresh: Cargo.lock is never auto-resolved (manual only)"
+
+      - name: Commit and push refreshed lockfiles
+        if: steps.lockinfo.outputs.safe == 'true'
+        shell: bash
+        env:
+          HEAD_REF: ${{ steps.lockinfo.outputs.head_ref }}
+        run: |
+          set -euo pipefail
+          # Stage only JavaScript lockfiles. Cargo.lock is deliberately excluded.
+          mapfile -d '' locks < <(find . -type f \( -name bun.lock -o -name bun.lockb -o -name pnpm-lock.yaml -o -name package-lock.json \) -not -path '*/node_modules/*' -print0)
+          if [ "${#locks[@]}" -gt 0 ]; then
+            git add -A -- "${locks[@]}"
+          fi
+          if git diff --cached --quiet; then
+            echo "lock-refresh: lockfiles already current; nothing to commit"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'chore(lock): refresh lockfiles'
+          git push origin "HEAD:refs/heads/$HEAD_REF"
