@@ -1,0 +1,59 @@
+name: automerge-docs
+# Docs-only, zero-code PRs from the owner or Dependabot merge themselves once
+# every other required check is green. A single file outside the allowlist
+# below blocks the merge; no PR code is ever executed by this workflow.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  docs-only:
+    runs-on: ubuntu-latest
+    if: github.actor == 'nathwn12' || github.actor == 'dependabot[bot]'
+    steps:
+      - name: Check out the pull request head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
+
+      - name: Approve and enable auto-merge for docs-only changes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          ACTOR: ${{ github.actor }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          git fetch --no-tags origin "$BASE"
+          changed=$(git diff --name-only "origin/$BASE...HEAD")
+          docs='^(.*\.md|docs/.*|LICEN[CS]E(\.md)?|THIRD-PARTY-NOTICES.*|\.gitignore|\.gitattributes|.*\.example\.jsonc)$'
+          if [ -z "$changed" ] || printf '%s\n' "$changed" | grep -qvE "$docs"; then
+            echo "Not a docs-only PR - leaving it open."
+            printf 'changed files:\n%s\n' "$changed"
+            exit 0
+          fi
+          state=$(gh pr view "$PR" --json mergeable --jq .mergeable)
+          if [ "$state" != "MERGEABLE" ]; then
+            echo "Merge state is $state - leaving it open."
+            exit 0
+          fi
+          total=$(gh pr view "$PR" --json statusCheckRollup --jq '.statusCheckRollup | length' 2>/dev/null || echo 0)
+          notgreen=$(gh pr view "$PR" --json statusCheckRollup --jq '[.statusCheckRollup[]? | select((.name // .context) != "automerge-docs") | select((((.conclusion // .state) // "") | ascii_upcase) as $s | ($s != "SUCCESS" and $s != "SKIPPED" and $s != "NEUTRAL"))] | length' 2>/dev/null || echo 1)
+          if [ "$total" -le 1 ] || [ "$notgreen" != "0" ]; then
+            echo "Required checks not green ($notgreen outstanding of $total) - leaving it open."
+            exit 0
+          fi
+          if [ "$ACTOR" != "$AUTHOR" ]; then
+            gh pr review "$PR" --approve || echo "approve unavailable - continuing"
+          else
+            echo "self-authored PR - no self-approval"
+          fi
+          gh pr merge "$PR" --auto --squash
