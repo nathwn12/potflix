@@ -325,30 +325,30 @@ fn push_activity(
     ) {
         res = latched;
         found = true;
-    } else if let Some(resolver) = META_RESOLVER.get() {
-        if query.kind != metadata::Kind::UNKNOWN {
-            let cancel = metadata_http::Cancel::background();
-            if let Ok(answer) = resolver.resolve(&cancel, &query)
-                && answer.found
-            {
-                res = presence::Resolved {
-                    series: answer.series,
-                    episode_name: answer.episode,
-                    artwork: answer.artwork,
-                    synopsis: answer.synopsis,
-                    synopsis_is_work: true,
-                    genres: answer.genres,
-                    length: answer.length,
-                    year: answer.year,
-                    is_movie: answer.is_movie,
-                    season: answer.season,
-                    number: answer.number,
-                    absolute: if query.absolute { query.episode } else { 0 },
-                    buttons: Vec::new(),
-                    unknown: false,
-                };
-                found = true;
-            }
+    } else if let Some(resolver) = META_RESOLVER.get()
+        && query.kind != metadata::Kind::UNKNOWN
+    {
+        let cancel = metadata_http::Cancel::background();
+        if let Ok(answer) = resolver.resolve(&cancel, &query)
+            && answer.found
+        {
+            res = presence::Resolved {
+                series: answer.series,
+                episode_name: answer.episode,
+                artwork: answer.artwork,
+                synopsis: answer.synopsis,
+                synopsis_is_work: true,
+                genres: answer.genres,
+                length: answer.length,
+                year: answer.year,
+                is_movie: answer.is_movie,
+                season: answer.season,
+                number: answer.number,
+                absolute: if query.absolute { query.episode } else { 0 },
+                buttons: Vec::new(),
+                unknown: false,
+            };
+            found = true;
         }
     }
     if !found && query.kind == metadata::Kind::UNKNOWN {
