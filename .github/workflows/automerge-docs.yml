@@ -9,6 +9,8 @@ name: automerge-docs
 # The merge is armed, not forced: `gh pr merge --auto --squash` hands the PR to
 # GitHub's native auto-merge, which still waits for every required check and
 # every required review before it squashes. A red gate never lands here.
+# A job-level trusted-actor gate allows only the owner (nathwn12) or Dependabot
+# to arm auto-merge; no other account can trigger it.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, labeled, ready_for_review]
@@ -24,6 +26,7 @@ concurrency:
 jobs:
   automerge:
     runs-on: ubuntu-latest
+    if: github.actor == 'nathwn12' || github.actor == 'dependabot[bot]'
     steps:
       - name: Re-derive the changed files from the API
         id: changed
