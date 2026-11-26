@@ -1,6 +1,6 @@
 # nathwn12 house CI — stack: rust.
-# Triggers on `pull_request` + `workflow_dispatch` (see `on:` below). The cargo
-# steps mirror the local gate `tools\check.ps1` (clippy + release tests,
+# Triggers on `pull_request`, `push` to main, and `workflow_dispatch` (see `on:` below).
+# The cargo steps mirror the local gate `tools\check.ps1` (clippy + release tests,
 # `working-directory: rust` because the workspace manifest lives in `rust/`).
 # Parity is deliberately absent: its corpora are gitignored, so the parity
 # step fails closed in a fresh clone and runs only in the local gate.
@@ -8,6 +8,8 @@
 name: ci
 on:
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 jobs:
   build:
